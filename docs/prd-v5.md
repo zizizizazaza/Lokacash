@@ -196,130 +196,62 @@ Socket.IO 事件：
 
 ## 3. Super Agent
 
-### 3.1 核心定位
+### 3.1 机制
 
-Super Agent 是 Loka 的**第一卖点**。它要解决的根本问题是：**让普通人用自然语言就能完成原本需要专业技能的分析和研究工作。**
-
-用户只需要输入一句话：
-- "帮我分析一下英伟达最近的走势"
-- "Polymarket 上有哪些预测市场值得关注？"
-- "帮我调研一下东南亚外卖市场的竞争格局"
-- "把上次的调研报告整理一下，列出三个行动项"
-
-Super Agent 会根据意图调动多个专业 Agent 并行工作，交付结构化结果。
-
-### 3.2 Multi-Agent 共识协作
-
-Super Agent 的核心不是简单地将任务拆分给多个 Agent 并行处理，而是采用**多轮共识机制**：多个 Agent 围绕同一个问题进行多轮讨论，逐步交换观点、挑战彼此的判断，最终达成共识后才输出结论。
-
-**工作流程：**
+Super Agent 会根据意图调动多个专业 Agent 并行工作，交付结构化结果。即：
 
 ```
-用户输入意图
-    ↓
-[Orchestrator] 根据意图选择相关 Agent 组合
-    ↓
-[Phase 1: Generating Answers] 各 Agent 独立分析
-    ├─ Risk Assessor 分析风险
-    ├─ Market Analyst 评估市场数据
-    ├─ Web Search Agent 搜索最新资讯
-    └─ Trading Strategist 制定策略
-    ↓
-[Phase 2: Peer Evaluation] Agent 交叉验证与质疑
-    ├─ 假设的交叉验证
-    ├─ 观点冲突辩论
-    └─ 证据整合
-    ↓
-[Phase 3: Reaching Consensus] 达成共识
-    ├─ 研判结论: bullish / bearish / neutral
-    ├─ 置信度: 0-100%
-    └─ 综合推理过程
-    ↓
-结构化报告（SSE 实时流式输出）
+用户输入任务 -> SuperAgent 判断需要调用的能力 -> 调用相应 Agent 能力 -> 组合答案，输出结果
 ```
 
-**为什么用共识而非并行拆分：** 单个 Agent 容易产生偏见或遗漏。多 Agent 共识类似于专家圆桌讨论——分析师、风控、调研员各持视角，互相纠偏，最终结论比任何单一 Agent 更准确可靠。
+### 3.2 Agent 路由
 
-### 3.3 Agent 角色分类
+| 类型 | 任务 | 调用类型 | 输出 |
+|---|---|---|---|
+| **通用类** | 简单通用对话，例如"hi" | 单 Agent 的通用能力 | 通用回复 |
+| **搜索类** | 搜索市场情绪，例如"了解市场对某个股票的看法" | Signal Radar | |
+| | 搜索资产概况信息，例如"某只股票今天情况" | Daily Agent | |
+| **分析类** | 深度分析某个资产背景信息、项目情况 | 投资分析 Agent | |
+| | 某个资产投资建议 | 投资分析 Agent | |
+| **模拟预测类** | 模拟巴菲特投资、给出投资建议 | AI Hedge Fund | |
+| | 模拟预测市场 | | |
+| **交易类（待定）** | 交易股票、crypto、polymarket 资产 | | |
 
-平台预置 18+ 专业 Agent，按职能分为 6 大类：
+### 3.3 协作模式
 
-| 类别 | Agent | 核心能力 |
+- **Auto:** 自动路由，选择适合的模式
+- **Fast:** 常规路由调用对应 Agent 能力
+- **Roundtable:** 在调用 Agent 能力后，还要进行多 Agent 共识
+
+### 3.4 资产类别
+
+- 股票类
+- Crypto 资产
+- Polymarket
+
+### 3.5 输出
+
+#### a. 思考流
+
+思考流为一个通用的模版，根据调用的 Agent 类型展示对应的模块，未调用就不显示。
+
+**思考流 = 【搜索】+【分析】+【模拟】+【共识】+【完成】**
+
+| 类型 | 调用 Agent | 思考流 |
 |---|---|---|
-| **风险管理** | Risk Assessor | 信用评分模型、借款方风险画像 |
-| | Portfolio Risk Monitor | 集中度风险、清算阈值、VaR 计算 |
-| | Fraud Detector | ML 驱动的异常检测 |
-| **投资分析** | Revenue Optimizer | 最优收益策略识别 |
-| | Market Analyst | 资产价格预测、情绪分析、趋势判断 |
-| | Fundamental Analyst | 深度财务分析、团队评估、单位经济模型 |
-| | Arbitrage Scanner | 跨链/跨 DEX 套利机会扫描 |
-| **运营管理** | Treasury Manager | 资金再平衡、现金流预测 |
-| | Milestone Tracker | 项目里程碑追踪、交付物验证 |
-| | Report Generator | 周报/月报自动生成 |
-| **合规法务** | KYC/AML Verifier | 身份核验 |
-| | Regulatory Monitor | 跨司法管辖区监管变动追踪 |
-| | Legal Document Auditor | 合同条款监控 |
-| **资金与银行** | Cash Flow Monitor | 流动性、汇率风险、头寸健康度 |
-| | Cost Optimizer | 交易时机优化、网络成本优化 |
-| | Payment Gateway Monitor | 跨境支付网关监控 |
-| **社交与社区** | Sentiment Analyzer | 社交媒体情绪分析 |
-| | Governance Assistant | 提案摘要、投票追踪 |
+| **通用类** | | 不显示 |
+| **搜索类** | Signal Radar | 【搜索】模块：显示搜索社媒平台 |
+| | Daily Agent | 【搜索】模块：显示数据获取，从各个平台或服务商获取数据 |
+| **分析类** | 投资分析 Agent | 【分析】模块显示：<br>1. 基本面分析<br>2. 技术分析<br>3. 舆情分析<br>4. 决策 |
+| **模拟预测类** | AI Hedge Fund | 【模拟】模块：<br>构建模拟小组 → 各个模拟的 Agent 运行 → 输出预测结果 |
+| **多 Agent 共识模式** | | 【共识】模块：<br>1. 构建共识小组<br>2. 进行讨论、直到达成共识<br>3. 共识结论 |
 
-### 3.4 输出规范
+#### b. 输出结果
 
-Agent Council 完成工作后，输出**结构化报告**（非聊天式散文）：
-
-| 报告组成 | 内容 |
+| 类型 | 输出结果 |
 |---|---|
-| **执行摘要** | 核心结论（bullish/bearish/neutral）+ 置信度百分比 |
-| **关键数据** | 量化指标、财务数据、市场数据（带数据源引用） |
-| **分析过程** | 各 Agent 的独立观点 + 交叉验证结论 |
-| **趋势图表** | 价格走势、收入趋势、市场份额等（如适用） |
-| **风险评估** | 已识别风险 + 风险等级 + 缓释建议 |
-| **行动建议** | 分优先级的操作建议 |
-
-**报告出口：**
-- PDF 导出（带 Loka 品牌水印）
-- 一键分享到 Community 群聊讨论
-- 报告历史存档于 Portfolio 页面
-
-### 3.5 用户交互体验
-
-| 功能 | 说明 |
-|---|---|
-| **知识图谱可视化** | D3.js 力导向图，实时展示 Agent 协作网络。节点 = Agent / 任务 / 立场，边 = 参与关系。支持缩放拖拽 |
-| **Agent 步骤面板** | 可折叠卡片展示每个 Agent 的工作状态（pending → analyzing → completed）、研判结论（bullish/bearish/neutral）、分步骤进度（✅ 完成 / 🔄 进行中 / ⭘ 排队） |
-| **协作进度条** | 三阶段进度：Generating Answers → Peer Evaluation → Reaching Consensus |
-| **最终共识面板** | 总结论 + 置信度 + 用时 + 各 Agent 投票瀑布展示 |
-| **资产上下文** | 从 Market 页 @ 选中资产后，AI 围绕该资产专注回答 |
-| **对话建议** | 输入框动态提示语循环展示常用场景（"Invest $5,000 in ComputeDAO..." "Compare yields across all active pools..."） |
-| **语音输入** | Web Speech API（Chrome/Edge）+ Whisper API 回退（iOS/Safari），支持声控连续对话 |
-
-### 3.6 能力场景
-
-| 场景 | 示例 |
-|---|---|
-| **投资分析**（重点） | 股票财报解读、预测市场赔率评估、ETF 风险收益比、初创项目尽调 |
-| **市场调研** | 行业竞争格局、市场规模分析、趋势研判 |
-| **竞品研究** | 多产品功能对比、定价策略分析、用户口碑汇总 |
-| **项目评估** | 团队背景调查、商业模式分析、技术可行性概览 |
-| **任务协作** | 拆解待办、追踪进度、生成会议纪要摘要 |
-
-### 3.7 功能需求明细
-
-| 需求 ID | 功能 | 优先级 | 当前状态 | 说明 |
-|---|---|---|---|---|
-| SA-01 | 自然语言聊天 | P0 | ✅ 已实现 | deepseek-v3 SSE 流式，动态 System Prompt |
-| SA-02 | 聊天历史 | P0 | ✅ 已实现 | sessionId 会话分组，CRUD |
-| SA-03 | Agent Council 多Agent共识 | P0 | ✅ 已实现 | 3 阶段共识流程（生成→互评→共识） |
-| SA-04 | 知识图谱可视化 | P1 | ✅ 已实现 | D3 力导向图 |
-| SA-05 | Agent 步骤面板 | P1 | ✅ 已实现 | 可折叠、带状态徽标 |
-| SA-06 | 语音输入/输出 | P1 | ✅ 已实现 | ASR + TTS + Voice Mode |
-| SA-07 | @ 资产上下文 | P1 | ✅ 已实现 | Market 页选中资产后 AI 聚焦 |
-| SA-08 | PDF 报告导出 | P2 | ❌ 待开发 | 含品牌水印、分享链接 |
-| SA-09 | 报告分享到群聊 | P2 | ❌ 待开发 | 一键发送到 Community 群组 |
-| SA-10 | Agent 跨会话记忆 | P2 | ❌ 待开发 | Agent 记住历史分析上下文 |
-| SA-11 | 自定义 Agent 创建 | P3 | ❌ 待规划 | 用户自建 Agent + Agent Marketplace |
+| **通用类** | 常规文本，可复制 |
+| **其他类** | 报告文本（Markdown 格式），可下载为 PDF，可查看目录 |
 
 ---
 

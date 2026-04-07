@@ -144,6 +144,99 @@ export const USE_CASES = [
   { id: 'predict', title: 'Polymarket Opportunities Now', desc: 'Which prediction markets have the best risk-reward right now?', prompt: 'Which prediction markets on Polymarket are worth paying attention to right now?', tags: ['Odds', 'Sentiment'] },
 ];
 
+export const FEATURED_AGENTS = [
+  {
+    id: 'invest',
+    name: 'Investment Analysis',
+    desc: 'Multi-dimensional analysis — fundamentals, technicals, and sentiment.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <path d="M3 17l4-4 4 4 4-6 4 2" /><path d="M21 21H3" />
+      </svg>
+    ),
+    prompt: 'Help me analyze NVIDIA\'s recent stock performance and whether it\'s worth investing now',
+    route: null as string | null,
+  },
+  {
+    id: 'signal-reader',
+    name: 'Signal Radar',
+    desc: 'Real-time signals, news monitoring, and cross-platform sentiment.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <circle cx="12" cy="12" r="2" /><path d="M16.24 7.76a6 6 0 010 8.49M7.76 16.24a6 6 0 010-8.49" /><path d="M19.07 4.93a10 10 0 010 14.14M4.93 19.07a10 10 0 010-14.14" />
+      </svg>
+    ),
+    prompt: null as string | null,
+    route: null as string | null,
+    agentId: 'research',
+  },
+  {
+    id: 'forecast',
+    name: 'Forecast',
+    desc: 'Scenario simulations and price range prediction with macro stress testing.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
+      </svg>
+    ),
+    prompt: 'Simulate: What if Fed cuts rates by 50bps in Q3? Model the impact on tech stocks.',
+    route: null as string | null,
+  },
+  {
+    id: 'ai-trader',
+    name: 'AI Trader',
+    desc: 'Multi-agent swarm delivers structured trading recommendations with risk assessment.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <path d="M8 5v2" /><rect x="6" y="7" width="4" height="7" rx="0.5" /><path d="M8 14v2" />
+        <path d="M16 3v3" /><rect x="14" y="6" width="4" height="9" rx="0.5" fill="currentColor" stroke="none" /><path d="M16 15v3" />
+      </svg>
+    ),
+    prompt: 'Use multi-agent swarm intelligence to analyze current market conditions and provide structured trading recommendations with risk assessment.',
+    route: null as string | null,
+  },
+  {
+    id: 'guru-council',
+    name: 'Guru Council',
+    desc: "Get Buffett, Lynch, and Dalio's perspective on any stock.",
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <circle cx="9" cy="7" r="3.5" />
+        <path d="M3 21v-1.5a4.5 4.5 0 014.5-4.5h3a4.5 4.5 0 014.5 4.5V21" />
+        <path d="M16 3.5a3.5 3.5 0 010 7" />
+        <path d="M21 21v-1.5a4.5 4.5 0 00-3-4.24" />
+      </svg>
+    ),
+    prompt: 'Analyze NVIDIA from the perspectives of Warren Buffett, Peter Lynch, and Ray Dalio. What would each of them say?',
+    route: null as string | null,
+  },
+  {
+    id: 'daily-news',
+    name: 'Daily News',
+    desc: 'Daily A/H/US stock briefing with LLM-powered analysis and key movers.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <path d="M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8a2 2 0 00-2 2v16a2 2 0 01-2 2zm0 0a2 2 0 01-2-2V9" /><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z" />
+      </svg>
+    ),
+    prompt: "Give me today's key market news and analysis for A-share, Hong Kong, and US stocks. Highlight the most important movements.",
+    route: null as string | null,
+  },
+  {
+    id: 'project-scout',
+    name: 'Project Scout',
+    desc: 'Deep-dive due diligence on any company, startup, or project.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+      </svg>
+    ),
+    prompt: null as string | null,
+    route: null as string | null,
+    agentId: 'scout',
+  },
+];
+
 export const RECENTS = [
   'ETH Risk Assessment',
   'BTC Q2 Outlook',

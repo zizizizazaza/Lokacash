@@ -42,7 +42,7 @@ const App: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const page = (Object.keys(PAGE_PATHS).find(k => location.pathname === PAGE_PATHS[k] || (PAGE_PATHS[k] !== '/' && location.pathname.startsWith(PAGE_PATHS[k] + '/'))) as Page) || Page.SUPER_AGENT;
-  const go = (p: Page) => navigate(PAGE_PATHS[p] || '/');
+  const go = (p: Page) => navigate(PAGE_PATHS[p] || '/', p === Page.SUPER_AGENT ? { state: { newChat: Date.now() } } : undefined);
   const [expanded, setExpanded] = useState(true);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [isDark, setIsDark] = useState(false);

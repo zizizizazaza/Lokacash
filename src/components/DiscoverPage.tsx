@@ -9,7 +9,7 @@ const DiscoverPage: React.FC = () => {
   const [loadingGroups, setLoadingGroups] = useState(false);
   const [users, setUsers] = useState<any[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
-  const [activeTab, setActiveTab] = useState<'Agents' | 'Groups' | 'People'>('Agents');
+  const [activeTab, setActiveTab] = useState<'Groups' | 'People'>('Groups');
   const [agentCat, setAgentCat] = useState('All');
   const [selectedGroup, setSelectedGroup] = useState<any | null>(null);
   const [joinedGroups, setJoinedGroups] = useState<Set<string>>(new Set());
@@ -88,7 +88,7 @@ const DiscoverPage: React.FC = () => {
   const PEOPLE_CATS = ['All', 'Investor', 'Founder', 'Contributor', 'Member'] as const;
   const filteredPeople = peopleCat === 'All' ? PEOPLE : PEOPLE.filter((p: any) => p.role === peopleCat);
 
-  const tabs = ['Agents', 'Groups', 'People'] as const;
+  const tabs = ['Groups', 'People'] as const;
   const filteredAgents = agentCat === 'All' ? DISCOVER_AGENTS : DISCOVER_AGENTS.filter((a: any) => a.category === agentCat);
 
   const handleJoin = async (group: any, e?: React.MouseEvent) => {
@@ -361,61 +361,6 @@ const DiscoverPage: React.FC = () => {
                 ))}
               </div>
             )}
-          </div>
-        )}
-
-        {/* ── Agents Tab ── */}
-        {activeTab === 'Agents' && (
-          <div>
-            <div className="flex items-center justify-between mb-5">
-              <div className="flex items-center gap-2 flex-wrap">
-                {AGENT_CATEGORIES.map((c: string) => (
-                  <button key={c}
-                    onClick={() => setAgentCat(c)}
-                    className={`px-3 py-1.5 rounded-full text-[12px] font-medium transition-all ${agentCat === c ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                      }`}>{c}</button>
-                ))}
-              </div>
-              <button
-                onClick={() => setShowCreateAgent(true)}
-                className="flex items-center gap-1.5 text-[12px] font-semibold text-white bg-gray-900 hover:bg-gray-700 px-3.5 py-1.5 rounded-xl transition-all active:scale-95 shrink-0 ml-3">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
-                Create Agent
-              </button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {filteredAgents.map((a: any) => {
-                const gradMap: Record<string, string> = {
-                  'bg-blue-500': 'from-blue-500 to-indigo-500',
-                  'bg-red-500': 'from-red-500 to-rose-500',
-                  'bg-emerald-500': 'from-emerald-500 to-teal-500',
-                  'bg-amber-500': 'from-amber-400 to-orange-400',
-                  'bg-violet-500': 'from-violet-500 to-purple-500',
-                  'bg-cyan-500': 'from-cyan-500 to-sky-500',
-                  'bg-indigo-500': 'from-indigo-500 to-blue-600',
-                  'bg-pink-500': 'from-pink-500 to-rose-500',
-                };
-                const grad = gradMap[a.color] ?? 'from-gray-400 to-gray-500';
-                return (
-                  <div key={a.id} className="bg-white border border-gray-100 rounded-xl p-4 hover:shadow-md hover:border-gray-200 transition-all cursor-pointer group">
-                    <div className="flex items-start gap-3 mb-3">
-                      <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${grad} flex items-center justify-center text-[13px] font-black text-white shadow-sm shrink-0`}>
-                        {a.letter}
-                      </div>
-                      <div className="min-w-0 pt-0.5">
-                        <p className="text-[13px] font-semibold text-gray-900 leading-tight">{a.name}</p>
-                        <p className="text-[10px] text-gray-400 font-medium mt-0.5">{a.category}</p>
-                      </div>
-                    </div>
-                    <p className="text-[11px] text-gray-400 leading-relaxed line-clamp-2 mb-3">{a.desc}</p>
-                    <button className="flex items-center gap-1.5 text-[11px] font-semibold text-gray-700 hover:text-gray-900 transition-colors group-hover:underline underline-offset-2">
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-                      Start a chat
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
           </div>
         )}
 
