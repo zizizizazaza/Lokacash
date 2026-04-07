@@ -53,8 +53,8 @@ router.post('/verify-step', authRequired, async (req: AuthRequest, res, next) =>
     for (const key of optionalKeys) {
       if (data[key] !== undefined) updateFields[key] = data[key];
     }
-    // Auto-verify at step 3 (MVP: skip real KYB)
-    if (data.step >= 3) updateFields.status = 'verified';
+    // Auto-verify at step 2 (MVP: 2-step wizard — Company Info + Stripe)
+    if (data.step >= 2) updateFields.status = 'verified';
 
     // Find existing or create
     let verification = await prisma.enterpriseVerification.findFirst({

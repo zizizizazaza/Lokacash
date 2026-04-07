@@ -246,24 +246,35 @@ export class LokaAIService {
   }
 
   /**
-   * Intelligently routes queries based on complexity.
-   * Returns 'fast' for simple facts/chatter, and 'collaborate' for complex analytical requests.
+   * Intelligently routes queries based on complexity and intent.
+   * Extracts stock tickers if the user asks for stock or hedge fund analysis.
    */
-  async evaluateRouting(query: string): Promise<'fast' | 'collaborate'> {
+  async evaluateRouting(query: string): Promise<{ mode: 'fast' | 'collaborate' | 'stockanalysis' | 'hedgefund', tickers?: string[] }> {
     if (!this.isConfigured) {
-      return 'fast'; // Fallback to fast if no API key
+      return { mode: 'fast' };
     }
 
-    const routerPrompt = `You are a strict query routing engine for the Loka AI financial assistant.
-Analyze the following user query and output ONLY ONE WORD: either "fast" or "collaborate".
+    const routerPrompt = `You are a query routing engine for a financial AI assistant.
+Evaluate the user's query and output a JSON array of parameters. Do not output markdown code blocks. ONLY output raw JSON.
 
-RULES:
-- Return "fast" IF: The query is a greeting, small talk, simple definition (e.g. "What is Bitcoin?"), translation, basic math, or asking for platform help.
-- Return "collaborate" IF: The query requires complex reasoning, market analysis, reviewing financial health, predicting trends, cross-verifying arguments, or giving specific speculative investment advice.
+JSON SCHEMA:
+{
+  "mode": "fast" | "collaborate" | "stockanalysis" | "hedgefund", // See routing rules
+  "tickers": ["SYMBOL1", "SYMBOL2"] // (Optional) exact stock market symbols/short names
+}
 
-Query: "${query}"
+ROUTING RULES:
+1. "stockanalysis": If the user explicitly asks for stock data, price history, technical analysis or fundamental metrics for specific stocks (e.g. "分析一下腾讯", "AAPL today"). You MUST extract the tickers/names mentioned into the 'tickers' array.
+2. "hedgefund": If the user explicitly asks to run an AI Hedge Fund analysis, deep institutional analysis, or speculative trading strategy for specific stocks.
+3. "collaborate": If the query needs multi-agent reasoning, deep generic financial research, economic trend forecasting, or if they ask about markets but WITHOUT specific stocks.
+4. "fast": If it's a greeting, casual chat, platform help, translation, or basic math.
 
-Return exactly one word, lowercase.`;
+Examples:
+Query: "帮我分析腾讯和阿里的股票" -> {"mode":"stockanalysis","tickers":["腾讯","阿里"]}
+Query: "用对冲基金模型看看 NVDA" -> {"mode":"hedgefund","tickers":["NVDA"]}
+Query: "现在的降息预期对加密货币有什么影响？" -> {"mode":"collaborate"}
+
+Query: "${query}"`;
 
     try {
       const response = await fetch(this.baseUrl, {
@@ -275,22 +286,44 @@ Return exactly one word, lowercase.`;
         body: JSON.stringify({
           model: this.model,
           messages: [{ role: 'user', content: routerPrompt }],
-          max_tokens: 10,
+          max_tokens: 150,
           temperature: 0,
+          response_format: { type: "json_object" }
         }),
       });
 
       if (response.ok) {
         const data = await response.json() as any;
-        const result = (data.choices?.[0]?.message?.content || '').trim().toLowerCase();
-        if (result === 'collaborate' || result.includes('collaborate')) {
-          return 'collaborate';
+        const resultText = (data.choices?.[0]?.message?.content || '{}').trim();
+        let parsed;
+        try {
+           parsed = JSON.parse(resultText);
+        } catch(e) {
+           // fallback parsing if the model wrapped it in codeblocks
+           const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+           if (jsonMatch) {
+             parsed = JSON.parse(jsonMatch[0]);
+           } else {
+             throw e;
+           }
         }
+        
+        let validMode: any = 'fast';
+        if (['fast', 'collaborate', 'stockanalysis', 'hedgefund'].includes(parsed.mode)) {
+          validMode = parsed.mode;
+        } else if (parsed.mode?.includes('collaborate')) {
+          validMode = 'collaborate';
+        }
+        
+        return {
+          mode: validMode,
+          tickers: Array.isArray(parsed.tickers) && parsed.tickers.length > 0 ? parsed.tickers : undefined
+        };
       }
     } catch (err) {
       console.warn('evaluateRouting failed, fallback to fast:', err);
     }
     
-    return 'fast'; // Default
+    return { mode: 'fast' };
   }
 }

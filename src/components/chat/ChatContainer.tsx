@@ -245,6 +245,19 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
           return updated;
         });
       },
+      onStep: (data) => {
+        // Structured step events (stock analysis): accumulate into appSteps
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (!last || last.role !== 'assistant') {
+            updated.push({ role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true, appSteps: [data], isAppRunning: true, appType: app || undefined });
+          } else {
+            updated[updated.length - 1] = { ...last, appSteps: [...(last.appSteps || []), data] };
+          }
+          return updated;
+        });
+      },
       onDone: (data) => {
         const report = data.report || data.summary || '';
         const mode = currentModeRef.current;
@@ -367,6 +380,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
         }
         // Check if backend is still processing
         if (data.length > 0 && data[data.length - 1].role === 'user') {
+          // Check generic chat first
           socket.emit('agent:chat:check', { sessionId: restoreSessionId }, (res: { isRunning: boolean; mode?: string }) => {
             if (res.isRunning) {
               setIsStreaming(true);
@@ -374,6 +388,27 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
               window.dispatchEvent(new CustomEvent('session-started', { detail: { id: restoreSessionId, title: data[0].content.slice(0, 60), agentId: 'superagent' } }));
             }
           });
+          // Check stock analysis session (reconnection replay)
+          if (activeApp === 'stockanalysis') {
+            socket.emit('agent:stockanalysis:check', { sessionId: restoreSessionId }, (res: { isRunning: boolean; steps?: any[]; report?: string }) => {
+              if (res.isRunning || (res.steps && res.steps.length > 0)) {
+                setIsStreaming(!!res.isRunning);
+                setMessages(prev => [
+                  ...prev,
+                  {
+                    role: 'assistant',
+                    content: res.report || '',
+                    timestamp: new Date().toLocaleTimeString(),
+                    isStreaming: !!res.isRunning,
+                    appSteps: res.steps || [],
+                    isAppRunning: !!res.isRunning,
+                    appType: 'stockanalysis',
+                  },
+                ]);
+                window.dispatchEvent(new CustomEvent('session-started', { detail: { id: restoreSessionId, title: data[0].content.slice(0, 60), agentId: 'stockanalysis' } }));
+              }
+            });
+          }
         }
       } catch (err) {
         console.error('Failed to load chat history', err);
@@ -519,9 +554,10 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
                         )}
 
                         {/* App progress logs (HedgeFund, StockAnalysis, etc.) */}
-                        {(msg.isAppRunning || (msg.appLogs && msg.appLogs.length > 0)) && (
+                        {(msg.isAppRunning || (msg.appLogs && msg.appLogs.length > 0) || (msg.appSteps && msg.appSteps.length > 0)) && (
                           <AppProgressLogs
                             logs={msg.appLogs || []}
+                            steps={msg.appSteps}
                             isRunning={!!msg.isAppRunning}
                             accentColor={adapter?.accentColor || 'blue'}
                             runningLabel={adapter?.runningLabel}

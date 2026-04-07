@@ -20,6 +20,7 @@ import { socket } from '../services/socket';
 interface SocketHandlers {
   onStarted?: (data: any) => void;
   onProgress?: (data: any) => void;
+  onStep?: (data: any) => void;
   onDone?: (data: any) => void;
   onError?: (data: any) => void;
 }
@@ -50,17 +51,20 @@ export function useAgentSocket(
 
     const onStarted = makeHandler(handlers.onStarted);
     const onProgress = makeHandler(handlers.onProgress);
+    const onStep = makeHandler(handlers.onStep);
     const onDone = makeHandler(handlers.onDone);
     const onError = makeHandler(handlers.onError);
 
     if (onStarted) socket.on(`${prefix}:started`, onStarted);
     if (onProgress) socket.on(`${prefix}:progress`, onProgress);
+    if (onStep) socket.on(`${prefix}:step`, onStep);
     if (onDone) socket.on(`${prefix}:done`, onDone);
     if (onError) socket.on(`${prefix}:error`, onError);
 
     return () => {
       if (onStarted) socket.off(`${prefix}:started`, onStarted);
       if (onProgress) socket.off(`${prefix}:progress`, onProgress);
+      if (onStep) socket.off(`${prefix}:step`, onStep);
       if (onDone) socket.off(`${prefix}:done`, onDone);
       if (onError) socket.off(`${prefix}:error`, onError);
     };

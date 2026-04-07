@@ -168,8 +168,44 @@ export function setupSocket(server: HttpServer) {
       const sessionId = data.sessionId || crypto.randomUUID();
       activeHedgeFundSessions.add(sessionId);
 
-      const tickerStr = data.tickers.join(', ');
-      emitToUser(userId, 'agent:hedgefund:started', { tickers: data.tickers, sessionId });
+      let processedTickers = [...data.tickers];
+
+      // Extraction for natural language queries
+      if (processedTickers.length === 1) {
+        const query = processedTickers[0];
+        const hasActionVerb = /^(分析|看|查|帮|对比|能不能)/.test(query);
+        const isSentence = hasActionVerb || (query.length > 5 && /[\u4e00-\u9fa5]/.test(query)) || query.split(' ').length > 2;
+        if (isSentence) {
+          emitToUser(userId, 'agent:hedgefund:progress', { sessionId, log: '[NameResolver] AI is extracting stock codes from your query...' });
+          try {
+            const extPrompt = `You are a strict Named Entity Recognition (NER) system for finance.
+Extract ONLY company names, stock tickers, or cryptocurrency symbols from the user's text.
+Rules:
+1. Return ONLY a comma-separated list of the recognized entities.
+2. Strip out all conversational words, verbs, and punctuation.
+3. If no companies, tickers, or assets are found, return the word "NONE". Do NOT return the original text.
+
+Examples:
+"能简单帮我分析腾讯么" -> 腾讯
+"看看AAPL和特斯拉" -> AAPL,特斯拉
+"你能做什么？" -> NONE
+"帮我查一下BTC最新的情况" -> BTC
+
+Text: "${query}"`;
+            const extResponse = await aiService.chat([{ role: 'user', content: extPrompt }], 'system');
+            const extracted = extResponse.content?.trim() || 'NONE';
+            if (extracted !== 'NONE' && extracted !== query) {
+              processedTickers = extracted.split(',').map(s => s.trim());
+              emitToUser(userId, 'agent:hedgefund:progress', { sessionId, log: `[NameResolver] AI Extracted: ${processedTickers.join(', ')}` });
+            }
+          } catch(e) {
+            console.error('AI Extraction failed', e);
+          }
+        }
+      }
+
+      const tickerStr = processedTickers.join(', ');
+      emitToUser(userId, 'agent:hedgefund:started', { tickers: processedTickers, sessionId });
 
       // Save user message
       try {
@@ -189,7 +225,7 @@ export function setupSocket(server: HttpServer) {
       try {
         const result = await hedgefundService.runAnalysis(
           {
-            tickers: data.tickers,
+            tickers: processedTickers,
             showReasoning: data.showReasoning ?? true,
           },
           (log) => {
@@ -222,21 +258,33 @@ export function setupSocket(server: HttpServer) {
       }
     });
 
-    // ── Stock Analysis Agent ──
-    socket.on('agent:stockanalysis:check', (data: { sessionId: string }, callback: (res: { isRunning: boolean }) => void) => {
+    // ── Stock Analysis Agent (Structured Stream + Reconnection) ──
+    socket.on('agent:stockanalysis:check', (data: { sessionId: string }, callback: (res: { isRunning: boolean; steps?: any[]; report?: string }) => void) => {
       if (typeof callback === 'function') {
-        callback({ isRunning: activeStockAnalysisSessions.has(data.sessionId) });
+        const buffer = stockAnalysisService.getSessionBuffer(data.sessionId);
+        if (buffer) {
+          callback({
+            isRunning: buffer.status === 'running',
+            steps: buffer.steps,
+            report: buffer.finalReport,
+          });
+        } else {
+          callback({ isRunning: activeStockAnalysisSessions.has(data.sessionId) });
+        }
       }
     });
 
-    socket.on('agent:stockanalysis', async (data: { tickers: string[]; sessionId?: string }) => {
-      if (!data?.tickers?.length) return;
+    socket.on('agent:stockanalysis', async (data: { tickers: string[]; sessionId?: string; message?: string }) => {
+      if (!data?.tickers?.length && !data?.message) return;
 
       const sessionId = data.sessionId || crypto.randomUUID();
       activeStockAnalysisSessions.add(sessionId);
 
-      const tickerStr = data.tickers.join(', ');
-      emitToUser(userId, 'agent:stockanalysis:started', { tickers: data.tickers, sessionId });
+      // Use raw message if provided (natural language), else join tickers
+      const rawQuery = data.message || (data.tickers || []).join(', ');
+      const userContent = data.message || `Analyze ${(data.tickers || []).join(', ')} using Stock Analysis Agent`;
+
+      emitToUser(userId, 'agent:stockanalysis:started', { sessionId, query: rawQuery });
 
       // Save user message
       try {
@@ -245,7 +293,7 @@ export function setupSocket(server: HttpServer) {
             userId,
             sessionId,
             role: 'user',
-            content: `Analyze ${tickerStr} using Stock Analysis Agent`,
+            content: userContent,
             agentId: 'stockanalysis'
           }
         });
@@ -253,17 +301,39 @@ export function setupSocket(server: HttpServer) {
         console.error('Failed to save stockanalysis user message:', dbErr);
       }
 
-      try {
-        await stockAnalysisService.runAnalysis(
-          { tickers: data.tickers },
-          sessionId,
-          socket
-        );
-        activeStockAnalysisSessions.delete(sessionId);
-      } catch (err: any) {
-        emitToUser(userId, 'agent:stockanalysis:error', { sessionId, error: err.message });
-        activeStockAnalysisSessions.delete(sessionId);
-      }
+      // Use the new stream-based analysis (structured JSONL events)
+      stockAnalysisService.runStreamAnalysis(
+        rawQuery,
+        sessionId,
+        userId,
+        // onStep: forward structured step events
+        (step) => {
+          emitToUser(userId, 'agent:stockanalysis:step', { sessionId, ...step });
+        },
+        // onDone: save report + notify
+        async (report: string) => {
+          try {
+            await prisma.chatMessage.create({
+              data: {
+                userId,
+                sessionId,
+                role: 'assistant',
+                content: report,
+                agentId: 'stockanalysis'
+              }
+            });
+          } catch (dbErr) {
+            console.error('Failed to save stockanalysis assistant message:', dbErr);
+          }
+          emitToUser(userId, 'agent:stockanalysis:done', { sessionId, report });
+          activeStockAnalysisSessions.delete(sessionId);
+        },
+        // onError
+        (error: string) => {
+          emitToUser(userId, 'agent:stockanalysis:error', { sessionId, error });
+          activeStockAnalysisSessions.delete(sessionId);
+        }
+      );
     });
 
     // ── SuperAgent Chat (Streaming & Consensus) ──
@@ -278,21 +348,29 @@ export function setupSocket(server: HttpServer) {
       
       const sessionId = data.sessionId || crypto.randomUUID();
       let mode = data.mode || 'auto';
+      let tickers: string[] | undefined;
       
       // Dynamic Routing for Auto mode
       if (mode === 'auto') {
         socket.emit('agent:chat:routing', { sessionId });
-        mode = await aiService.evaluateRouting(data.content);
-        socket.emit('agent:chat:routed', { sessionId, mode });
+        const routingData = await aiService.evaluateRouting(data.content);
+        mode = routingData.mode;
+        tickers = routingData.tickers;
+        
+        // Frontend expects 'fast' or 'collaborate' for standard chat visualization rules
+        const displayMode = (mode === 'stockanalysis' || mode === 'hedgefund') ? 'fast' : mode;
+        socket.emit('agent:chat:routed', { sessionId, mode: displayMode });
         // Give frontend a tiny bit of time to render the switch if necessary
         await new Promise(r => setTimeout(r, 300));
       }
 
       const useConsensus = mode === 'collaborate' || mode === 'roundtable';
+      const isToolMode = mode === 'stockanalysis' || mode === 'hedgefund';
+      const displayMode = isToolMode ? 'fast' : mode;
       
-      activeChatSessions.set(sessionId, mode);
+      activeChatSessions.set(sessionId, displayMode);
 
-      socket.emit('agent:chat:started', { content: data.content, sessionId, mode, hidden: !!data.hidden });
+      socket.emit('agent:chat:started', { content: data.content, sessionId, mode: displayMode, hidden: !!data.hidden });
 
       if (!data.hidden) {
         try {
@@ -311,7 +389,37 @@ export function setupSocket(server: HttpServer) {
       }
 
       try {
-        if (useConsensus) {
+        if (mode === 'stockanalysis' && tickers && tickers.length > 0) {
+          emitToUser(userId, 'agent:chat:progress', { content: `*⏳ Running Stock Analysis for ${tickers.join(', ')}...*\n\n`, sessionId });
+          await stockAnalysisService.runAnalysis(
+            { tickers },
+            sessionId,
+            (log: string) => {
+               // Stream intermediate logs to chat bubble if we want:
+               // emitToUser(userId, 'agent:chat:progress', { content: log + '\n', sessionId });
+            },
+            async (report: string) => {
+               try {
+                 await prisma.chatMessage.create({
+                   data: { userId, sessionId, role: 'assistant', content: report, agentId: 'stockanalysis' }
+                 });
+               } catch (e) {}
+               emitToUser(userId, 'agent:chat:stream_done', { sessionId, content: `*⏳ Running Stock Analysis for ${tickers.join(', ')}...*\n\n---\n` + report });
+               activeChatSessions.delete(sessionId);
+            }
+          );
+        } else if (mode === 'hedgefund' && tickers && tickers.length > 0) {
+          emitToUser(userId, 'agent:chat:progress', { content: `*🧠 Running AI Hedge Fund Analysis for ${tickers.join(', ')}...*\n\n`, sessionId });
+          const hfResult = await hedgefundService.runAnalysis({ tickers, showReasoning: true }, () => {});
+          const report = hedgefundService.formatReport(hfResult);
+          try {
+            await prisma.chatMessage.create({
+              data: { userId, sessionId, role: 'assistant', content: report, agentId: 'hedgefund' }
+            });
+          } catch (e) {}
+          emitToUser(userId, 'agent:chat:stream_done', { sessionId, content: `*🧠 Running AI Hedge Fund Analysis for ${tickers.join(', ')}...*\n\n---\n` + report });
+          activeChatSessions.delete(sessionId);
+        } else if (useConsensus) {
           // Consensus Mode
           const result = await runConsensusEngine(userId, mode, data.content);
           

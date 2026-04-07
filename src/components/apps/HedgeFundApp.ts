@@ -9,8 +9,8 @@ import { socket } from '../../services/socket';
 /** Extract valid tickers from a query string */
 function extractTickers(query: string): string[] {
   return query.split(',')
-    .map(t => t.replace(/[^A-Za-z]/g, '').trim().toUpperCase())
-    .filter(t => t.length >= 1 && t.length <= 6); // valid ticker: 1-6 letters
+    .map(t => t.replace(/[^A-Za-z0-9\u4e00-\u9fa5]/g, '').trim().toUpperCase())
+    .filter(t => t.length >= 1 && t.length <= 100); // valid ticker: 1-20 characters
 }
 
 const HedgeFundApp: AgentAppAdapter = {

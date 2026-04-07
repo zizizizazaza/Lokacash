@@ -31,22 +31,22 @@ logger = logging.getLogger(__name__)
 
 # Tool name → friendly label for progress messages
 _THINKING_TOOL_LABELS: Dict[str, str] = {
-    "get_realtime_quote": "行情获取",
-    "get_daily_history": "K线数据获取",
-    "analyze_trend": "技术指标分析",
-    "get_chip_distribution": "筹码分布分析",
-    "search_stock_news": "新闻搜索",
-    "search_comprehensive_intel": "综合情报搜索",
-    "get_market_indices": "市场概览获取",
-    "get_sector_rankings": "行业板块分析",
-    "get_analysis_context": "历史分析上下文",
-    "get_stock_info": "基本信息获取",
-    "analyze_pattern": "K线形态识别",
-    "get_volume_analysis": "量能分析",
-    "calculate_ma": "均线计算",
-    "get_skill_backtest_summary": "技能回测概览",
-    "get_strategy_backtest_summary": "策略回测概览",
-    "get_stock_backtest_summary": "个股回测数据",
+    "get_realtime_quote": "Fetching real-time quote",
+    "get_daily_history": "Retrieving K-line data",
+    "analyze_trend": "Analyzing technical indicators",
+    "get_chip_distribution": "Analyzing chip distribution",
+    "search_stock_news": "Searching news",
+    "search_comprehensive_intel": "Gathering intelligence",
+    "get_market_indices": "Fetching market indices",
+    "get_sector_rankings": "Analyzing sector rankings",
+    "get_analysis_context": "Loading historical context",
+    "get_stock_info": "Fetching fundamentals",
+    "analyze_pattern": "Identifying candlestick patterns",
+    "get_volume_analysis": "Analyzing volume",
+    "calculate_ma": "Calculating moving averages",
+    "get_skill_backtest_summary": "Skill backtest overview",
+    "get_strategy_backtest_summary": "Strategy backtest overview",
+    "get_stock_backtest_summary": "Stock backtest data",
 }
 
 
@@ -390,11 +390,11 @@ def run_agent_loop(
         # --- progress: thinking ---
         if progress_callback:
             if not tool_calls_log:
-                thinking_msg = "正在制定分析路径..."
+                thinking_msg = "Formulating analysis path..."
             else:
                 last_tool = tool_calls_log[-1].get("tool", "")
                 label = labels.get(last_tool, last_tool)
-                thinking_msg = f"「{label}」已完成，继续深入分析..."
+                thinking_msg = f"[{label}] Complete, continuing analysis..."
             progress_callback({"type": "thinking", "step": step + 1, "message": thinking_msg})
 
         # --- LLM call ---
@@ -505,7 +505,7 @@ def run_agent_loop(
                 total_tokens,
             )
             if progress_callback:
-                progress_callback({"type": "generating", "step": step + 1, "message": "正在生成最终分析..."})
+                progress_callback({"type": "generating", "step": step + 1, "message": "Generating final report..."})
 
             final_content = response.content or ""
             is_error = response.provider == "error"

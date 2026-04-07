@@ -219,5 +219,38 @@ def resolve_name_to_code(name: str) -> Optional[str]:
             logger.debug(f"[NameResolver] 命中单字误写兜底: input={s}, matched={typo_matches[0]}")
             return all_name_to_code[typo_matches[0]]
 
+    # 6. Ultimate LLM Fallback
+    import os
+    import requests
+    api_key = os.environ.get("OPENAI_API_KEY")
+    api_base = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+    model = os.environ.get("LITELLM_MODEL", "deepseek-chat")
+    if model.startswith("openai/"): model = model[7:]
+    
+    if api_key:
+        logger.debug(f"[NameResolver] 尝试启用 LLM 终极回退解析 ({model}): {s}")
+        try:
+            res = requests.post(
+                f"{api_base.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": f"You are a strict financial symbol resolver. What is the official stock ticker symbol or crypto symbol for the entity '{s}'? Return ONLY the exact ticker (e.g. AAPL, 00700, BTC, TSLA) and absolutely no other words or punctuation. If you genuinely do not know, return exactly NONE."}],
+                    "temperature": 0,
+                    "max_tokens": 15
+                },
+                timeout=4  # Fast timeout so it doesn't hang UI
+            )
+            if res.status_code == 200:
+                answer = res.json()["choices"][0]["message"]["content"].strip().upper()
+                # Remove any stray punctuation just in case
+                import re
+                answer = re.sub(r'[^A-Z0-9]', '', answer)
+                if answer and answer != "NONE" and len(answer) <= 15:
+                    logger.debug(f"[NameResolver] LLM 智能解析成功: {s} -> {answer}")
+                    return answer
+        except Exception as e:
+            logger.debug(f"[NameResolver] LLM fallback failed for {s}: {e}")
+
     logger.debug(f"[NameResolver] 解析失败: {s}")
     return None

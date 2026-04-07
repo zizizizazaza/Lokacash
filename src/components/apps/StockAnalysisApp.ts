@@ -1,16 +1,13 @@
 /**
  * StockAnalysisApp — A/H/US Stock Tracker adapter.
+ * 
+ * Now passes the raw natural language query to the backend,
+ * where the Python AgentExecutor handles entity extraction via LLM
+ * (no more frontend regex-based ticker extraction).
  */
 import type { AgentAppAdapter } from './types';
 import { registerApp } from './types';
 import { socket } from '../../services/socket';
-
-/** Extract valid tickers (allow digits for A-share codes like 600519) */
-function extractTickers(query: string): string[] {
-  return query.split(',')
-    .map(t => t.replace(/[^A-Za-z0-9]/g, '').trim().toUpperCase())
-    .filter(t => t.length >= 1 && t.length <= 8);
-}
 
 const StockAnalysisApp: AgentAppAdapter = {
   id: 'stockanalysis',
@@ -18,35 +15,32 @@ const StockAnalysisApp: AgentAppAdapter = {
   supportedModes: ['auto', 'fast', 'collaborate', 'roundtable'],
   accentColor: 'red',
   socketPrefix: 'agent:stockanalysis',
-  runningLabel: 'Stock Analysis gathering data...',
+  runningLabel: 'Stock Analysis Agent is working...',
   doneLabel: 'Analysis complete',
-  initLabel: 'Initializing stock analysis module...',
+  initLabel: 'Initializing stock analysis agent...',
 
   canHandle(query: string): boolean {
-    return extractTickers(query).length > 0;
+    // Accept any non-empty query — the LLM will determine if it's stock-related
+    return query.trim().length > 0;
   },
 
   start({ query, sessionId }) {
-    const tickers = extractTickers(query);
-
+    // Pass the raw query directly — let the Python AgentExecutor handle NER
     socket.emit('agent:stockanalysis', {
-      tickers,
+      message: query,
+      tickers: [query], // Legacy fallback field
       sessionId,
     });
 
     window.dispatchEvent(new CustomEvent('session-started', {
-      detail: { id: sessionId, title: `Stock Analysis: ${tickers.join(', ')}`, agentId: 'stockanalysis' },
+      detail: { id: sessionId, title: `Stock Analysis: ${query.slice(0, 60)}`, agentId: 'stockanalysis' },
     }));
   },
 
   formatUserMessage(query: string): string {
-    const tickers = extractTickers(query);
-    return tickers.length > 0
-      ? `Analyze ${tickers.join(', ')} using A/H/US Stock Tracker`
-      : query;
+    return query;
   },
 };
 
 registerApp(StockAnalysisApp);
 export default StockAnalysisApp;
-
