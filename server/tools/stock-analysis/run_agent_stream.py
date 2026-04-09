@@ -78,6 +78,23 @@ def detect_user_language(text: str) -> str:
     return "zh" if has_cjk else "en"
 
 
+def resolve_tool_display_lang(message: str, cli_override: str | None) -> str:
+    """
+    Pick locale for tool_start/tool_done displayName only (not the final report).
+
+    - auto: follow user message (CJK → ZH labels, else EN) — historical default
+    - en / zh: force TOOL_DISPLAY_NAMES_EN / TOOL_DISPLAY_NAMES_ZH
+
+    Override order: CLI --tool-display-lang > env STOCK_ANALYSIS_TOOL_DISPLAY_LANG > auto
+    """
+    raw = (cli_override or os.environ.get("STOCK_ANALYSIS_TOOL_DISPLAY_LANG") or "auto").strip().lower()
+    if raw in ("en", "english"):
+        return "en"
+    if raw in ("zh", "cn", "chinese"):
+        return "zh"
+    return detect_user_language(message)
+
+
 def emit_event(event: dict):
     """Write a single JSON event line to real stdout (the JSONL stream)."""
     event["ts"] = int(time.time() * 1000)
@@ -196,6 +213,14 @@ def main():
     parser.add_argument("--message", type=str, required=True, help="User message / query")
     parser.add_argument("--session-id", type=str, default="stream_run", help="Session ID for conversation context")
     parser.add_argument("--skills", type=str, default=None, help="Comma-separated skill IDs to activate")
+    parser.add_argument(
+        "--tool-display-lang",
+        type=str,
+        default=None,
+        choices=["auto", "en", "zh"],
+        help="JSONL tool step displayName language: auto (from message), en, or zh. "
+        "Overrides env STOCK_ANALYSIS_TOOL_DISPLAY_LANG when set.",
+    )
     args = parser.parse_args()
 
     logging.getLogger().setLevel(logging.INFO)
@@ -225,7 +250,8 @@ def main():
         executor = build_agent_executor(config, skills=skills)
 
         report_lang = detect_user_language(args.message)
-        progress_callback._lang = report_lang  # type: ignore[attr-defined]
+        tool_label_lang = resolve_tool_display_lang(args.message, args.tool_display_lang)
+        progress_callback._lang = tool_label_lang  # type: ignore[attr-defined]
 
         result = executor.chat(
             message=args.message,
