@@ -26,9 +26,9 @@ const InputIcons = {
 const ChatChevron = () => <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>;
 
 const CHAT_MODES = [
-  { id: 'auto' as const,        label: 'Auto',        desc: 'Auto-route to the best agent mode',       icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
-  { id: 'fast' as const,        label: 'Fast',        desc: 'Single agent, quick response',            icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Specialist run first, then remote consensus on the result', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
+  { id: 'auto' as const,        label: 'Auto',        desc: 'Smart auto-routing to the optimal pipeline', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
+  { id: 'fast' as const,        label: 'Fast',        desc: 'Direct response, minimal orchestration',    icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
+  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Multi-agent debate with iterative consensus', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
 ];
 
 interface Message {
@@ -121,6 +121,7 @@ interface ThinkingFlow {
     modules: ThinkingModule[];
     isActive: boolean;
     route?: string;  // which agent route triggered this
+    routedMode?: string; // 'fast' | 'auto' | 'roundtable' — set after routing
     toolTrace?: ToolTraceItem[];
     planningMessage?: string;
     /** Signal Radar: last30days stderr / status lines (not shown in main chat) */
@@ -397,6 +398,21 @@ const ThinkingInlineTrigger: React.FC<{
     const labels: Record<string, string> = { search: 'Searching...', analysis: 'Analyzing...', simulation: 'Simulating...', consensus: 'Reaching consensus...' };
     const label = thinking.isActive ? (activeModule ? labels[activeModule.type] || 'Processing...' : 'Processing...') : `Loka completed in ${durLabel}s`;
 
+    const isSimple = thinking.routedMode === 'fast';
+
+    if (isSimple) {
+        return (
+            <div className="flex items-center gap-2 py-1.5 mb-2">
+                {thinking.isActive ? (
+                    <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                ) : (
+                    <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                )}
+                <span className="text-[13px] font-medium text-gray-400">{label}</span>
+            </div>
+        );
+    }
+
     return (
         <button onClick={onOpen} className="group flex items-center gap-2 py-1.5 mb-2 hover:opacity-80 transition-opacity">
             {thinking.isActive ? (
@@ -517,65 +533,74 @@ const ThinkingProcessSidePanel: React.FC<{
         </div>
     );
 
-    // ── Search Module Renderer ──
-    const SearchModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+    // ── Search Module Renderer (tool orchestration + web search) ──
+    const SearchModule: React.FC<{ mod: ThinkingModule; toolTrace?: ToolTraceItem[]; planningMessage?: string }> = ({ mod, toolTrace, planningMessage }) => {
         const d = mod.data as SearchModuleData | undefined;
-        if (!d) return null;
+        const hasToolTrace = toolTrace && toolTrace.length > 0;
+        const hasSearchData = !!d;
+        if (!hasToolTrace && !planningMessage && !hasSearchData) return null;
 
-        // Combined mode: render sub-sections
-        if (d.variant === 'combined' && d.sections) {
-            return (
-                <div>
-                    <div className="flex items-center gap-2.5 mb-3">
-                        <StatusIcon status={mod.status} />
-                        <span className="text-[14px] font-bold text-gray-900">Searching</span>
-                    </div>
-                    <div className="ml-7 space-y-4 mb-3">
-                        {d.sections.map((sec, i) =>
-                            sec.id === 'social'
-                                ? <SocialSubSection key={i} section={sec} />
-                                : <DataProvidersSubSection key={i} section={sec} />
-                        )}
-                    </div>
-                </div>
-            );
-        }
+        const overallStatus = mod.status || (hasToolTrace && toolTrace.some(t => t.status === 'running') ? 'active' : 'pending');
 
-        // Legacy single-variant mode
         return (
             <div>
-                <div className="flex items-center gap-2.5 mb-2">
-                    <StatusIcon status={mod.status} />
-                    <span className="text-[14px] font-bold text-gray-900">{d.variant === 'social' ? 'Searching Web' : 'Fetching Data'}</span>
+                <div className="flex items-center gap-2.5 mb-3">
+                    <StatusIcon status={overallStatus} />
+                    <span className="text-[14px] font-bold text-gray-900">Searching</span>
                 </div>
-                <div className="ml-7 space-y-3 mb-3">
-                    {d.description && <p className="text-[12px] text-gray-500 leading-relaxed">{d.description}</p>}
-                    {d.variant === 'social' && d.sources && d.sources.length > 0 && (
-                        <div className="bg-gray-50 rounded-xl border border-gray-100 divide-y divide-gray-100 overflow-hidden">
-                            {d.sources.map((src, i) => <SourceCard key={i} source={src} />)}
-                        </div>
-                    )}
-                    {d.variant === 'data_providers' && d.providers && (
+                <div className="ml-7 space-y-4 mb-3">
+                    {/* ── Tool trace (data fetching steps) ── */}
+                    {hasToolTrace && (
                         <div className="flex flex-wrap gap-1.5">
-                            {d.providers.map((p, i) => (
-                                <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
-                                    p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
-                                    p.status === 'active' ? 'bg-blue-50 text-blue-600 animate-pulse' :
-                                    'bg-gray-50 text-gray-300'
+                            {toolTrace.map((t, i) => (
+                                <span key={`${t.tool}-${i}`} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                                    t.status === 'running' ? 'bg-blue-50 text-blue-600 animate-pulse' :
+                                    t.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                                    t.status === 'error' ? 'bg-red-50 text-red-600' :
+                                    'bg-gray-50 text-gray-400'
                                 }`}>
-                                    {p.status === 'done' ? '✓' : p.status === 'active' ? '⟳' : '·'} {p.name}
+                                    {t.status === 'running' ? '⟳' : t.status === 'done' ? '✓' : t.status === 'error' ? '✗' : '·'}
+                                    {t.displayName}
+                                    {t.status === 'done' && t.durationSec != null && (
+                                        <span className="text-[9px] opacity-60 tabular-nums">{Number(t.durationSec).toFixed(1)}s</span>
+                                    )}
                                 </span>
                             ))}
                         </div>
                     )}
-                    {mod.status === 'completed' && d.totalFound && (
-                        <div className="flex items-center gap-1.5">
-                            <StatusIcon status="done" size="sm" />
-                            <span className="text-[11px] text-emerald-600 font-semibold">
-                                {d.variant === 'social' ? `Found ${d.totalFound} sources` : `${d.totalFound}/${d.totalFound} providers connected`}
-                            </span>
-                        </div>
-                    )}
+                    {/* ── Web / social search sources ── */}
+                    {hasSearchData && (() => {
+                        if (d.variant === 'combined' && d.sections) {
+                            return d.sections.map((sec, i) =>
+                                sec.id === 'social'
+                                    ? <SocialSubSection key={i} section={sec} />
+                                    : <DataProvidersSubSection key={i} section={sec} />
+                            );
+                        }
+                        if (d.variant === 'social' && d.sources && d.sources.length > 0) {
+                            return (
+                                <div className="bg-gray-50 rounded-xl border border-gray-100 divide-y divide-gray-100 overflow-hidden">
+                                    {d.sources.map((src, i) => <SourceCard key={i} source={src} />)}
+                                </div>
+                            );
+                        }
+                        if (d.variant === 'data_providers' && d.providers) {
+                            return (
+                                <div className="flex flex-wrap gap-1.5">
+                                    {d.providers.map((p, i) => (
+                                        <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
+                                            p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                                            p.status === 'active' ? 'bg-blue-50 text-blue-600 animate-pulse' :
+                                            'bg-gray-50 text-gray-300'
+                                        }`}>
+                                            {p.status === 'done' ? '✓' : p.status === 'active' ? '⟳' : '·'} {p.name}
+                                        </span>
+                                    ))}
+                                </div>
+                            );
+                        }
+                        return null;
+                    })()}
                 </div>
             </div>
         );
@@ -585,34 +610,52 @@ const ThinkingProcessSidePanel: React.FC<{
     const AnalysisModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const d = mod.data as AnalysisModuleData | undefined;
         if (!d) return null;
+
+        const stageIcons: Record<string, string> = {
+            fundamental: '📊',
+            technical: '📈',
+            sentiment: '💬',
+        };
+
         return (
             <div>
-                <div className="flex items-center gap-2.5 mb-2">
+                <div className="flex items-center gap-2.5 mb-3">
                     <StatusIcon status={mod.status} />
                     <span className="text-[14px] font-bold text-gray-900">Analyzing</span>
                 </div>
-                <div className="ml-7 space-y-2 mb-3">
-                    {d.stages.map((stage) => (
-                        <div key={stage.id || stage.label}>
-                            <div className="flex items-start gap-2">
-                                <StatusIcon status={stage.status} size="sm" />
-                                <span className={`text-[12px] leading-snug ${
-                                    stage.status === 'done' ? 'text-gray-500' : stage.status === 'active' ? 'text-blue-600 font-medium' : 'text-gray-300'
-                                }`}>{stage.label}</span>
-                            </div>
-                            {stage.status === 'done' && stage.result && (
-                                <div className="ml-5 mt-1 flex flex-wrap gap-2">
-                                    {stage.result.map((r, j) => (
-                                        <span key={j} className={`text-[10px] px-2 py-0.5 rounded-md bg-gray-50 ${r.color || 'text-gray-600'}`}>
-                                            {r.label}: <b>{r.value}</b>
-                                        </span>
-                                    ))}
+                <div className="ml-7 space-y-2.5 mb-3">
+                    {d.stages.map((stage) => {
+                        const hasResults = stage.status === 'done' && stage.result && stage.result.length > 0;
+                        const icon = stageIcons[stage.id || ''] || '🔍';
+                        return (
+                            <div key={stage.id || stage.label} className={`rounded-xl border transition-all duration-300 overflow-hidden ${
+                                stage.status === 'done' ? 'border-gray-100 bg-gray-50/50' :
+                                stage.status === 'active' ? 'border-blue-100 bg-blue-50/30' :
+                                'border-gray-100 bg-white'
+                            }`}>
+                                <div className="flex items-center gap-2 px-3 py-2">
+                                    <span className="text-[13px]">{icon}</span>
+                                    <span className={`text-[12px] font-medium flex-1 ${
+                                        stage.status === 'done' ? 'text-gray-700' :
+                                        stage.status === 'active' ? 'text-blue-600' : 'text-gray-400'
+                                    }`}>{stage.label}</span>
+                                    <StatusIcon status={stage.status} size="sm" />
                                 </div>
-                            )}
-                        </div>
-                    ))}
+                                {hasResults && (
+                                    <div className="px-3 pb-2.5 flex flex-wrap gap-1.5">
+                                        {stage.result.map((r, j) => (
+                                            <span key={j} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white border border-gray-100 shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${r.color || 'text-gray-600'}`}>
+                                                <span className="text-gray-400 font-normal">{r.label}</span>
+                                                <span className="font-semibold">{r.value}</span>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
                     {d.decision && (
-                        <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 space-y-2">
+                        <div className="rounded-xl border border-gray-100 bg-gray-50/50 px-3 py-2.5 space-y-2">
                             <div className="flex items-center justify-between">
                                 <span className={`text-[13px] font-bold ${d.decision.color}`}>{d.decision.verdict}</span>
                                 <span className="text-[11px] text-gray-400">{d.decision.action}</span>
@@ -733,67 +776,29 @@ const ThinkingProcessSidePanel: React.FC<{
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <div>
                     <h2 className="text-[14px] font-bold text-gray-900">Thinking Process</h2>
-                    {thinking.route && (
-                        <span className="text-[11px] text-blue-500 font-medium mt-0.5 block">Agent: {thinking.route}</span>
-                    )}
                 </div>
                 <button onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {thinking.signalResearchLog && (
-                    <div className="pb-4 border-b border-gray-100">
-                        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                            Searching Process
-                        </div>
-                        <pre className="text-[10px] text-gray-500 whitespace-pre-wrap break-words max-h-56 overflow-y-auto font-mono leading-relaxed bg-gray-50/80 rounded-lg px-2 py-2 border border-gray-100">
-                            {thinking.signalResearchLog}
-                        </pre>
-                    </div>
-                )}
-                {(thinking.planningMessage || (thinking.toolTrace && thinking.toolTrace.length > 0)) && (
-                    <div className="pb-4 border-b border-gray-100">
-                        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Tool Orchestration</div>
-                        {thinking.planningMessage && (
-                            <p className="text-[12px] text-gray-500 mb-2 leading-relaxed">{thinking.planningMessage}</p>
-                        )}
-                        {thinking.toolTrace && thinking.toolTrace.length > 0 && (
-                            <div className="space-y-1.5">
-                                {thinking.toolTrace.map((t, i) => (
-                                    <div key={`${t.tool}-${i}`} className="flex items-center gap-2 text-[12px] min-h-[22px]">
-                                        <StatusIcon
-                                            status={
-                                                t.status === 'running'
-                                                    ? 'active'
-                                                    : t.status === 'done'
-                                                      ? 'done'
-                                                      : t.status === 'error'
-                                                        ? 'error'
-                                                        : 'pending'
-                                            }
-                                            size="sm"
-                                        />
-                                        <span className={t.status === 'running' ? 'text-blue-600 font-medium' : 'text-gray-700'}>
-                                            {t.displayName}
-                                        </span>
-                                        {t.status === 'done' && t.durationSec != null && (
-                                            <span className="text-[10px] text-gray-400 ml-auto tabular-nums">
-                                                ({Number(t.durationSec).toFixed(2)}s)
-                                            </span>
-                                        )}
-                                        {t.status === 'error' && (
-                                            <span className="text-[10px] text-red-500 ml-auto">失败</span>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                )}
-                {thinking.modules.filter(m => m.type !== 'done' || m.status === 'completed').map((mod) => {
+                {/* Searching module: combines Basic Data (toolTrace) + Market Data (search module) */}
+                {(() => {
+                    const searchMod = thinking.modules.find(m => m.type === 'search');
+                    const hasToolTrace = thinking.toolTrace && thinking.toolTrace.length > 0;
+                    const hasPlanning = !!thinking.planningMessage;
+                    const hasSearch = !!searchMod;
+                    if (hasToolTrace || hasPlanning || hasSearch) {
+                        return <SearchModule
+                            mod={searchMod || { type: 'search', status: 'active' }}
+                            toolTrace={thinking.toolTrace}
+                            planningMessage={thinking.planningMessage}
+                        />;
+                    }
+                    return null;
+                })()}
+                {thinking.modules.filter(m => (m.type !== 'done' && m.type !== 'search') || (m.type === 'done' && m.status === 'completed')).map((mod) => {
                     switch (mod.type) {
-                        case 'search': return <SearchModule key="search" mod={mod} />;
                         case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
                         case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
                         case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
@@ -805,6 +810,49 @@ const ThinkingProcessSidePanel: React.FC<{
         </div>
     );
 };
+
+// ─── Summarize user question into a short topic title ──────
+const STOP_WORDS = new Set(['THE','AND','FOR','NOT','ARE','BUT','HOW','WHY','CAN','YOU','HAS','WAS','HIS','HER','ALL','ANY','WHO','ITS','GET','LET','MAY','OUR','SAY','SHE','TOO','USE','WAY','NOW']);
+function summarizeTitle(raw: string): string {
+    if (!raw) return 'New Chat';
+    const q = raw.replace(/[？?！!。]+$/g, '').trim();
+    const tickers = [...new Set((q.match(/\b[A-Z]{2,5}\b/g) || []).filter(t => !STOP_WORDS.has(t)))];
+
+    const cmpMatch = q.match(/(?:compare|对比|vs\.?)\s+(.{2,15})\s+(?:vs\.?|and|与|和|跟)\s+(.{2,15})/i);
+    if (cmpMatch) return `${cmpMatch[1].trim()} vs ${cmpMatch[2].trim().replace(/\s*(fundamentals|for|的|基本面).*/i, '')} Comparison`;
+
+    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,30}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况).*)?$/i);
+    if (analyzeMatch) return `${analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/,'').trim()} Analysis`;
+
+    const buyMatch = q.match(/(?:is|should|are|值得|适合|能不能|可以)\s+(.{2,20}?)\s+(?:still\s+)?(?:a\s+)?(?:buy|worth|invest|入手|买入|购买)/i);
+    if (buyMatch) return `${buyMatch[1].replace(/^(i|we)\s+/i, '').trim()} Investment Outlook`;
+
+    if (/risk|风险/.test(q)) {
+        const subject = q.match(/(?:risk|风险)\s*(?:of|assessment|评估)?\s*(?:of|for)?\s*(.{2,20})/i);
+        return subject ? `${subject[1].trim()} Risk Assessment` : 'Risk Assessment';
+    }
+    if (/forecast|predict|预测|simulate|模拟/.test(q)) {
+        return tickers.length > 0 ? `${tickers.join('/')} Forecast` : 'Market Forecast';
+    }
+    if (/demand|市场|landscape|competitive|竞品|行业/.test(q)) {
+        const topicMatch = q.match(/(?:demand|市场|landscape|competitive|行业)\s*(?:for|of|about|关于)?\s*(.{2,25})/i);
+        return topicMatch ? `${topicMatch[1].replace(/[？?]$/,'').trim()} Market Research` : 'Market Research';
+    }
+    if (/^(which|what|哪些|哪个|推荐)/i.test(q)) {
+        const topicMatch = q.match(/(?:which|what|哪些|哪个)\s+(.{2,30}?)(?:\s+(?:have|has|are|is|worth|best|最好|right now))/i);
+        return topicMatch ? `${topicMatch[1].trim()} Overview` : tickers.length > 0 ? `${tickers[0]} Overview` : 'Investment Overview';
+    }
+    if (tickers.length > 0) return `${tickers.slice(0, 2).join(' & ')} Analysis`;
+
+    const core = q
+        .replace(/^(help me|please|帮我|请|能不能|可以帮我|i want to|i need to)\s+/i, '')
+        .replace(/^(search|find|look|check|tell me|give me|show me)\s+(for|about|into|up)?\s*/i, '')
+        .trim();
+    const words = core.split(/\s+/);
+    const short = words.length > 5 ? words.slice(0, 5).join(' ') : core;
+    return short.length > 25 ? short.slice(0, 22) + '…' : short;
+}
+
 // ═════════════════════════════════════════════════════════════
 // SuperAgentChat — Main Component
 // ═════════════════════════════════════════════════════════════
@@ -969,24 +1017,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
-    // Chat title: condense to a short summary
+    // Chat title: summarize the user's question into a short topic label
     const chatTitle = useMemo(() => {
-        const msg = initialMessage.trim();
-        // Remove question marks and common filler words
-        const cleaned = msg.replace(/[？?！!。，,]+$/g, '').trim();
-        // If short enough, use as-is
-        if (cleaned.length <= 20) return cleaned;
-        // Try to extract a short topic: take first meaningful clause
-        const clauseBreak = cleaned.search(/[，,、；;—]/);
-        if (clauseBreak > 4 && clauseBreak <= 25) return cleaned.slice(0, clauseBreak);
-        // For analysis/investment queries, extract the ticker/topic
-        const tickerMatch = cleaned.match(/(?:分析|analyze|analysis|invest|research|研究)\s*(.{1,15})/i);
-        if (tickerMatch) return `${tickerMatch[1].trim()} Analysis`;
-        // Default: truncate intelligently
-        const words = cleaned.split(/\s+/);
-        if (words.length <= 4) return cleaned.length > 25 ? cleaned.slice(0, 22) + '…' : cleaned;
-        return words.slice(0, 4).join(' ') + '…';
-    }, [initialMessage]);
+        const raw = initialMessage.trim() || messages.find(m => m.role === 'user')?.content?.trim() || '';
+        return summarizeTitle(raw);
+    }, [initialMessage, messages]);
 
     useEffect(() => {
         if (!chatModeOpen) return;
@@ -1038,7 +1073,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const onRouted = (data: { sessionId: string; mode: string }) => {
             saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
-            // Mode updated
+            setThinkingProcesses(prev => {
+                const msgIdx = activeMsgIdxRef.current;
+                const flow = prev[msgIdx];
+                if (!flow) return prev;
+                return { ...prev, [msgIdx]: { ...flow, routedMode: data.mode } };
+            });
         };
 
         const onStarted = (data: { sessionId: string; mode: string; route: string }) => {
@@ -1406,7 +1446,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
         
         setActiveGraphMsgIdx(msgIdx);
-        setShowThinkingPanel(true);
         setShowGraphPanel(false);
 
         setThinkingProcesses(prev => ({
@@ -1495,7 +1534,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             hasSentInitial.current = true;
             activeMsgIdxRef.current = 1;
             setActiveGraphMsgIdx(1);
-            setShowThinkingPanel(true);
             setThinkingProcesses(prev => ({
                 ...prev,
                 1: { ...prev[1], modules: prev[1]?.modules ?? [], isActive: true, route: 'Investment Analyst' },
@@ -1507,7 +1545,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         
         // Broadcast new session for sidebar
         window.dispatchEvent(new CustomEvent('session-started', {
-            detail: { id: sessionId, title: initialMessage, agentId: chatSelectedAgent || 'auto' }
+            detail: { id: sessionId, title: summarizeTitle(initialMessage), agentId: chatSelectedAgent || 'auto' }
         }));
 
         const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
@@ -1589,12 +1627,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 : msg.content,
                                                         )}
                                                     </div>
-                                                ) : msg.isStreaming ? (
-                                                    <div className="flex items-center gap-1 py-1">
-                                                        <span className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                        <span className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '120ms' }} />
-                                                        <span className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '240ms' }} />
-                                                    </div>
                                                 ) : null}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div className="flex items-center gap-0.5 mt-3">
@@ -1609,6 +1641,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             ) : (
                                                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2} /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" strokeWidth={2} /></svg>
                                                             )}
+                                                        </button>
+                                                        {/* Retry */}
+                                                        <button
+                                                            onClick={() => {
+                                                                if (isStreaming) return;
+                                                                // Find the user message right before this assistant message
+                                                                let userText = '';
+                                                                for (let j = i - 1; j >= 0; j--) {
+                                                                    if (messages[j].role === 'user') { userText = messages[j].content; break; }
+                                                                }
+                                                                if (!userText) return;
+                                                                // Remove current assistant message and resend
+                                                                const prev = messages.slice(0, i);
+                                                                setMessages(prev);
+                                                                sendToAI(userText, prev);
+                                                            }}
+                                                            title="Retry"
+                                                            className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-all"
+                                                        >
+                                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 102.13-9.36L1 10" /></svg>
                                                         </button>
                                                         {/* Like */}
                                                         <button
