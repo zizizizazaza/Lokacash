@@ -16,7 +16,7 @@ function extractTickers(query: string): string[] {
 const HedgeFundApp: AgentAppAdapter = {
   id: 'hedgefund',
   name: 'AI Hedge Fund',
-  supportedModes: ['auto', 'fast', 'collaborate', 'roundtable'],
+  supportedModes: ['auto', 'fast', 'roundtable'],
   accentColor: 'emerald',
   socketPrefix: 'agent:hedgefund',
   runningLabel: 'Hedge Fund agents analyzing...',

@@ -1,6 +1,6 @@
 /**
  * GenericChatApp — Default chat adapter for normal conversations.
- * Handles auto/fast/collaborate/roundtable modes via the standard agent:chat socket.
+ * Handles auto/fast/roundtable modes via the standard agent:chat socket.
  */
 import type { AgentAppAdapter } from './types';
 import { registerApp } from './types';
@@ -10,7 +10,7 @@ import type { ChatMode } from '../../types/chat';
 const GenericChatApp: AgentAppAdapter = {
   id: 'generic',
   name: 'Loka SuperAgent',
-  supportedModes: ['auto', 'fast', 'collaborate', 'roundtable'],
+  supportedModes: ['auto', 'fast', 'roundtable'],
   accentColor: 'blue',
   socketPrefix: 'agent:chat',
   runningLabel: 'Thinking...',

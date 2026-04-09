@@ -4,9 +4,15 @@
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import * as d3 from 'd3';
-import { QUICK_ACTIONS } from '../constants';
+import { socket } from '../services/socket';
+import { api } from '../services/api';
+import { renderMarkdownContent } from '../utils/markdown';
+import { stripInternalResearchCitations } from '../utils/researchCitations';
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+
+function saLog(...args: unknown[]) {
+    console.log('[SuperAgentChat]', ...args);
+}
 
 // ─── Types and Interfaces ────────────────────────────────────
 
@@ -16,21 +22,13 @@ const InputIcons = {
   Image: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
 };
 
-const AGENT_NAMES: Record<string, string> = {
-  invest: 'Investment Analysis',
-  research: 'Signal Radar',
-  forecast: 'Forecast',
-  scout: 'Project Scout',
-  sentiment: 'Sentiment Check',
-  portfolio: 'Portfolio Review',
-};
 
 const ChatChevron = () => <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>;
 
 const CHAT_MODES = [
   { id: 'auto' as const,        label: 'Auto',        desc: 'Auto-route to the best agent mode',       icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
   { id: 'fast' as const,        label: 'Fast',        desc: 'Single agent, quick response',            icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Multi-agent consensus after analysis',    icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
+  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Specialist run first, then remote consensus on the result', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
 ];
 
 interface Message {
@@ -38,12 +36,15 @@ interface Message {
     content: string;
     timestamp: string;
     isStreaming?: boolean;
+    /** From DB; used to restore Thinking Process when reopening a session */
+    metadata?: string | null;
 }
 
 interface SearchSource {
     favicon: string;
     title: string;
     domain: string;
+    url?: string;
 }
 
 interface DataProvider {
@@ -109,55 +110,71 @@ interface ThinkingModule {
     data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | { duration?: number };
 }
 
+interface ToolTraceItem {
+    tool?: string;
+    displayName: string;
+    status: 'running' | 'done' | 'error';
+    durationSec?: number;
+}
+
 interface ThinkingFlow {
     modules: ThinkingModule[];
     isActive: boolean;
     route?: string;  // which agent route triggered this
+    toolTrace?: ToolTraceItem[];
+    planningMessage?: string;
+    /** Signal Radar: last30days stderr / status lines (not shown in main chat) */
+    signalResearchLog?: string;
 }
 
-// ─── Module Config Pools ────────────────────────────────────
-const WEB_SOURCES_POOL: SearchSource[] = [
-    { favicon: 'web', title: 'Q4 2025 earnings beat expectations, revenue up 22%...', domain: 'www.reuters.com' },
-    { favicon: 'web', title: 'Institutional investors increase holdings by 15%...', domain: 'www.bloomberg.com' },
-    { favicon: 'web', title: 'New partnership announced with major cloud provider...', domain: 'www.coindesk.com' },
-    { favicon: 'web', title: 'Market cap surpasses $2T milestone amid AI boom...', domain: 'www.cnbc.com' },
-    { favicon: 'web', title: 'SEC filing reveals insider buying activity...', domain: 'www.sec.gov' },
-    { favicon: 'web', title: 'Analyst upgrades rating to Strong Buy, PT $950...', domain: 'www.tradingview.com' },
-    { favicon: 'web', title: 'Short interest drops 40% as bearish momentum fades...', domain: 'finance.yahoo.com' },
-    { favicon: 'web', title: 'Fed rate decision impact on high-growth tech stocks...', domain: 'www.wsj.com' },
-];
+const SA_SID_KEY = 'loka_superagent_sid';
+const SA_PENDING_KEY = 'loka_sa_analysis_pending';
 
-const SOCIAL_SOURCES_POOL: SearchSource[] = [
-    { favicon: 'reddit', title: 'r/wallstreetbets — Massive bull run incoming? DD inside...', domain: 'reddit.com' },
-    { favicon: 'reddit', title: 'r/stocks — Earnings thread: beats estimates by 18%...', domain: 'reddit.com' },
-    { favicon: 'x', title: '@analyst_mike: Breaking down Q4 numbers, thread 🧵...', domain: 'x.com' },
-    { favicon: 'x', title: '@crypto_whale: Institutional flow data shows accumulation...', domain: 'x.com' },
-    { favicon: 'youtube', title: 'Graham Stephan: Why I just bought $500K worth...', domain: 'youtube.com' },
-    { favicon: 'youtube', title: 'Meet Kevin: Emergency livestream — market analysis...', domain: 'youtube.com' },
-    { favicon: 'telegram', title: 'Crypto Signals VIP — New entry alert with 3x target...', domain: 't.me' },
-    { favicon: 'discord', title: '#market-talk — Community consensus shifting bullish...', domain: 'discord.gg' },
-    { favicon: 'hackernews', title: 'Show HN: Real-time sentiment analysis dashboard...', domain: 'news.ycombinator.com' },
-    { favicon: 'weibo', title: '财经大V：A股联动分析，关注这个关键指标...', domain: 'weibo.com' },
-    { favicon: 'wechat', title: '市场早报：隔夜美股大涨，今日重点关注...', domain: 'mp.weixin.qq.com' },
-];
+/** Backend may send 0–1 or 0–100 */
+function confidenceToPercent(n: number | undefined): number {
+    if (n == null || Number.isNaN(n)) return 0;
+    if (n >= 0 && n <= 1) return Math.round(n * 100);
+    return Math.round(Math.min(100, Math.max(0, n)));
+}
 
-const DATA_PROVIDERS_POOL: string[] = [
-    'Yahoo Finance', 'Bloomberg API', 'Alpha Vantage', 'Polygon.io', 'Finnhub',
-    'CoinGecko', 'TradingView', 'Morningstar', 'SEC EDGAR', 'Quandl',
-    'S&P Capital IQ', 'Refinitiv', 'CryptoCompare', 'Messari', 'Glassnode',
-    'Santiment', 'LunarCrush', 'DeFi Llama', 'Dune Analytics', 'CoinMetrics',
-    'MacroMicro', 'FRED', 'World Bank', 'Nansen', 'Token Terminal',
-    'Alternative.me', 'Fear & Greed', 'Polymarket API',
-];
+function buildTraceFromSteps(steps: unknown[]): ToolTraceItem[] {
+    const trace: ToolTraceItem[] = [];
+    if (!Array.isArray(steps)) return trace;
+    for (const raw of steps) {
+        const s = raw as Record<string, unknown>;
+        if (!s || typeof s !== 'object') continue;
+        if (s.type === 'tool_start') {
+            trace.push({
+                tool: s.tool as string | undefined,
+                displayName: (s.displayName as string) || (s.tool as string) || 'tool',
+                status: 'running',
+            });
+        } else if (s.type === 'tool_done') {
+            for (let i = trace.length - 1; i >= 0; i--) {
+                if (trace[i].status === 'running' && trace[i].tool === s.tool) {
+                    trace[i] = {
+                        ...trace[i],
+                        status: s.success === false ? 'error' : 'done',
+                        durationSec: typeof s.duration === 'number' ? s.duration : undefined,
+                    };
+                    break;
+                }
+            }
+        }
+    }
+    return trace;
+}
 
-const SIM_PANELISTS = [
-    { name: 'Warren Buffett', avatar: '👤', initials: 'WB' },
-    { name: 'Charlie Munger', avatar: '👤', initials: 'CM' },
-    { name: 'Ray Dalio', avatar: '👤', initials: 'RD' },
-    { name: 'Cathie Wood', avatar: '👤', initials: 'CW' },
-    { name: 'Peter Lynch', avatar: '👤', initials: 'PL' },
-    { name: 'George Soros', avatar: '👤', initials: 'GS' },
-];
+function extractPlanningMessage(steps: unknown[]): string | undefined {
+    if (!Array.isArray(steps)) return undefined;
+    let last: string | undefined;
+    for (const raw of steps) {
+        const s = raw as Record<string, unknown>;
+        if (s?.type === 'thinking' && typeof s.message === 'string') last = s.message;
+    }
+    return last;
+}
+
 
 // ─── Knowledge Graph Types ──────────────────────────────────
 interface KGNode {
@@ -374,9 +391,11 @@ const ThinkingInlineTrigger: React.FC<{
 }> = ({ thinking, onOpen }) => {
     const doneModule = thinking.modules.find(m => m.type === 'done');
     const dur = doneModule?.status === 'completed' ? (doneModule.data as any)?.duration : null;
+    const durLabel =
+        typeof dur === 'number' && !Number.isNaN(dur) ? String(dur) : '?';
     const activeModule = thinking.modules.find(m => m.status === 'active');
     const labels: Record<string, string> = { search: 'Searching...', analysis: 'Analyzing...', simulation: 'Simulating...', consensus: 'Reaching consensus...' };
-    const label = thinking.isActive ? (activeModule ? labels[activeModule.type] || 'Processing...' : 'Processing...') : `Loka completed in ${dur || '?'}s`;
+    const label = thinking.isActive ? (activeModule ? labels[activeModule.type] || 'Processing...' : 'Processing...') : `Loka completed in ${durLabel}s`;
 
     return (
         <button onClick={onOpen} className="group flex items-center gap-2 py-1.5 mb-2 hover:opacity-80 transition-opacity">
@@ -396,6 +415,7 @@ const StatusIcon: React.FC<{ status: string; size?: 'sm' | 'md' }> = ({ status, 
     const s = size === 'sm' ? 'w-3.5 h-3.5' : 'w-5 h-5';
     const bw = size === 'sm' ? 'border-[1.5px]' : 'border-2';
     if (status === 'done' || status === 'completed') return <svg className={`${s} text-emerald-500 shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>;
+    if (status === 'error' || status === 'failed') return <svg className={`${s} text-red-500 shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>;
     if (status === 'active' || status === 'analyzing') return <div className={`${s} ${bw} border-blue-400 border-t-transparent rounded-full animate-spin shrink-0`} />;
     return <div className={`${size === 'sm' ? 'w-3 h-3' : 'w-4 h-4'} rounded-full border-2 border-gray-200 shrink-0`} />;
 };
@@ -415,13 +435,30 @@ const PlatformLogo: React.FC<{ platform: string }> = ({ platform }) => {
     }
 };
 
-const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => (
-    <div className="flex items-center gap-2.5 px-3 py-2 hover:bg-gray-50 rounded-lg transition-colors cursor-pointer">
-        <div className="shrink-0 w-5 h-5 flex items-center justify-center"><PlatformLogo platform={source.favicon} /></div>
-        <span className="text-[12px] text-gray-600 truncate flex-1 leading-snug">{source.title}</span>
-        <span className="text-[10px] text-gray-400 shrink-0 ml-2">{source.domain}</span>
-    </div>
-);
+const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
+    const content = (
+        <>
+            <div className="shrink-0 w-5 h-5 flex items-center justify-center"><PlatformLogo platform={source.favicon} /></div>
+            <span className="text-[12px] text-gray-600 truncate flex-1 leading-snug">{source.title}</span>
+            <span className="text-[10px] text-gray-400 shrink-0 ml-2">{source.domain}</span>
+        </>
+    );
+    const className = "flex items-center gap-2.5 px-3 py-2 hover:bg-gray-50 rounded-lg transition-colors cursor-pointer group";
+    
+    if (source.url) {
+        return (
+            <a href={source.url} target="_blank" rel="noreferrer" className={className} title={source.title}>
+                {content}
+            </a>
+        );
+    }
+    
+    return (
+        <div className={className} title={source.title}>
+            {content}
+        </div>
+    );
+};
 
 // ─── ThinkingProcessSidePanel (modular right panel) ─────────
 const ThinkingProcessSidePanel: React.FC<{
@@ -555,8 +592,8 @@ const ThinkingProcessSidePanel: React.FC<{
                     <span className="text-[14px] font-bold text-gray-900">Analyzing</span>
                 </div>
                 <div className="ml-7 space-y-2 mb-3">
-                    {d.stages.map((stage, i) => (
-                        <div key={i}>
+                    {d.stages.map((stage) => (
+                        <div key={stage.id || stage.label}>
                             <div className="flex items-start gap-2">
                                 <StatusIcon status={stage.status} size="sm" />
                                 <span className={`text-[12px] leading-snug ${
@@ -617,7 +654,7 @@ const ThinkingProcessSidePanel: React.FC<{
                                 </div>
                                 {p.status === 'done' && p.verdict && (
                                     <span className={`text-[11px] ${p.verdict === 'Buy' ? 'text-emerald-600' : p.verdict === 'Sell' ? 'text-red-500' : 'text-yellow-600'}`}>
-                                        {p.verdict} · {p.confidence}% confidence
+                                        {p.verdict} · {confidenceToPercent(p.confidence)}% confidence
                                     </span>
                                 )}
                             </div>
@@ -629,7 +666,7 @@ const ThinkingProcessSidePanel: React.FC<{
                         <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 flex items-center justify-between">
                             <span className="text-[11px] text-gray-500 font-medium">Prediction</span>
                             <span className={`text-[12px] font-bold ${d.prediction.verdict === 'Buy' ? 'text-emerald-600' : 'text-yellow-600'}`}>
-                                {d.prediction.verdict} · {d.prediction.confidence}%
+                                {d.prediction.verdict} · {confidenceToPercent(d.prediction.confidence)}%
                             </span>
                         </div>
                     )}
@@ -667,7 +704,7 @@ const ThinkingProcessSidePanel: React.FC<{
                             </div>
                             <div className="flex items-center justify-between">
                                 <span className="text-[11px] text-gray-500 font-medium">Confidence</span>
-                                <span className="text-[12px] font-semibold text-gray-700">{d.conclusion.confidence}%</span>
+                                <span className="text-[12px] font-semibold text-gray-700">{confidenceToPercent(d.conclusion.confidence)}%</span>
                             </div>
                         </div>
                     )}
@@ -679,12 +716,13 @@ const ThinkingProcessSidePanel: React.FC<{
     // ── Done Module Renderer ──
     const DoneModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const dur = (mod.data as any)?.duration;
+        const showDur = typeof dur === 'number' && !Number.isNaN(dur) && dur > 0;
         return (
             <div className="pt-3 border-t border-gray-100">
                 <div className="flex items-center gap-2.5">
                     <StatusIcon status="done" />
                     <span className="text-[14px] font-bold text-gray-900">Done</span>
-                    {dur && <span className="text-[11px] text-gray-400 ml-auto">{dur}s</span>}
+                    {showDur && <span className="text-[11px] text-gray-400 ml-auto">{dur}s</span>}
                 </div>
             </div>
         );
@@ -704,13 +742,62 @@ const ThinkingProcessSidePanel: React.FC<{
                 </button>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {thinking.modules.filter(m => m.type !== 'done' || m.status === 'completed').map((mod, i) => {
+                {thinking.signalResearchLog && (
+                    <div className="pb-4 border-b border-gray-100">
+                        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
+                            Searching Process
+                        </div>
+                        <pre className="text-[10px] text-gray-500 whitespace-pre-wrap break-words max-h-56 overflow-y-auto font-mono leading-relaxed bg-gray-50/80 rounded-lg px-2 py-2 border border-gray-100">
+                            {thinking.signalResearchLog}
+                        </pre>
+                    </div>
+                )}
+                {(thinking.planningMessage || (thinking.toolTrace && thinking.toolTrace.length > 0)) && (
+                    <div className="pb-4 border-b border-gray-100">
+                        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Tool Orchestration</div>
+                        {thinking.planningMessage && (
+                            <p className="text-[12px] text-gray-500 mb-2 leading-relaxed">{thinking.planningMessage}</p>
+                        )}
+                        {thinking.toolTrace && thinking.toolTrace.length > 0 && (
+                            <div className="space-y-1.5">
+                                {thinking.toolTrace.map((t, i) => (
+                                    <div key={`${t.tool}-${i}`} className="flex items-center gap-2 text-[12px] min-h-[22px]">
+                                        <StatusIcon
+                                            status={
+                                                t.status === 'running'
+                                                    ? 'active'
+                                                    : t.status === 'done'
+                                                      ? 'done'
+                                                      : t.status === 'error'
+                                                        ? 'error'
+                                                        : 'pending'
+                                            }
+                                            size="sm"
+                                        />
+                                        <span className={t.status === 'running' ? 'text-blue-600 font-medium' : 'text-gray-700'}>
+                                            {t.displayName}
+                                        </span>
+                                        {t.status === 'done' && t.durationSec != null && (
+                                            <span className="text-[10px] text-gray-400 ml-auto tabular-nums">
+                                                ({Number(t.durationSec).toFixed(2)}s)
+                                            </span>
+                                        )}
+                                        {t.status === 'error' && (
+                                            <span className="text-[10px] text-red-500 ml-auto">失败</span>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+                {thinking.modules.filter(m => m.type !== 'done' || m.status === 'completed').map((mod) => {
                     switch (mod.type) {
-                        case 'search': return <SearchModule key={i} mod={mod} />;
-                        case 'analysis': return <AnalysisModule key={i} mod={mod} />;
-                        case 'simulation': return <SimulationModule key={i} mod={mod} />;
-                        case 'consensus': return <ConsensusModule key={i} mod={mod} />;
-                        case 'done': return <DoneModule key={i} mod={mod} />;
+                        case 'search': return <SearchModule key="search" mod={mod} />;
+                        case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
+                        case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
+                        case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
+                        case 'done': return <DoneModule key="done" mod={mod} />;
                         default: return null;
                     }
                 })}
@@ -718,24 +805,6 @@ const ThinkingProcessSidePanel: React.FC<{
         </div>
     );
 };
-// ─── Markdown-like renderer for AI responses ────────────────
-const renderMarkdown = (text: string) => {
-    if (!text) return null;
-    // Simple markdown: bold, headers, lists
-    const lines = text.split('\n');
-    return lines.map((line, i) => {
-        if (line.startsWith('### ')) return <h3 key={i} className="text-sm font-bold text-gray-900 mt-4 mb-2">{line.slice(4)}</h3>;
-        if (line.startsWith('## ')) return <h2 key={i} className="text-base font-bold text-gray-900 mt-5 mb-2">{line.slice(3)}</h2>;
-        if (line.startsWith('# ')) return <h1 key={i} className="text-lg font-bold text-gray-900 mt-6 mb-3">{line.slice(2)}</h1>;
-        if (line.startsWith('- ') || line.startsWith('* ')) return <li key={i} className="text-sm text-gray-700 leading-relaxed ml-4 list-disc">{line.slice(2)}</li>;
-        if (line.match(/^\d+\.\s/)) return <li key={i} className="text-sm text-gray-700 leading-relaxed ml-4 list-decimal">{line.replace(/^\d+\.\s/, '')}</li>;
-        if (line.trim() === '') return <br key={i} />;
-        // Bold text
-        const boldParsed = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        return <p key={i} className="text-sm text-gray-700 leading-relaxed" dangerouslySetInnerHTML={{ __html: boldParsed }} />;
-    });
-};
-
 // ═════════════════════════════════════════════════════════════
 // SuperAgentChat — Main Component
 // ═════════════════════════════════════════════════════════════
@@ -744,22 +813,84 @@ interface SuperAgentChatProps {
     onBack: () => void;
     agentCount?: number;
     selectedAgentId?: string;
+    initialSessionId?: string;
+    /** From home screen mode selector (not used when opening history-only session). */
+    initialChatMode?: 'auto' | 'fast' | 'roundtable';
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId }) => {
-    const [messages, setMessages] = useState<Message[]>([]);
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
+    const [sessionId] = useState(() => {
+        if (initialSessionId) return initialSessionId;
+        try {
+            let s = sessionStorage.getItem(SA_SID_KEY);
+            if (!s) {
+                s = crypto.randomUUID();
+                sessionStorage.setItem(SA_SID_KEY, s);
+            }
+            return s;
+        } catch {
+            return crypto.randomUUID();
+        }
+    });
+
+    const [messages, setMessages] = useState<Message[]>(() => {
+        try {
+            const raw = sessionStorage.getItem(SA_PENDING_KEY);
+            if (!raw) return [];
+            const p = JSON.parse(raw) as {
+                sessionId?: string;
+                userContent?: string;
+                streaming?: boolean;
+            };
+            const sid = sessionStorage.getItem(SA_SID_KEY);
+            if (!p?.streaming || !p.userContent || p.sessionId !== sid) return [];
+            return [
+                { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
+                {
+                    role: 'assistant',
+                    content: '',
+                    timestamp: new Date().toLocaleTimeString(),
+                    isStreaming: true,
+                },
+            ];
+        } catch {
+            return [];
+        }
+    });
+
     const [inputText, setInputText] = useState('');
-    const [isStreaming, setIsStreaming] = useState(false);
+    const [isStreaming, setIsStreaming] = useState(() => {
+        try {
+            const raw = sessionStorage.getItem(SA_PENDING_KEY);
+            if (!raw) return false;
+            const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
+            const sid = sessionStorage.getItem(SA_SID_KEY);
+            return !!(p?.streaming && p.sessionId === sid);
+        } catch {
+            return false;
+        }
+    });
     const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
-    const [sessionId] = useState(() => crypto.randomUUID());
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const abortControllerRef = useRef<AbortController | null>(null);
     const hasSentInitial = useRef(false);
+    const replayRecoverAttemptedRef = useRef(false);
+    const restoredFromPendingRef = useRef(
+        (() => {
+            try {
+                const raw = sessionStorage.getItem(SA_PENDING_KEY);
+                if (!raw) return false;
+                const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
+                return !!(p?.streaming && p.sessionId === sessionStorage.getItem(SA_SID_KEY));
+            } catch {
+                return false;
+            }
+        })(),
+    );
     // ─── Right Side Panel ─────────────────────────────────────
     const [showGraphPanel, setShowGraphPanel] = useState(false);
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
-    const [chatMode, setChatMode] = useState<'auto'|'fast'|'roundtable'>('auto');
+    const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
@@ -883,7 +1014,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [inputText]);
 
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
-    const currentQuery = activeGraphMsgIdx !== null ? messages.slice(0, activeGraphMsgIdx).reverse().find(m => m.role === 'user')?.content ?? '' : '';
     const currentKgData = currentThinking ? buildKnowledgeGraph() : null;
 
     // Auto-scroll
@@ -891,586 +1021,507 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, thinkingProcesses]);
 
-    // ─── Simulate thinking process (modular) ──────────────────
-    const simulateThinking = useCallback(async (msgIdx: number, userText: string) => {
-        const t = userText.toLowerCase();
-        const startTime = Date.now();
-        // Intent routing
-        const isSearch = /sentiment|看法|舆情|搜索|search|signal/i.test(t);
-        const isDaily = /今天|行情|价格|today|daily|情况/i.test(t);
-        const isAnalysis = /分析|analysis|analyze|深度|背景|建议|invest|调研|research|compare|对比/i.test(t);
-        const isSimulation = /模拟|simulate|巴菲特|buffett|hedge|预测/i.test(t);
-        const isRoundtable = chatMode === 'roundtable';
-        const isGeneric = !isSearch && !isDaily && !isAnalysis && !isSimulation;
+    // ─── Real Socket.IO Integration ────────────────────────────
+    const activeMsgIdxRef = useRef<number>(-1);
+    const progressChunkIdxRef = useRef(0);
 
-        // Determine route label
-        const routeLabel = isSearch ? 'Signal Radar'
-            : isDaily ? 'Daily Agent'
-            : isAnalysis ? 'Investment Analyst'
-            : isSimulation ? 'AI Hedge Fund'
-            : 'Loka Agent';
-
-        // Build modules list — ALL types get a thinking flow
-        const modules: ThinkingModule[] = [];
-
-        // Generic gets a simple search module to show something
-        if (isGeneric) {
-            modules.push({
-                type: 'search', status: 'pending',
-                data: {
-                    variant: 'data_providers',
-                    description: 'Preparing response...',
-                    providers: ['Loka Knowledge Base', 'Platform Config', 'Agent Registry'].map(n => ({ name: n, status: 'pending' as const })),
-                } as SearchModuleData,
-            });
-        }
-
-        // Search module
-        if (isSearch || isDaily || isAnalysis) {
-            if (isAnalysis) {
-                // Analysis uses combined mode: social + data providers
-                modules.push({
-                    type: 'search', status: 'pending',
-                    data: {
-                        variant: 'combined',
-                        sections: [
-                            {
-                                id: 'social',
-                                label: 'Searching social media',
-                                status: 'pending',
-                                sources: [],
-                            },
-                            {
-                                id: 'data_providers',
-                                label: 'Fetching market data',
-                                status: 'pending',
-                                providers: DATA_PROVIDERS_POOL.slice(0, 12 + Math.floor(Math.random() * 10)).map(n => ({ name: n, status: 'pending' as const })),
-                            },
-                        ],
-                    } as SearchModuleData,
-                });
-            } else {
-                // Signal Radar = social only, Daily = data_providers only
-                modules.push({
-                    type: 'search', status: 'pending',
-                    data: {
-                        variant: isDaily ? 'data_providers' : 'social',
-                        description: isDaily
-                            ? 'Connecting to market data providers and financial APIs'
-                            : 'Searching for latest financial reports, analyst coverage, and market trends',
-                        providers: isDaily
-                            ? DATA_PROVIDERS_POOL.slice(0, 12 + Math.floor(Math.random() * 10)).map(n => ({ name: n, status: 'pending' as const }))
-                            : undefined,
-                        sources: [],
-                    } as SearchModuleData,
-                });
-            }
-        }
-
-        // Analysis module — show ALL sub-modules for Investment Analyst
-        if (isAnalysis) {
-            modules.push({
-                type: 'analysis', status: 'pending',
-                data: {
-                    stages: [
-                        { id: 'fundamental', label: 'Fundamental analysis', status: 'pending' },
-                        { id: 'technical', label: 'Technical analysis', status: 'pending' },
-                        { id: 'sentiment', label: 'Sentiment analysis', status: 'pending' },
-                        { id: 'decision', label: 'Decision engine', status: 'pending' },
-                    ],
-                } as AnalysisModuleData,
-            });
-
-            // Investment Analyst also runs a simulation panel
-            const panelists = SIM_PANELISTS.slice(0, 4 + Math.floor(Math.random() * 2)).map(p => ({
-                ...p, status: 'pending' as const,
+    useEffect(() => {
+        progressChunkIdxRef.current = 0;
+        const onRouting = (data: { sessionId: string }) => {
+            saLog('← agent:chat:routing', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            setThinkingProcesses(prev => ({
+                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: 'Routing...' }
             }));
-            modules.push({
-                type: 'simulation', status: 'pending',
-                data: { panelists } as SimulationModuleData,
-            });
-
-            // And always runs consensus for analysis
-            modules.push({
-                type: 'consensus', status: 'pending',
-                data: { round: 0, maxRounds: 3, status: 'building' } as ConsensusModuleData,
-            });
-        }
-
-        // Simulation module (standalone, e.g. "模拟巴菲特")
-        if (isSimulation && !isAnalysis) {
-            // Simulation also needs data — add a search step if not already added
-            if (!isSearch && !isDaily) {
-                modules.push({
-                    type: 'search', status: 'pending',
-                    data: {
-                        variant: 'data_providers',
-                        description: 'Gathering market data for simulation panel',
-                        providers: ['Yahoo Finance', 'Bloomberg API', 'Alpha Vantage', 'CoinGecko', 'Polygon.io', 'Finnhub', 'TradingView', 'Morningstar'].map(n => ({ name: n, status: 'pending' as const })),
-                    } as SearchModuleData,
-                });
-            }
-            const panelists = SIM_PANELISTS.slice(0, 4 + Math.floor(Math.random() * 2)).map(p => ({
-                ...p, status: 'pending' as const,
-            }));
-            modules.push({
-                type: 'simulation', status: 'pending',
-                data: { panelists } as SimulationModuleData,
-            });
-        }
-
-        // Consensus module (roundtable only, if not already added by analysis)
-        if (isRoundtable && !isAnalysis) {
-            modules.push({
-                type: 'consensus', status: 'pending',
-                data: { round: 0, maxRounds: 3, status: 'building' } as ConsensusModuleData,
-            });
-        }
-
-        // Done module
-        modules.push({ type: 'done', status: 'pending' });
-
-        // Initialize flow
-        setThinkingProcesses(prev => ({ ...prev, [msgIdx]: { modules, isActive: true, route: routeLabel } }));
-        setActiveGraphMsgIdx(msgIdx);
-
-        const updateModule = (idx: number, patch: Partial<ThinkingModule>) => {
-            setThinkingProcesses(prev => {
-                const flow = { ...prev[msgIdx] };
-                const mods = [...flow.modules];
-                mods[idx] = { ...mods[idx], ...patch };
-                return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-            });
         };
 
-        const updateModuleData = (idx: number, dataPatch: any) => {
-            setThinkingProcesses(prev => {
-                const flow = { ...prev[msgIdx] };
-                const mods = [...flow.modules];
-                mods[idx] = { ...mods[idx], data: { ...mods[idx].data, ...dataPatch } };
-                return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-            });
+        const onRouted = (data: { sessionId: string; mode: string }) => {
+            saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            // Mode updated
         };
 
-        // Animate each module sequentially
-        for (let mi = 0; mi < modules.length; mi++) {
-            const mod = modules[mi];
-            if (mod.type === 'done') break;
+        const onStarted = (data: { sessionId: string; mode: string; route: string }) => {
+            saLog('← agent:chat:started', { expect: sessionId, got: data?.sessionId, route: data?.route, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+             setThinkingProcesses(prev => ({
+                 ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: data.route }
+             }));
+        };
 
-            updateModule(mi, { status: 'active' });
-
-            if (mod.type === 'search') {
-                const sd = mod.data as SearchModuleData;
-                if (sd.variant === 'combined' && sd.sections) {
-                    // Combined: animate social section first, then data providers section
-                    const socialSec = sd.sections.find(s => s.id === 'social');
-                    const dataSec = sd.sections.find(s => s.id === 'data_providers');
-
-                    // --- Social sub-section ---
-                    if (socialSec) {
-                        // Set social section to active
-                        setThinkingProcesses(prev => {
-                            const flow = { ...prev[msgIdx] };
-                            const mods = [...flow.modules];
-                            const data = { ...(mods[mi].data as SearchModuleData) };
-                            const sections = (data.sections || []).map(s =>
-                                s.id === 'social' ? { ...s, status: 'active' as const } : s
-                            );
-                            mods[mi] = { ...mods[mi], data: { ...data, sections } };
-                            return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                        });
-                        await new Promise(r => setTimeout(r, 600));
-
-                        // Add social sources progressively
-                        const webSources = [...WEB_SOURCES_POOL].sort(() => Math.random() - 0.5).slice(0, 4);
-                        const socialSources = [...SOCIAL_SOURCES_POOL].sort(() => Math.random() - 0.5).slice(0, 4);
-                        const allSocialSources = [...webSources, ...socialSources];
-                        for (let si = 0; si < allSocialSources.length; si++) {
-                            await new Promise(r => setTimeout(r, 100 + Math.random() * 150));
-                            const visibleSources = allSocialSources.slice(0, si + 1);
-                            setThinkingProcesses(prev => {
-                                const flow = { ...prev[msgIdx] };
-                                const mods = [...flow.modules];
-                                const data = { ...(mods[mi].data as SearchModuleData) };
-                                const sections = (data.sections || []).map(s =>
-                                    s.id === 'social' ? { ...s, sources: visibleSources, totalFound: visibleSources.length } : s
-                                );
-                                mods[mi] = { ...mods[mi], data: { ...data, sections } };
-                                return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                            });
-                        }
-                        // Mark social done
-                        setThinkingProcesses(prev => {
-                            const flow = { ...prev[msgIdx] };
-                            const mods = [...flow.modules];
-                            const data = { ...(mods[mi].data as SearchModuleData) };
-                            const sections = (data.sections || []).map(s =>
-                                s.id === 'social' ? { ...s, status: 'done' as const } : s
-                            );
-                            mods[mi] = { ...mods[mi], data: { ...data, sections } };
-                            return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                        });
-                    }
-
-                    // --- Data providers sub-section ---
-                    if (dataSec && dataSec.providers) {
-                        // Set data section to active
-                        setThinkingProcesses(prev => {
-                            const flow = { ...prev[msgIdx] };
-                            const mods = [...flow.modules];
-                            const data = { ...(mods[mi].data as SearchModuleData) };
-                            const sections = (data.sections || []).map(s =>
-                                s.id === 'data_providers' ? { ...s, status: 'active' as const } : s
-                            );
-                            mods[mi] = { ...mods[mi], data: { ...data, sections } };
-                            return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                        });
-                        await new Promise(r => setTimeout(r, 300));
-
-                        // Animate each provider pill
-                        const providers = dataSec.providers;
-                        for (let pi = 0; pi < providers.length; pi++) {
-                            await new Promise(r => setTimeout(r, 80 + Math.random() * 120));
-                            setThinkingProcesses(prev => {
-                                const flow = { ...prev[msgIdx] };
-                                const mods = [...flow.modules];
-                                const data = { ...(mods[mi].data as SearchModuleData) };
-                                const sections = (data.sections || []).map(s => {
-                                    if (s.id !== 'data_providers') return s;
-                                    const ps = [...(s.providers || [])];
-                                    if (pi > 0) ps[pi - 1] = { ...ps[pi - 1], status: 'done' };
-                                    ps[pi] = { ...ps[pi], status: 'active' };
-                                    return { ...s, providers: ps };
-                                });
-                                mods[mi] = { ...mods[mi], data: { ...data, sections } };
-                                return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                            });
-                        }
-                        // Complete all providers and mark data section done
-                        setThinkingProcesses(prev => {
-                            const flow = { ...prev[msgIdx] };
-                            const mods = [...flow.modules];
-                            const data = { ...(mods[mi].data as SearchModuleData) };
-                            const sections = (data.sections || []).map(s => {
-                                if (s.id !== 'data_providers') return s;
-                                const ps = (s.providers || []).map(p => ({ ...p, status: 'done' as const }));
-                                return { ...s, status: 'done' as const, providers: ps };
-                            });
-                            mods[mi] = { ...mods[mi], data: { ...data, sections } };
-                            return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                        });
-                    }
-                } else if (sd.variant === 'data_providers' && sd.providers) {
-                    // Animate providers connecting
-                    for (let pi = 0; pi < sd.providers.length; pi++) {
-                        await new Promise(r => setTimeout(r, 80 + Math.random() * 120));
-                        setThinkingProcesses(prev => {
-                            const flow = { ...prev[msgIdx] };
-                            const mods = [...flow.modules];
-                            const data = { ...(mods[mi].data as SearchModuleData) };
-                            const providers = [...(data.providers || [])];
-                            if (pi > 0) providers[pi - 1] = { ...providers[pi - 1], status: 'done' };
-                            providers[pi] = { ...providers[pi], status: 'active' };
-                            mods[mi] = { ...mods[mi], data: { ...data, providers } };
-                            return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                        });
-                    }
-                    // Complete all providers
-                    setThinkingProcesses(prev => {
-                        const flow = { ...prev[msgIdx] };
-                        const mods = [...flow.modules];
-                        const data = { ...(mods[mi].data as SearchModuleData) };
-                        const providers = (data.providers || []).map(p => ({ ...p, status: 'done' as const }));
-                        mods[mi] = { ...mods[mi], data: { ...data, providers, totalFound: providers.length } };
-                        return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                    });
+        const onModule = (data: { sessionId: string; moduleType: string; status: string; data?: any }) => {
+            saLog('← agent:chat:module', { expect: sessionId, got: data?.sessionId, moduleType: data?.moduleType, status: data?.status, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            
+            setThinkingProcesses(prev => {
+                const msgIdx = activeMsgIdxRef.current;
+                const flow = prev[msgIdx] || { modules: [], isActive: true, route: 'Loka Agent' };
+                const mods = [...flow.modules];
+                
+                let modIdx = mods.findIndex(m => m.type === data.moduleType);
+                if (modIdx === -1) {
+                    mods.push({ type: data.moduleType as any, status: data.status as any, data: data.data });
                 } else {
-                    // Social search: web then social sources
-                    await new Promise(r => setTimeout(r, 800));
-                    const webSources = [...WEB_SOURCES_POOL].sort(() => Math.random() - 0.5).slice(0, 5);
-                    updateModuleData(mi, { sources: webSources, description: 'Searching for latest financial reports, analyst coverage, and market trends' });
-                    await new Promise(r => setTimeout(r, 1000));
-                    const socialSources = [...SOCIAL_SOURCES_POOL].sort(() => Math.random() - 0.5).slice(0, 5);
-                    updateModuleData(mi, { sources: [...webSources, ...socialSources], totalFound: webSources.length + socialSources.length });
+                    const prev = mods[modIdx];
+                    const prevStatus = prev.status;
+                    const incoming = data.status as string;
+                    const isDowngradeToActive =
+                        (incoming === 'active' || incoming === 'analyzing') &&
+                        (prevStatus === 'completed' || prevStatus === 'done' || prevStatus === 'concluded');
+                    const nextStatus = isDowngradeToActive ? prevStatus : incoming;
+                    mods[modIdx] = { ...prev, status: nextStatus as any };
+                    if (data.data) {
+                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...data.data };
+                    }
                 }
-                updateModule(mi, { status: 'completed' });
-            }
+                
+                return { ...prev, [msgIdx]: { ...flow, modules: mods } };
+            });
+        };
 
-            if (mod.type === 'analysis') {
-                const stages = (mod.data as AnalysisModuleData).stages;
-                const stageResults = [
-                    [{ label: 'PE', value: '24.5x', color: 'text-emerald-600' }, { label: 'Revenue Growth', value: '+28%', color: 'text-emerald-600' }],
-                    [{ label: 'MA排列', value: '弱势多头', color: 'text-yellow-600' }, { label: 'Support', value: '175.76' }],
-                    [{ label: 'Sentiment', value: 'Mixed', color: 'text-yellow-600' }, { label: 'Sources', value: '12 articles' }],
-                    [],
-                ];
-                for (let si = 0; si < stages.length; si++) {
-                    await new Promise(r => setTimeout(r, 600 + Math.random() * 800));
-                    setThinkingProcesses(prev => {
-                        const flow = { ...prev[msgIdx] };
-                        const mods = [...flow.modules];
-                        const data = { ...(mods[mi].data as AnalysisModuleData) };
-                        const newStages = [...data.stages];
-                        if (si > 0) newStages[si - 1] = { ...newStages[si - 1], status: 'done', result: stageResults[si - 1] };
-                        newStages[si] = { ...newStages[si], status: 'active' };
-                        mods[mi] = { ...mods[mi], data: { ...data, stages: newStages } };
-                        return { ...prev, [msgIdx]: { ...flow, modules: mods } };
+        const onProgress = (data: { sessionId: string; content: string }) => {
+            if (data.sessionId === sessionId && import.meta.env.DEV) {
+                progressChunkIdxRef.current += 1;
+                const n = progressChunkIdxRef.current;
+                if (n === 1 || n % 35 === 0) {
+                    saLog('← agent:chat:progress (sample)', { n, chunkLen: data?.content?.length ?? 0 });
+                }
+            }
+            if (data.sessionId !== sessionId) return;
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + data.content };
+                return updated;
+            });
+        };
+
+        const onStreamDone = (data: { sessionId: string; content?: string }) => {
+            saLog('← agent:chat:stream_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            try {
+                sessionStorage.removeItem(SA_PENDING_KEY);
+            } catch {
+                /* ignore */
+            }
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { 
+                    ...updated[msgIdx], 
+                    content: data.content || updated[msgIdx].content,
+                    isStreaming: false, 
+                    timestamp: new Date().toLocaleTimeString() 
+                };
+                return updated;
+            });
+            setIsStreaming(false);
+            setThinkingProcesses(prev => {
+                const msgIdx = activeMsgIdxRef.current;
+                if (!prev[msgIdx]) return prev;
+                return { ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } };
+            });
+        };
+
+        const onError = (data: { sessionId: string; error: string }) => {
+            saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            try {
+                sessionStorage.removeItem(SA_PENDING_KEY);
+            } catch {
+                /* ignore */
+            }
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + data.error, isStreaming: false };
+                return updated;
+            });
+            setIsStreaming(false);
+        };
+
+        const onThinkingLog = (data: { sessionId: string; line: string }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setThinkingProcesses((prev) => {
+                const flow = prev[msgIdx] || { modules: [], isActive: true };
+                const prevLog = flow.signalResearchLog || '';
+                const next = prevLog ? `${prevLog}\n${data.line}` : data.line;
+                const capped = next.length > 120_000 ? next.slice(-120_000) : next;
+                return { ...prev, [msgIdx]: { ...flow, signalResearchLog: capped } };
+            });
+        };
+
+        const onToolTrace = (data: { sessionId: string; step: Record<string, unknown> }) => {
+            const st = data?.step;
+            const t = st && typeof st === 'object' ? (st as { type?: string }).type : undefined;
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const step = data.step;
+            if (t !== 'thinking' && t !== 'tool_start' && t !== 'tool_done') {
+                return;
+            }
+            if (import.meta.env.DEV) {
+                saLog('← agent:chat:tool_trace', { expect: sessionId, got: data?.sessionId, stepType: t, match: true });
+            }
+            setThinkingProcesses(prev => {
+                const flow = prev[msgIdx] || { modules: [], isActive: true };
+                if (step.type === 'thinking') {
+                    return {
+                        ...prev,
+                        [msgIdx]: { ...flow, planningMessage: String(step.message || '') },
+                    };
+                }
+                const trace = [...(flow.toolTrace || [])];
+                if (step.type === 'tool_start') {
+                    trace.push({
+                        tool: step.tool as string | undefined,
+                        displayName: (step.displayName as string) || (step.tool as string) || '',
+                        status: 'running',
                     });
+                } else if (step.type === 'tool_done') {
+                    for (let i = trace.length - 1; i >= 0; i--) {
+                        if (trace[i].status === 'running' && trace[i].tool === step.tool) {
+                            trace[i] = {
+                                ...trace[i],
+                                status: step.success === false ? 'error' : 'done',
+                                durationSec: typeof step.duration === 'number' ? step.duration : undefined,
+                            };
+                            break;
+                        }
+                    }
+                } else {
+                    return prev;
                 }
-                await new Promise(r => setTimeout(r, 800));
-                // Complete with decision
-                setThinkingProcesses(prev => {
-                    const flow = { ...prev[msgIdx] };
-                    const mods = [...flow.modules];
-                    const data = { ...(mods[mi].data as AnalysisModuleData) };
-                    const newStages = data.stages.map((s, i) => ({ ...s, status: 'done' as const, result: stageResults[i] }));
-                    const decision = { verdict: '🟡 Hold · Moderate', score: 55, color: 'text-yellow-600', action: 'Wait for confirmation' };
-                    mods[mi] = { ...mods[mi], status: 'completed', data: { ...data, stages: newStages, decision } };
-                    return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                });
-            }
+                return { ...prev, [msgIdx]: { ...flow, toolTrace: trace } };
+            });
+        };
 
-            if (mod.type === 'simulation') {
-                const panelists = (mod.data as SimulationModuleData).panelists;
-                const verdicts = ['Buy', 'Hold', 'Buy', 'Sell', 'Hold', 'Buy'];
-                for (let pi = 0; pi < panelists.length; pi++) {
-                    await new Promise(r => setTimeout(r, 800 + Math.random() * 600));
+        socket.on('agent:chat:routing', onRouting);
+        socket.on('agent:chat:routed', onRouted);
+        socket.on('agent:chat:started', onStarted);
+        socket.on('agent:chat:module', onModule);
+        socket.on('agent:chat:progress', onProgress);
+        socket.on('agent:chat:stream_done', onStreamDone);
+        socket.on('agent:chat:error', onError);
+        socket.on('agent:chat:tool_trace', onToolTrace);
+        socket.on('agent:chat:thinking_log', onThinkingLog);
+
+        return () => {
+            socket.off('agent:chat:routing', onRouting);
+            socket.off('agent:chat:routed', onRouted);
+            socket.off('agent:chat:started', onStarted);
+            socket.off('agent:chat:module', onModule);
+            socket.off('agent:chat:progress', onProgress);
+            socket.off('agent:chat:stream_done', onStreamDone);
+            socket.off('agent:chat:error', onError);
+            socket.off('agent:chat:tool_trace', onToolTrace);
+            socket.off('agent:chat:thinking_log', onThinkingLog);
+        };
+    }, [sessionId]);
+
+    /** Reconnect / Refresh: replay tool orchestration and completed reports from server buffer */
+    useEffect(() => {
+        replayRecoverAttemptedRef.current = false;
+        const replay = () => {
+            saLog('emit agent:chat:replay', { sessionId, ...socket.getDebugState() });
+            socket.emit(
+                'agent:chat:replay',
+                { sessionId },
+                (res: {
+                    ok?: boolean;
+                    isRunning?: boolean;
+                    steps?: unknown[];
+                    report?: string;
+                    status?: string;
+                }) => {
+                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, isRunning: res?.isRunning, status: res?.status });
+
+                    const stepsLen = Array.isArray(res?.steps) ? res.steps.length : 0;
+                    const hasSteps = stepsLen > 0;
+
+                    if (res?.ok && hasSteps) {
+                        const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        const trace = buildTraceFromSteps(res.steps!);
+                        const planning = extractPlanningMessage(res.steps!);
+                        setThinkingProcesses(prev => ({
+                            ...prev,
+                            [msgIdx]: {
+                                ...(prev[msgIdx] || {
+                                    modules: [],
+                                    isActive: !!res.isRunning,
+                                    route: 'Investment Analyst',
+                                }),
+                                toolTrace: trace,
+                                planningMessage: planning,
+                                isActive: !!res.isRunning,
+                            },
+                        }));
+                        if (res.report) {
+                            setMessages(prev => {
+                                const c = [...prev];
+                                if (c[msgIdx]) {
+                                    c[msgIdx] = {
+                                        ...c[msgIdx],
+                                        content: res.report,
+                                        isStreaming: false,
+                                        timestamp: new Date().toLocaleTimeString(),
+                                    };
+                                }
+                                return c;
+                            });
+                            if (!res.isRunning) setIsStreaming(false);
+                        }
+                        return;
+                    }
+
+                    if (res?.ok && res.report && !res.isRunning) {
+                        const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        setMessages(prev => {
+                            const c = [...prev];
+                            if (c[msgIdx]) {
+                                c[msgIdx] = {
+                                    ...c[msgIdx],
+                                    content: res.report!,
+                                    isStreaming: false,
+                                    timestamp: new Date().toLocaleTimeString(),
+                                };
+                            }
+                            return c;
+                        });
+                        setIsStreaming(false);
+                        setThinkingProcesses(prev => ({
+                            ...prev,
+                            [msgIdx]: { ...(prev[msgIdx] || { modules: [], isActive: false }), isActive: false },
+                        }));
+                        return;
+                    }
+
+                    if (res?.ok && res.isRunning) {
+                        saLog('replay: server session still running, wait for push');
+                        return;
+                    }
+
+                    /** Server has no memory buffer (common during restart or never successfully started) and local still has SA_PENDING: resend agent:chat */
+                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; assistantMsgIdx?: number } | null = null;
+                    try {
+                        const raw = sessionStorage.getItem(SA_PENDING_KEY);
+                        pending = raw ? (JSON.parse(raw) as typeof pending) : null;
+                    } catch {
+                        pending = null;
+                    }
+                    const canResend =
+                        pending?.streaming &&
+                        pending.sessionId === sessionId &&
+                        typeof pending.userContent === 'string' &&
+                        pending.userContent.length > 0 &&
+                        !replayRecoverAttemptedRef.current;
+
+                    if (canResend) {
+                        replayRecoverAttemptedRef.current = true;
+                        const msgIdx = typeof pending!.assistantMsgIdx === 'number' ? pending!.assistantMsgIdx! : 1;
+                        activeMsgIdxRef.current = msgIdx;
+                        saLog('replay empty → fallback emit agent:chat (local pending)', { sessionId, msgIdx });
+                        setThinkingProcesses(prev => ({
+                            ...prev,
+                            [msgIdx]: { modules: [], isActive: true, route: 'Routing...' },
+                        }));
+                        setIsStreaming(true);
+                        socket.emit('agent:chat', {
+                            content: pending!.userContent!,
+                            mode: chatMode,
+                            sessionId,
+                            agentId: chatSelectedAgent,
+                        });
+                        return;
+                    }
+
+                    saLog('replay empty and no resendable pending — stop spinner');
+                    try {
+                        sessionStorage.removeItem(SA_PENDING_KEY);
+                    } catch {
+                        /* ignore */
+                    }
+                    setIsStreaming(false);
                     setThinkingProcesses(prev => {
-                        const flow = { ...prev[msgIdx] };
-                        const mods = [...flow.modules];
-                        const data = { ...(mods[mi].data as SimulationModuleData) };
-                        const newPanelists = [...data.panelists];
-                        if (pi > 0) newPanelists[pi - 1] = { ...newPanelists[pi - 1], status: 'done', verdict: verdicts[pi - 1], confidence: 60 + Math.floor(Math.random() * 30) };
-                        newPanelists[pi] = { ...newPanelists[pi], status: 'active' };
-                        mods[mi] = { ...mods[mi], data: { ...data, panelists: newPanelists } };
-                        return { ...prev, [msgIdx]: { ...flow, modules: mods } };
+                        const idx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        if (!prev[idx]) return prev;
+                        return {
+                            ...prev,
+                            [idx]: { ...prev[idx], isActive: false, route: prev[idx].route || '—' },
+                        };
                     });
-                }
-                await new Promise(r => setTimeout(r, 500));
-                setThinkingProcesses(prev => {
-                    const flow = { ...prev[msgIdx] };
-                    const mods = [...flow.modules];
-                    const data = { ...(mods[mi].data as SimulationModuleData) };
-                    const newPanelists = data.panelists.map((p, i) => ({ ...p, status: 'done' as const, verdict: verdicts[i], confidence: 60 + Math.floor(Math.random() * 30) }));
-                    mods[mi] = { ...mods[mi], status: 'completed', data: { ...data, panelists: newPanelists, prediction: { verdict: 'Buy', confidence: 74 } } };
-                    return { ...prev, [msgIdx]: { ...flow, modules: mods } };
-                });
-            }
-
-            if (mod.type === 'consensus') {
-                updateModuleData(mi, { status: 'building', round: 0 });
-                await new Promise(r => setTimeout(r, 800));
-                for (let round = 1; round <= 3; round++) {
-                    updateModuleData(mi, { status: 'discussing', round });
-                    await new Promise(r => setTimeout(r, 1000));
-                }
-                updateModuleData(mi, { status: 'concluded', conclusion: { verdict: '↑ Low Risk', confidence: 78 } });
-                updateModule(mi, { status: 'completed' });
-            }
-
-            if (mod.type !== 'consensus') updateModule(mi, { status: 'completed' });
+                    setMessages(prev => {
+                        const idx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        if (!prev[idx] || prev[idx].role !== 'assistant') return prev;
+                        const cur = prev[idx].content || '';
+                        if (cur.trim().length > 0) return prev;
+                        const next = [...prev];
+                        next[idx] = {
+                            ...next[idx],
+                            content:
+                                '**Cannot restore conversation** (server has no buffer for this session). Please resend the question.',
+                            isStreaming: false,
+                            timestamp: new Date().toLocaleTimeString(),
+                        };
+                        return next;
+                    });
+                },
+            );
+        };
+        const onConnectReplay = () => {
+            saLog('connect → replay');
+            replay();
+        };
+        if (socket.connected) {
+            saLog('replay on mount (already connected)');
+            replay();
         }
+        socket.on('connect', onConnectReplay);
+        return () => {
+            socket.off('connect', onConnectReplay);
+        };
+    }, [sessionId, chatMode, chatSelectedAgent]);
 
-        // Done
-        const duration = Math.round((Date.now() - startTime) / 1000);
-        const doneIdx = modules.length - 1;
-        updateModule(doneIdx, { status: 'completed', data: { duration } });
-        setThinkingProcesses(prev => ({ ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } }));
-    }, [chatMode]);
+    const sendToAI = useCallback((text: string, existingMessages?: Message[]) => {
+        saLog('sendToAI()', {
+            textPreview: text.slice(0, 100),
+            mode: chatMode,
+            sessionId,
+            agentId: chatSelectedAgent,
+            ...socket.getDebugState(),
+        });
 
-    // ─── Mock response generator ──────────────────────────
-    const getMockResponse = (text: string): string => {
-        const t = text.toLowerCase();
-        if (/sentiment|看法|舆情|signal/i.test(t)) {
-            return `## Market Sentiment Analysis
-
-Based on analysis across Reddit, X/Twitter, YouTube, and financial news:
-
-**Overall Sentiment: Moderately Bullish** (Score: 68/100)
-
-- **Social Media Pulse**: Strong positive momentum on X with 73% bullish mentions in the past 24h
-- **Reddit Discussion**: r/wallstreetbets trending with 2.4k upvotes on bullish DD posts
-- **News Coverage**: 8 out of 12 recent articles carry positive outlook, citing strong Q4 earnings
-- **Institutional Flow**: Net inflows of $340M detected across major ETFs this week
-
-**Key Signals Detected:**
-1. Unusual options activity — heavy call buying at $200 strike (expiry next month)
-2. Short interest down 18% week-over-week
-3. Analyst upgrades: 3 new "Buy" ratings in the past 5 days
-
-**Risk Factors:**
-- Macro uncertainty: Fed rate decision pending next week
-- Sector rotation risk: Tech valuations stretched vs historical averages
-
-**Recommendation:** Monitor closely. Positive momentum is building, but wait for Fed clarity before increasing exposure.`;
-        }
-        if (/今天|行情|价格|today|daily|情况/i.test(t)) {
-            return `## Daily Market Brief
-
-**As of ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}**
-
-| Metric | Value | Change |
-|--------|-------|--------|
-| Price | $187.42 | +2.3% |
-| Volume | 48.2M | +15% vs avg |
-| Market Cap | $2.87T | — |
-| P/E Ratio | 24.5x | — |
-| 52w Range | $124.60 – $198.23 | Near high |
-
-**Today's Highlights:**
-1. Opened strong following positive pre-market sentiment from Asia
-2. Volume surging above 20-day average — institutional interest confirmed
-3. Key resistance at $190 being tested; breakout could target $205
-
-**Technical Setup:**
-- RSI: 62 (neutral-bullish)
-- MACD: Bullish crossover confirmed 2 days ago
-- Moving Averages: Price above 50-day and 200-day MA — bullish structure intact
-
-**Data Sources:** Yahoo Finance, Bloomberg, Alpha Vantage, Polygon.io`;
-        }
-        if (/模拟|simulate|巴菲特|buffett|hedge/i.test(t)) {
-            return `## AI Hedge Fund Simulation Results
-
-**Simulation Panel:** 5 legendary investors analyzed this opportunity
-
-| Investor | Verdict | Confidence | Key Reasoning |
-|----------|---------|------------|---------------|
-| Warren Buffett | **Buy** | 82% | Strong moat, durable competitive advantage, fair valuation |
-| Charlie Munger | **Buy** | 76% | Quality business at a reasonable price, excellent management |
-| Ray Dalio | **Hold** | 61% | Macro headwinds could create short-term pressure |
-| Cathie Wood | **Buy** | 88% | Massive AI/tech tailwind, 5-year compounding story |
-| Peter Lynch | **Buy** | 79% | Growth at reasonable price, strong earnings trajectory |
-
-**Consensus: Buy** (Confidence: 77.2%)
-
-**Simulated Portfolio Action:**
-- Allocate 8-12% of portfolio
-- Entry zone: $180-188
-- Target: $225 (12-month)
-- Stop loss: $165 (-12%)
-
-**Monte Carlo Simulation (10,000 runs):**
-- Median 12-month return: +18.4%
-- 90th percentile: +34.2%
-- 10th percentile: -8.7%
-- Probability of positive return: 74.3%`;
-        }
-        if (/分析|analysis|analyze|深度|背景|建议|invest|调研|research/i.test(t)) {
-            return `## Investment Analysis Report
-
-### Executive Summary
-**Verdict: Moderately Bullish** | Confidence: 72% | Risk Level: Medium
-
-### Fundamental Analysis
-- **Revenue Growth:** +28% YoY ($35.4B TTM), accelerating for 3 consecutive quarters
-- **Gross Margin:** 74.2%, expanding due to AI product mix shift
-- **Free Cash Flow:** $12.8B TTM, providing strong reinvestment capacity
-- **Debt/Equity:** 0.41x — conservative leverage, well within comfort zone
-
-### Technical Analysis
-- **Trend:** Uptrend confirmed (price above 50/200 MA)
-- **Support Levels:** $175.76 (strong), $162.30 (secondary)
-- **Resistance:** $198.23 (52-week high), $210 (psychological)
-- **RSI:** 62 — room to run before overbought
-- **Volume Profile:** Accumulation pattern over past 3 weeks
-
-### Sentiment Analysis
-- **News Sentiment:** +0.67 (positive bias across 47 articles analyzed)
-- **Social Score:** 78/100 (Reddit, X, StockTwits aggregated)
-- **Insider Activity:** 2 executive purchases in past 30 days, no sales
-- **Institutional Ownership:** Up 2.3% QoQ
-
-### Risk Assessment
-| Risk Factor | Level | Mitigation |
-|-------------|-------|-----------|
-| Valuation stretch | Medium | DCF suggests 15% upside at current multiples |
-| Macro sensitivity | Medium | Diversified revenue base provides cushion |
-| Competition | Low | Strong moat with 3-year technology lead |
-| Regulatory | Low | No pending actions or investigations |
-
-### Decision
-**Action: Accumulate on dips** — Strong fundamentals support continued upside. Technical setup favors buyers. Enter in $180-188 range with 6-month horizon.`;
-        }
-        // Generic / greeting
-        return `Hello! I'm Loka Super Agent — your AI-powered research and analysis assistant.
-
-Here's what I can help you with:
-
-**Investment Analysis** — Deep-dive into any stock, crypto, or market
-- "Analyze NVIDIA's investment potential"
-- "What's the market sentiment on Bitcoin?"
-
-**Market Research** — Industry reports and trend analysis
-- "Research the Southeast Asian food delivery market"
-- "Compare Figma vs Sketch strengths and weaknesses"
-
-**Simulation** — AI hedge fund style predictions
-- "Simulate Warren Buffett analyzing Tesla"
-- "Run a prediction market simulation on AI stocks"
-
-Try asking me something specific, and I'll assemble the right team of AI agents to deliver a structured report.`;
-    };
-
-    // ─── Send to AI (mock streaming) ────────────────────────
-    const sendToAI = useCallback(async (text: string, existingMessages?: Message[]) => {
         setIsStreaming(true);
 
         const currentMessages = existingMessages ?? [];
         const msgIdx = currentMessages.length;
+        activeMsgIdxRef.current = msgIdx;
 
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
         
-        // Open thinking process panel automatically
         setActiveGraphMsgIdx(msgIdx);
         setShowThinkingPanel(true);
         setShowGraphPanel(false);
 
-        // Run thinking simulation (visual effect)
-        await simulateThinking(msgIdx, text);
+        setThinkingProcesses(prev => ({
+            ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
+        }));
 
-        // Simulate streaming the mock response
-        const mockContent = getMockResponse(text);
-        const words = mockContent.split(' ');
-        let accumulated = '';
-
-        for (let i = 0; i < words.length; i++) {
-            accumulated += (i === 0 ? '' : ' ') + words[i];
-            const snapshot = accumulated;
-            setMessages(prev => {
-                const updated = [...prev];
-                updated[msgIdx] = { ...updated[msgIdx], content: snapshot };
-                return updated;
-            });
-            // Variable speed: faster for common words, slight pause on punctuation
-            const delay = /[.!?\n]$/.test(words[i]) ? 30 : 8;
-            await new Promise(r => setTimeout(r, delay));
+        try {
+            sessionStorage.setItem(
+                SA_PENDING_KEY,
+                JSON.stringify({
+                    sessionId,
+                    userContent: text,
+                    assistantMsgIdx: msgIdx,
+                    streaming: true,
+                }),
+            );
+        } catch {
+            /* ignore */
         }
 
-        setMessages(prev => {
-            const updated = [...prev];
-            updated[msgIdx] = { ...updated[msgIdx], isStreaming: false, timestamp: new Date().toLocaleTimeString() };
-            return updated;
+        socket.emit('agent:chat', {
+            content: text,
+            mode: chatMode,
+            sessionId,
+            agentId: chatSelectedAgent
         });
+        saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
-        setIsStreaming(false);
-    }, [simulateThinking]);
+    }, [chatMode, sessionId, chatSelectedAgent]);
+
+    // ─── Fetch History ──────────────────────────
+    useEffect(() => {
+        if (initialSessionId) {
+            api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
+                if (history && history.length > 0) {
+                    setMessages(
+                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => ({
+                            role: m.role as 'user' | 'assistant',
+                            content: m.content || '',
+                            timestamp: new Date(m.createdAt).toLocaleTimeString(),
+                            isStreaming: false,
+                            metadata: m.metadata ?? null,
+                        })),
+                    );
+                    const restoredThinking: Record<number, ThinkingFlow> = {};
+                    history.forEach(
+                        (m: { role: string; metadata?: string | null }, idx: number) => {
+                            if (m.role !== 'assistant' || !m.metadata) return;
+                            try {
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow };
+                                if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
+                                    restoredThinking[idx] = {
+                                        ...meta.thinkingFlow,
+                                        isActive: false,
+                                    };
+                                }
+                            } catch {
+                                /* ignore */
+                            }
+                        },
+                    );
+                    setThinkingProcesses(restoredThinking);
+                    activeMsgIdxRef.current = history.length - 1;
+                }
+            }).catch(console.error);
+        }
+    }, [initialSessionId]);
+
+    // ─── Push URL / Sync Session ID ────────────────────────
+    useEffect(() => {
+        if (!initialSessionId && !window.location.search.includes('session=')) {
+            window.history.replaceState(null, '', `/?session=${sessionId}`);
+        }
+    }, [sessionId, initialSessionId]);
 
     // ─── Auto-send initial message ──────────────────────────
     useEffect(() => {
         if (hasSentInitial.current) return;
+        if (initialSessionId) {
+            hasSentInitial.current = true;
+            saLog('initial: skipped auto-send because initialSessionId is provided (history load)');
+            return;
+        }
+        if (restoredFromPendingRef.current) {
+            saLog('initial: restored from SA_PENDING — skip emit agent:chat (wait replay/socket)');
+            hasSentInitial.current = true;
+            activeMsgIdxRef.current = 1;
+            setActiveGraphMsgIdx(1);
+            setShowThinkingPanel(true);
+            setThinkingProcesses(prev => ({
+                ...prev,
+                1: { ...prev[1], modules: prev[1]?.modules ?? [], isActive: true, route: 'Investment Analyst' },
+            }));
+            return;
+        }
+        if (!initialMessage.trim()) return;
         hasSentInitial.current = true;
+        
+        // Broadcast new session for sidebar
+        window.dispatchEvent(new CustomEvent('session-started', {
+            detail: { id: sessionId, title: initialMessage, agentId: chatSelectedAgent || 'auto' }
+        }));
+
         const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
-        // Pass the current messages array directly to avoid stale closure
+        saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
         setTimeout(() => sendToAI(initialMessage, initialMessages), 50);
-    }, [initialMessage, sendToAI]);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSend = () => {
         if (!inputText.trim() || isStreaming) return;
         const text = inputText.trim();
+        saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
         const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
@@ -1531,8 +1582,12 @@ Try asking me something specific, and I'll assemble the right team of AI agents 
                                                     />
                                                 )}
                                                 {msg.content ? (
-                                                    <div className="text-[13px] text-gray-700 leading-relaxed space-y-1">
-                                                        {renderMarkdown(msg.content)}
+                                                    <div className="markdown-content text-[13px] text-gray-700 leading-relaxed space-y-1 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
+                                                        {renderMarkdownContent(
+                                                            msg.role === 'assistant'
+                                                                ? stripInternalResearchCitations(msg.content)
+                                                                : msg.content,
+                                                        )}
                                                     </div>
                                                 ) : msg.isStreaming ? (
                                                     <div className="flex items-center gap-1 py-1">

@@ -236,7 +236,7 @@ export const Sidebar: React.FC<{
 
         {/* New chat */}
         <div className="px-3 pb-1">
-          <SideLink icon={I.Plus} label="New chat" onClick={() => go(Page.SUPER_AGENT)} isDark={false} />
+          <SideLink icon={I.Plus} label="New chat" onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} isDark={false} />
         </div>
 
         <div className="mx-4 my-2 h-px bg-gray-100" />
@@ -300,7 +300,7 @@ export const Sidebar: React.FC<{
       <button onClick={onToggle} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
         <I.Panel /><span className="rail-tip">Expand</span>
       </button>
-      <button onClick={() => go(Page.SUPER_AGENT)} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
+      <button onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
         <I.Plus /><span className="rail-tip">New chat</span>
       </button>
       <button className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-3`}>
@@ -340,7 +340,7 @@ export const Sidebar: React.FC<{
 
       {/* New chat */}
       <div className="px-3 pb-1">
-        <SideLink icon={I.Plus} label="New chat" onClick={() => go(Page.SUPER_AGENT)} isDark={isDark} />
+        <SideLink icon={I.Plus} label="New chat" onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} isDark={isDark} />
       </div>
 
       <div className={`mx-4 my-2 h-px ${divider}`} />

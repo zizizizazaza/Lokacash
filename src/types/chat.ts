@@ -4,7 +4,7 @@
  */
 
 // ─── Chat Mode ──────────────────────────────────────────────
-export type ChatMode = 'auto' | 'fast' | 'collaborate' | 'roundtable';
+export type ChatMode = 'auto' | 'fast' | 'roundtable';
 
 // ─── Message ────────────────────────────────────────────────
 export interface Message {

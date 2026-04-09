@@ -10,6 +10,7 @@ xAI non-reasoning variant preferred: same pricing as reasoning, but
 faster (skips thinking phase, saves reasoning token output costs).
 """
 
+import os
 import re
 import sys
 from typing import Dict, List, Optional, Tuple
@@ -119,7 +120,15 @@ def select_openai_model(
         except http.HTTPError as e:
             sys.stderr.write(f"[Models] Failed to fetch OpenAI models: {e}")
             if hasattr(e, 'status_code') and e.status_code in (401, 403):
-                sys.stderr.write(" — API key may be invalid or lack permissions")
+                sys.stderr.write(
+                    " — cannot list models at api.openai.com (proxy/compatible keys often forbid GET /v1/models). "
+                    "Set OPENAI_MODEL_PIN to your chat model id, or use a key allowed to list models."
+                )
+            # Prefer explicit pin when listing fails (same as many OpenAI-compatible gateways).
+            pin_fallback = pin or (os.environ.get("OPENAI_MODEL_PIN") or "").strip()
+            if pin_fallback:
+                sys.stderr.write(f", using OPENAI_MODEL_PIN: {pin_fallback}\n")
+                return pin_fallback
             sys.stderr.write(f", using fallback {OPENAI_FALLBACK_MODELS[0]}\n")
             return OPENAI_FALLBACK_MODELS[0]
 

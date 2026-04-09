@@ -107,10 +107,16 @@ class StockAnalysisService extends EventEmitter {
       env.OPENAI_BASE_URL = baseUrl;
     }
 
+    // Use a unique session ID per analysis to prevent conversation history pollution.
+    // The Python agent's conversation_manager stores past turns keyed by session_id;
+    // reusing the same ID causes old (tool-less) responses to contaminate the LLM context,
+    // making it skip tool calls entirely.
+    const analysisSessionId = `${sessionId}_analysis_${Date.now()}`;
+
     const pythonProcess = spawn(pythonPath, [
       scriptPath,
       '--message', message,
-      '--session-id', sessionId,
+      '--session-id', analysisSessionId,
     ], {
       cwd: path.join(process.cwd(), 'tools', 'stock-analysis'),
       env: env as NodeJS.ProcessEnv,
@@ -132,20 +138,38 @@ class StockAnalysisService extends EventEmitter {
         try {
           const event: StepEvent = JSON.parse(trimmed);
 
-          // Store in buffer for reconnection replay
-          buffer.steps.push(event);
+          const isUiMetadata = (e: StepEvent) =>
+            e.type === 'generating' && e.message === '[UI_METADATA]';
 
+          // Live UI：每个 token/chunk 都转发；缓冲：合并连续的 generating 正文，避免万级 JSONL 撑爆内存
           if (event.type === 'done') {
+            buffer.steps.push(event);
             buffer.status = 'done';
             buffer.finalReport = event.content || '';
             onDone(event.content || '');
             this.scheduleCleanup(sessionId);
           } else if (event.type === 'error') {
+            buffer.steps.push(event);
             buffer.status = 'error';
             onError(event.message || 'Unknown error');
             this.scheduleCleanup(sessionId);
           } else {
-            // Forward step events (thinking, tool_start, tool_done, generating)
+            if (
+              event.type === 'generating' &&
+              typeof event.content === 'string' &&
+              event.content &&
+              !isUiMetadata(event)
+            ) {
+              const last = buffer.steps[buffer.steps.length - 1];
+              if (last?.type === 'generating' && !isUiMetadata(last)) {
+                last.content = (last.content || '') + event.content;
+                last.ts = event.ts;
+              } else {
+                buffer.steps.push({ ...event });
+              }
+            } else {
+              buffer.steps.push(event);
+            }
             onStep(event);
           }
         } catch (e) {
@@ -160,8 +184,19 @@ class StockAnalysisService extends EventEmitter {
       const logs = data.toString('utf-8').split('\n');
       for (const logLine of logs) {
         const clean = logLine.trim();
-        if (clean && !clean.includes('Tushare Token') && !clean.includes('通知渠道')) {
-          console.log(`[StockAnalysis Log] ${clean}`);
+        if (clean) {
+          if (clean.includes('[UI_METADATA]')) {
+             try {
+                const jsonStr = clean.split('[UI_METADATA]')[1].trim();
+                const metadata = JSON.parse(jsonStr);
+                // Fire metadata generic StepEvent or specially handle it (added to buffer or callback)
+                onStep({ type: 'generating', message: '[UI_METADATA]', content: jsonStr, ts: Date.now() });
+             } catch(e) {}
+             continue;
+          }
+          if (!clean.includes('Tushare Token') && !clean.includes('通知渠道')) {
+            console.log(`[StockAnalysis Log] ${clean}`);
+          }
         }
       }
     });

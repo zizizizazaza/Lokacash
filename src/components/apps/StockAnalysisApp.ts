@@ -12,7 +12,7 @@ import { socket } from '../../services/socket';
 const StockAnalysisApp: AgentAppAdapter = {
   id: 'stockanalysis',
   name: 'A/H/US Stock Tracker',
-  supportedModes: ['auto', 'fast', 'collaborate', 'roundtable'],
+  supportedModes: ['auto', 'fast', 'roundtable'],
   accentColor: 'red',
   socketPrefix: 'agent:stockanalysis',
   runningLabel: 'Stock Analysis Agent is working...',

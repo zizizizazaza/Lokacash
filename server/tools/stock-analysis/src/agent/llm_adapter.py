@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import litellm
 from litellm import Router
@@ -26,6 +26,23 @@ from src.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _stream_chunk_assistant_text(chunk: Any) -> str:
+    """Extract assistant-visible text delta from one LiteLLM streaming chunk (OpenAI-style)."""
+    try:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            return ""
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            return ""
+        text = getattr(delta, "content", None)
+        if text:
+            return text
+    except (IndexError, AttributeError, TypeError):
+        pass
+    return ""
 
 
 # ============================================================
@@ -253,6 +270,7 @@ class LLMToolAdapter:
         tools: List[dict],
         provider: Optional[str] = None,
         timeout: Optional[float] = None,
+        on_text_delta: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """Send messages + tool declarations to LLM, return normalized response.
 
@@ -261,11 +279,15 @@ class LLMToolAdapter:
                       [{"role": "system"/"user"/"assistant"/"tool", "content": ...}, ...]
             tools: OpenAI-format tool declarations; litellm converts to each provider's format.
             provider: Ignored (kept for backward compatibility).
+            on_text_delta: If set, uses ``stream=True`` and invokes this for each token/text delta
+                          as the model generates (true streaming). Tool rounds may yield no text.
 
         Returns:
             LLMResponse with either content (final answer) or tool_calls.
         """
-        return self.call_completion(messages, tools=tools, provider=provider, timeout=timeout)
+        return self.call_completion(
+            messages, tools=tools, provider=provider, timeout=timeout, on_text_delta=on_text_delta
+        )
 
     def call_text(
         self,
@@ -295,6 +317,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        on_text_delta: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
         config = self._config
@@ -319,6 +342,7 @@ class LLMToolAdapter:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=remaining_timeout,
+                    on_text_delta=on_text_delta,
                 )
             except Exception as e:
                 logger.warning(f"Agent LLM call failed with {model}: {e}")
@@ -338,6 +362,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        on_text_delta: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
         openai_messages = self._convert_messages(messages)
@@ -366,16 +391,42 @@ class LLMToolAdapter:
         use_channel_router = self._has_channel_config()
         _router_model_names = set(get_configured_llm_models(self._config.llm_model_list))
         agent_primary_model = get_effective_agent_primary_model(self._config)
+
+        if on_text_delta is not None:
+            call_kwargs["stream"] = True
+            stream_iter = None
+            if use_channel_router and self._router and model in _router_model_names:
+                stream_iter = self._router.completion(**call_kwargs)
+            elif self._router and model == agent_primary_model and not use_channel_router:
+                stream_iter = self._router.completion(**call_kwargs)
+            else:
+                keys = get_api_keys_for_model(model, self._config)
+                if keys:
+                    call_kwargs["api_key"] = keys[0]
+                call_kwargs.update(extra_litellm_params(model, self._config))
+                stream_iter = litellm.completion(**call_kwargs)
+
+            chunks: List[Any] = []
+            for chunk in stream_iter:
+                chunks.append(chunk)
+                piece = _stream_chunk_assistant_text(chunk)
+                if piece and on_text_delta:
+                    on_text_delta(piece)
+
+            if not chunks:
+                return LLMResponse(content="Empty LLM stream", provider="error")
+
+            built = litellm.stream_chunk_builder(chunks, messages=openai_messages)
+            if built is None:
+                logger.error("stream_chunk_builder returned None for model=%s", model)
+                return LLMResponse(content="Failed to aggregate streamed response", provider="error")
+            return self._parse_litellm_response(built, model)
+
         if use_channel_router and self._router and model in _router_model_names:
-            # Channel / YAML path: Router manages all models in its model_list
             response = self._router.completion(**call_kwargs)
         elif self._router and model == agent_primary_model and not use_channel_router:
-            # Legacy path: Router for primary model multi-key
             response = self._router.completion(**call_kwargs)
         else:
-            # Legacy/direct-env path: direct call (also handles direct-env
-            # providers like groq/ or bedrock/ that are not in the Router
-            # model_list even when channel mode is active)
             keys = get_api_keys_for_model(model, self._config)
             if keys:
                 call_kwargs["api_key"] = keys[0]

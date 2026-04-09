@@ -149,6 +149,7 @@ const KnowledgeGraphView: React.FC<{ data: KGData }> = ({ data }) => {
 };
 
 import { renderMarkdownContent, parseLine } from '../utils/markdown';
+import { stripInternalResearchCitations } from '../utils/researchCitations';
 
 /* ═══════════════════════════════════════════════════════════════
    DeepResearch — Main Component
@@ -433,7 +434,9 @@ export default function DeepResearch() {
                           {/* Final report */}
                           {!msg.isRunning && msg.content && !msg.isError && (
                             <div className="text-[13px] text-gray-700 leading-relaxed space-y-1">
-                              {renderMarkdownContent(msg.content)}
+                              {renderMarkdownContent(
+                                msg.role === 'agent' ? stripInternalResearchCitations(msg.content) : msg.content,
+                              )}
                             </div>
                           )}
                           {!msg.isRunning && msg.timestamp && (

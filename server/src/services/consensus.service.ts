@@ -9,6 +9,35 @@ export const PRESET_AGENTS = [
   { agent_id: 'agent_3', role: 'trading_strategist', capability_weight: 1.0, specialization: { technical: 0.85, strategy: 0.90 } },
 ];
 
+
+const AGENT_LABEL_ZH: Record<string, string> = {
+  agent_0: '风险分析',
+  agent_1: '市场分析',
+  agent_2: '研究情报',
+  agent_3: '交易策略',
+};
+
+const AGENT_ID_ORDER = ['agent_0', 'agent_1', 'agent_2', 'agent_3'] as const;
+
+export function formatConsensusAgentLabel(agentId: string): string {
+  const zh = AGENT_LABEL_ZH[agentId];
+  if (zh) return `${zh}（${agentId}）`;
+  const p = PRESET_AGENTS.find((a) => a.agent_id === agentId);
+  return p ? `${p.role}（${agentId}）` : agentId;
+}
+
+
+export function sortConsensusAgentEntries<T>(entries: [string, T][]): [string, T][] {
+  return [...entries].sort(([a], [b]) => {
+    const ia = AGENT_ID_ORDER.indexOf(a as (typeof AGENT_ID_ORDER)[number]);
+    const ib = AGENT_ID_ORDER.indexOf(b as (typeof AGENT_ID_ORDER)[number]);
+    if (ia >= 0 && ib >= 0) return ia - ib;
+    if (ia >= 0) return -1;
+    if (ib >= 0) return 1;
+    return a.localeCompare(b);
+  });
+}
+
 export async function pyFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${CONSENSUS_BASE}${path}`;
   const res = await fetch(url, {
@@ -93,6 +122,15 @@ export async function runConsensusEngine(userId: string, mode: string, message: 
     }),
   });
   console.log(`[Consensus] Step 4 ✅ Consensus finished`);
+  try {
+    const raw = JSON.stringify(consensusResult, null, 2);
+    const max = 200_000;
+    console.log(
+      `[Consensus] FULL API response (${raw.length} chars, log truncated to ${max}):\n${raw.length > max ? raw.slice(0, max) + '\n…[truncated]' : raw}`,
+    );
+  } catch (e) {
+    console.warn('[Consensus] Failed to stringify full response:', e);
+  }
 
   // ── Step 5: Format result ───────────────────────────────
   return {
@@ -111,6 +149,10 @@ export async function runConsensusEngine(userId: string, mode: string, message: 
       roundsUsed: consensusResult.rounds_used || 1,
       executionTime: consensusResult.execution_time || 0,
       consensusReached: consensusResult.consensus_reached ?? true,
+      finalSolution: consensusResult.final_solution ?? null,
+      discussionRounds: Array.isArray(consensusResult.discussion_rounds)
+        ? consensusResult.discussion_rounds
+        : [],
     },
   };
 }

@@ -150,6 +150,87 @@ class YfinanceFetcher(BaseFetcher):
             logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
             return f"{code}.SZ"
 
+    def _fetch_us_daily_history_from_stooq(
+        self, stock_code: str, start_date: str, end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        Yahoo / yfinance 日线失败（限流、空表等）时，用 Stooq 免费日线 CSV 兜底。
+
+        返回与 yfinance.download 相近的 DataFrame（DatetimeIndex + Open/High/Low/Close/Volume），
+        以便走同一套 _normalize_data。
+        """
+        if not self._is_us_stock(stock_code):
+            return None
+
+        symbol = stock_code.strip().upper()
+        stooq_symbol = f"{symbol.lower()}.us"
+        history_url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
+        request = Request(
+            history_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; DSA/1.0; +https://github.com/ZhuLinsen/daily_stock_analysis)",
+                "Accept": "text/plain,text/csv,*/*",
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = response.read().decode("utf-8", "ignore").strip()
+        except (HTTPError, URLError, TimeoutError) as exc:
+            logger.warning("[Stooq] 获取美股 %s 日线历史 HTTP 失败: %s", symbol, exc)
+            return None
+
+        if not payload or payload.upper().startswith("NO DATA"):
+            logger.warning("[Stooq] 美股 %s 日线历史无数据", symbol)
+            return None
+
+        try:
+            raw = pd.read_csv(StringIO(payload))
+        except Exception as exc:
+            logger.warning("[Stooq] 解析美股 %s 日线 CSV 失败: %s", symbol, exc)
+            return None
+
+        col_map: Dict[str, str] = {}
+        for c in raw.columns:
+            key = c.strip().lower()
+            if key == "date":
+                col_map[c] = "Date"
+            elif key in ("open", "high", "low", "close", "volume"):
+                col_map[c] = key.capitalize()
+        raw = raw.rename(columns=col_map)
+
+        needed = ("Date", "Open", "High", "Low", "Close")
+        if not all(c in raw.columns for c in needed):
+            logger.warning("[Stooq] 美股 %s 日线 CSV 列不完整: %s", symbol, list(raw.columns))
+            return None
+        if "Volume" not in raw.columns:
+            raw["Volume"] = 0.0
+
+        raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce")
+        raw = raw.dropna(subset=["Date"])
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        raw = raw[(raw["Date"] >= start_ts) & (raw["Date"] <= end_ts)]
+        if raw.empty:
+            logger.warning("[Stooq] 美股 %s 在 %s~%s 过滤后无 K 线", symbol, start_date, end_date)
+            return None
+
+        out = pd.DataFrame(
+            {
+                "Open": pd.to_numeric(raw["Open"], errors="coerce"),
+                "High": pd.to_numeric(raw["High"], errors="coerce"),
+                "Low": pd.to_numeric(raw["Low"], errors="coerce"),
+                "Close": pd.to_numeric(raw["Close"], errors="coerce"),
+                "Volume": pd.to_numeric(raw["Volume"], errors="coerce").fillna(0),
+            },
+            index=pd.DatetimeIndex(raw["Date"]),
+        )
+        out.index.name = "Date"
+        out = out.dropna(how="any", subset=["Open", "High", "Low", "Close"])
+        if out.empty:
+            return None
+        return out
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
@@ -174,6 +255,7 @@ class YfinanceFetcher(BaseFetcher):
 
         logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_date})")
 
+        yahoo_error: Optional[Exception] = None
         try:
             # 使用 yfinance 下载数据
             df = yf.download(
@@ -193,14 +275,30 @@ class YfinanceFetcher(BaseFetcher):
                     df = df.loc[:, mask].copy()
 
             if df.empty:
-                raise DataFetchError(f"Yahoo Finance 未查询到 {stock_code} 的数据")
-
-            return df
+                yahoo_error = DataFetchError(f"Yahoo Finance 未查询到 {stock_code} 的数据")
+            else:
+                return df
 
         except Exception as e:
             if isinstance(e, DataFetchError):
-                raise
-            raise DataFetchError(f"Yahoo Finance 获取数据失败: {e}") from e
+                yahoo_error = e
+            else:
+                wrapped = DataFetchError(f"Yahoo Finance 获取数据失败: {e}")
+                wrapped.__cause__ = e
+                yahoo_error = wrapped
+
+        if self._is_us_stock(stock_code):
+            stooq_df = self._fetch_us_daily_history_from_stooq(stock_code, start_date, end_date)
+            if stooq_df is not None and not stooq_df.empty:
+                logger.warning(
+                    "[Yfinance] Yahoo 日线不可用（%s），使用 Stooq 历史 K 线兜底",
+                    type(yahoo_error).__name__ if yahoo_error else "empty",
+                )
+                return stooq_df
+
+        if yahoo_error is not None:
+            raise yahoo_error
+        raise DataFetchError(f"Yahoo Finance 未查询到 {stock_code} 的数据")
 
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """

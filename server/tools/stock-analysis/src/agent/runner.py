@@ -363,6 +363,7 @@ def run_agent_loop(
     labels = thinking_labels or _THINKING_TOOL_LABELS
     tool_decls = tool_registry.to_openai_tools()
 
+
     start_time = time.time()
     tool_calls_log: List[Dict[str, Any]] = []
     non_retriable_tool_results: Dict[str, str] = {}
@@ -397,12 +398,30 @@ def run_agent_loop(
                 thinking_msg = f"[{label}] Complete, continuing analysis..."
             progress_callback({"type": "thinking", "step": step + 1, "message": thinking_msg})
 
-        # --- LLM call ---
+        # --- LLM call (stream=True when progress_callback: token/chunk deltas as model generates) ---
+        def _on_stream_delta(text: str) -> None:
+            if progress_callback and text:
+                progress_callback({"type": "generating", "step": step + 1, "content": text})
+
         response = llm_adapter.call_with_tools(
             messages,
             tool_decls,
             timeout=remaining_timeout,
+            on_text_delta=_on_stream_delta if progress_callback else None,
         )
+        # DEBUG: diagnose tool calling issue
+        logger.info(
+            "[DEBUG] LLM response: tool_calls=%d, content_len=%d, provider=%s, model=%s, tools_sent=%d",
+            len(response.tool_calls),
+            len(response.content or ""),
+            response.provider,
+            getattr(response, "model", "?"),
+            len(tool_decls),
+        )
+        if response.tool_calls:
+            logger.info("[DEBUG] Tool calls: %s", [tc.name for tc in response.tool_calls])
+        else:
+            logger.info("[DEBUG] No tool_calls! Content preview: %.200s", (response.content or "")[:200])
         provider_used = response.provider
         total_tokens += (response.usage or {}).get("total_tokens", 0)
         m = getattr(response, "model", "") or response.provider
@@ -504,9 +523,6 @@ def run_agent_loop(
                 time.time() - start_time,
                 total_tokens,
             )
-            if progress_callback:
-                progress_callback({"type": "generating", "step": step + 1, "message": "Generating final report..."})
-
             final_content = response.content or ""
             is_error = response.provider == "error"
 
@@ -611,7 +627,7 @@ def _execute_tools(
         else:
             _, result_str, success, dur, cached = _exec_single(tc)
         if progress_callback:
-            progress_callback({"type": "tool_done", "step": step, "tool": tc.name, "success": success, "duration": dur})
+            progress_callback({"type": "tool_done", "step": step, "tool": tc.name, "success": success, "duration": dur, "result_str": result_str})
         log_entry = {
             "step": step, "tool": tc.name, "arguments": tc.arguments,
             "success": success, "duration": dur, "result_length": len(result_str),
@@ -642,7 +658,7 @@ def _execute_tools(
                 pending.discard(future)
                 tc_item, result_str, success, dur, cached = future.result()
                 if progress_callback:
-                    progress_callback({"type": "tool_done", "step": step, "tool": tc_item.name, "success": success, "duration": dur})
+                    progress_callback({"type": "tool_done", "step": step, "tool": tc_item.name, "success": success, "duration": dur, "result_str": result_str})
                 tool_calls_log.append({
                     "step": step, "tool": tc_item.name, "arguments": tc_item.arguments,
                     "success": success, "duration": dur, "result_length": len(result_str),
