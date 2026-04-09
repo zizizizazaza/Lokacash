@@ -48,6 +48,8 @@ export const ActionIcons = {
   StockAnalysis: () => <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/><path d="M14 8h4.7v4.7"/></svg>,
   Forecast: () => <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>,
   Scout: () => <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10 10m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M14 10m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M8 8V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v4" /><path d="M18 8v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8" /><line x1="6" y1="12" x2="18" y2="12" /></svg>,
+  GuruCouncil: () => <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="7" r="3.5" /><path d="M3 21v-1.5a4.5 4.5 0 014.5-4.5h3a4.5 4.5 0 014.5 4.5V21" /><path d="M16 3.5a3.5 3.5 0 010 7" /><path d="M21 21v-1.5a4.5 4.5 0 00-3-4.24" /></svg>,
+  DailyNews: () => <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8a2 2 0 00-2 2v16a2 2 0 01-2 2zm0 0a2 2 0 01-2-2V9" /><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z" /></svg>,
 };
 
 export const UseCaseIcons: Record<string, React.FC> = {

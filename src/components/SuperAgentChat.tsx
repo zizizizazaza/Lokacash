@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 
 
@@ -180,15 +180,16 @@ function extractPlanningMessage(steps: unknown[]): string | undefined {
 interface RoundtableAgentVote {
     name: string;
     initials: string;
-    vote: 'agree' | 'disagree';
-    reasoning: string;
-    confidence: number;
+    agentId: string;
+    answer: string;      // Short answer summary (first line or extracted verdict)
+    reasoning: string;   // Full reasoning text
+    confidence: number;  // 0–100
 }
 
 interface ConsensusRound {
     round: number;
     agents: RoundtableAgentVote[];
-    result: 'consensus' | 'disagreement';
+    status: 'forming' | 'reached' | 'diverging';
     summary: string;
 }
 
@@ -197,8 +198,15 @@ interface RoundtableData {
     finalVerdict: { summary: string; confidence: number };
 }
 
+const ROUNDTABLE_AGENTS = [
+    { name: 'Fundamental Analyst', initials: 'FA', agentId: 'agent_0' },
+    { name: 'Macro Strategist', initials: 'MS', agentId: 'agent_1' },
+    { name: 'Sentiment Engine', initials: 'SE', agentId: 'agent_2' },
+    { name: 'Quant Tracker', initials: 'QT', agentId: 'agent_3' },
+];
+
 const AGENT_COLORS: Record<string, string> = {
-    TA: '#475569', MA: '#475569', NA: '#475569', TR: '#475569',
+    FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
 };
 
 // Unified robot icon for all agent avatars
@@ -212,43 +220,166 @@ const ROBOT_ICON = <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stro
 
 const AGENT_ICON = (_initials: string) => ROBOT_ICON;
 
-const STATIC_ROUNDTABLE_DATA: RoundtableData = {
-    rounds: [
-        {
-            round: 1,
-            agents: [
-                { name: 'Technical Analyst', initials: 'TA', vote: 'agree', reasoning: 'RSI at 62, MACD bullish crossover confirmed. Volume profile supports breakout above key resistance at $920.', confidence: 72 },
-                { name: 'Market Analyst', initials: 'MA', vote: 'agree', reasoning: 'Sector rotation favoring AI/semiconductor. Institutional inflows accelerating, fund positioning at 3-year highs.', confidence: 78 },
-                { name: 'News Analyst', initials: 'NA', vote: 'disagree', reasoning: 'Upcoming antitrust hearing creates headline risk. Export control rumors to China could impact 15% of revenue.', confidence: 60 },
-                { name: 'Trading Researcher', initials: 'TR', vote: 'agree', reasoning: 'Options flow heavily skewed to calls. Dark pool prints above VWAP suggest accumulation. Risk/reward favorable at current levels.', confidence: 75 },
-            ],
-            result: 'disagreement',
-            summary: '3 Agree / 1 Disagree — News Analyst flags regulatory headline risk. No consensus yet.',
-        },
-        {
-            round: 2,
-            agents: [
-                { name: 'Technical Analyst', initials: 'TA', vote: 'agree', reasoning: 'Adding: Fibonacci extension targets $1,050. Stop-loss at $870 gives 2.8:1 reward-to-risk ratio.', confidence: 76 },
-                { name: 'Market Analyst', initials: 'MA', vote: 'agree', reasoning: 'Even accounting for regulatory overhang, forward P/E discount vs peers suggests 20%+ upside.', confidence: 80 },
-                { name: 'News Analyst', initials: 'NA', vote: 'agree', reasoning: 'Revised: historical precedent shows antitrust hearings rarely lead to material action. Risk is priced in at current implied vol.', confidence: 65 },
-                { name: 'Trading Researcher', initials: 'TR', vote: 'agree', reasoning: 'Confirmed: whale accumulation pattern intact. Suggested entry via scaled limit orders across $900-$920 zone.', confidence: 82 },
-            ],
-            result: 'consensus',
-            summary: '4/4 Agree — News Analyst revised stance after reviewing regulatory precedent. Consensus reached.',
-        },
-    ],
-    finalVerdict: {
-        confidence: 76,
-        summary: 'Strong Buy with scaled entry at $900-$920. Target $1,050 (12-month). Key risk: export control policy changes.',
-    },
-};
+/** Build RoundtableData from a real consensus_done result */
+const buildRoundtableFromConsensus = (result: any): RoundtableData => {
+    const consensus = result?.consensus;
+    if (!consensus) return { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
 
-const buildRoundtableData = (): RoundtableData => STATIC_ROUNDTABLE_DATA;
+    const consensusReached: boolean = consensus.consensusReached !== false;
+
+    const agentNameMap: Record<string, { name: string; initials: string }> = {};
+    ROUNDTABLE_AGENTS.forEach(a => { agentNameMap[a.agentId] = { name: a.name, initials: a.initials }; });
+
+    /** Convert a per-agent response object to a RoundtableAgentVote */
+    const toVote = (agentId: string, resp: any, idx: number): RoundtableAgentVote => {
+        const meta = agentNameMap[agentId] || ROUNDTABLE_AGENTS[idx] || { name: agentId, initials: '??', agentId };
+        const conf = Math.round((resp.confidence ?? 0) * 100);
+        const fullText = resp.answer || resp.reasoning || '';
+        return {
+            name: meta.name,
+            initials: meta.initials,
+            agentId,
+            answer: '', // not used separately — full text shown in reasoning
+            reasoning: fullText,
+            confidence: conf,
+        };
+    };
+
+    // ── Try to build per-round data from discussionRounds ──
+    const discussionRounds: any[] = consensus.discussionRounds || [];
+    const rounds: ConsensusRound[] = [];
+
+    if (discussionRounds.length > 0) {
+        for (const dr of discussionRounds) {
+            const roundNum: number = dr.round_number ?? (rounds.length + 1);
+            const agentMap: Record<string, any> = dr.agent_responses || {};
+            const agents: RoundtableAgentVote[] = [];
+            // Iterate in ROUNDTABLE_AGENTS order so display is consistent
+            let idx = 0;
+            for (const ra of ROUNDTABLE_AGENTS) {
+                const resp = agentMap[ra.agentId];
+                if (resp) {
+                    agents.push(toVote(ra.agentId, resp, idx));
+                }
+                idx++;
+            }
+            // Also pick up any agent IDs not in ROUNDTABLE_AGENTS
+            for (const [aid, resp] of Object.entries(agentMap)) {
+                if (!ROUNDTABLE_AGENTS.some(a => a.agentId === aid)) {
+                    agents.push(toVote(aid, resp, agents.length));
+                }
+            }
+
+            const status: string = dr.consensus_status || 'forming';
+
+            rounds.push({
+                round: roundNum,
+                agents,
+                status: status as 'forming' | 'reached' | 'diverging',
+                summary: status === 'reached'
+                    ? `${agents.length} experts reached consensus.`
+                    : status === 'diverging'
+                        ? `Experts’ opinions are diverging.`
+                        : `${agents.length} experts forming consensus...`,
+            });
+        }
+    } else {
+        // Fallback: only final agentResponses available (no per-round data)
+        const agentResponses: any[] = consensus.agentResponses || [];
+        const roundsUsed: number = consensus.roundsUsed || 1;
+        const agents = agentResponses.map((r: any, idx: number) => toVote(r.agentId, r, idx));
+
+        if (agents.length > 0) {
+            rounds.push({
+                round: roundsUsed,
+                agents,
+                status: consensusReached ? 'reached' : 'diverging',
+                summary: consensusReached
+                    ? `${agents.length} experts reached consensus after ${roundsUsed} round${roundsUsed > 1 ? 's' : ''}.`
+                    : `No consensus after ${roundsUsed} round${roundsUsed > 1 ? 's' : ''}.`,
+            });
+        }
+    }
+
+    if (rounds.length === 0) {
+        return { rounds: [], finalVerdict: { summary: consensusReached ? 'Consensus reached' : 'No consensus', confidence: Math.round((consensus.confidence ?? 0) * 100) } };
+    }
+
+    // Extract verdict from finalAnswer text
+    const finalText = consensus.finalAnswer || '';
+    const verdictMatch = finalText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
+    const verdictSummary = verdictMatch
+        ? verdictMatch[1].trim().slice(0, 200)
+        : consensusReached ? 'Consensus concluded' : 'No consensus reached';
+
+    return {
+        rounds,
+        finalVerdict: {
+            summary: verdictSummary,
+            confidence: Math.round((consensus.confidence ?? 0) * 100),
+        },
+    };
+};
 
 // ─── RoundtableView Component ──────────────────────────
 const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
+    // Empty state: show the roundtable graphic with agents but no rounds
+    if (data.rounds.length === 0) {
+        const emptyAgents = ROUNDTABLE_AGENTS;
+        const E_SIZE = 220, E_CTR = E_SIZE / 2, E_R = 72, E_AV = 38, E_HALF = E_AV / 2;
+        const emptyPositions = emptyAgents.map((_, i) => {
+            const a = (i / emptyAgents.length) * 2 * Math.PI - Math.PI / 2;
+            return { x: E_CTR + E_R * Math.cos(a), y: E_CTR + E_R * Math.sin(a) };
+        });
+        return (
+            <div className="flex flex-col h-full bg-white">
+                <div className="px-5 py-4 border-b border-gray-100">
+                    <h2 className="text-[14px] font-bold text-gray-900">Roundtable Consensus</h2>
+                    <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
+                </div>
+                <div className="flex-1 flex flex-col items-center justify-center px-5">
+                    {/* Static roundtable graphic */}
+                    <div className="relative" style={{ width: E_SIZE, height: E_SIZE + 24 }}>
+                        <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE }} viewBox={`0 0 ${E_SIZE} ${E_SIZE}`}>
+                            <circle cx={E_CTR} cy={E_CTR} r={E_R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
+                            <circle cx={E_CTR} cy={E_CTR} r={E_R} fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4 4" />
+                            {emptyPositions.map((p, i) => (
+                                <line key={i} x1={E_CTR} y1={E_CTR} x2={p.x} y2={p.y} stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
+                            ))}
+                        </svg>
+                        {/* Center idle indicator */}
+                        <div className="absolute flex items-center justify-center" style={{ left: E_CTR - 26, top: E_CTR - 26, width: 52, height: 52 }}>
+                            <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
+                                <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
+                            </div>
+                        </div>
+                        {/* Agent avatars */}
+                        {emptyAgents.map((agent, i) => {
+                            const pos = emptyPositions[i];
+                            const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                            return (
+                                <div key={agent.initials} className="absolute flex flex-col items-center"
+                                    style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
+                                    <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
+                                        style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
+                                        {AGENT_ICON(agent.initials)}
+                                    </div>
+                                    <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                        {agent.name}
+                                    </span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
+                </div>
+            </div>
+        );
+    }
+
     const [expandedRound, setExpandedRound] = useState<number | null>(data.rounds.length > 0 ? data.rounds[data.rounds.length - 1].round : null);
-    const agents = data.rounds[0]?.agents ?? [];
+    // Always use all 4 agents for the graph, regardless of how many responded in data
+    const graphAgents = ROUNDTABLE_AGENTS;
     const totalRounds = data.rounds.length;
 
     type PlayPhase = 'discussing' | 'voted' | 'consensus';
@@ -264,14 +395,14 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
             timers.push(setTimeout(() => { setPlayRoundIdx(rr); setPlayPhase('discussing'); setVisibleVotes(0); }, t));
             t += 2800;
             timers.push(setTimeout(() => { setPlayPhase('voted'); setVisibleVotes(0); }, t));
-            const numAgents = data.rounds[r]?.agents.length ?? 4;
+            const numAgents = graphAgents.length;
             for (let a = 0; a < numAgents; a++) {
                 const aa = a;
                 timers.push(setTimeout(() => { setVisibleVotes(aa + 1); }, t + (aa + 1) * 300));
             }
             t += 300 * numAgents + 800;
         }
-        timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(agents.length); }, t));
+        timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(graphAgents.length); }, t));
         return () => timers.forEach(clearTimeout);
     }, [totalRounds]);
 
@@ -282,8 +413,8 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
     const SIZE = 220;
     const CTR = SIZE / 2;
     const R = 72;
-    const agentPositions = agents.map((_, i) => {
-        const a = (i / agents.length) * 2 * Math.PI - Math.PI / 2;
+    const agentPositions = graphAgents.map((_, i) => {
+        const a = (i / graphAgents.length) * 2 * Math.PI - Math.PI / 2;
         return { x: CTR + R * Math.cos(a), y: CTR + R * Math.sin(a) };
     });
     const AVATAR = 38;
@@ -367,12 +498,13 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
 
                         <div className={`absolute rt-orbit ${!isSpinning ? 'stopped' : ''}`}
                             style={{ left: 0, top: 0, width: SIZE, height: SIZE + 24, transformOrigin: `${CTR}px ${CTR}px` }}>
-                        {agents.map((agent, i) => {
+                        {graphAgents.map((agent, i) => {
                             const pos = agentPositions[i];
                             const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                            const roundAgent = currentRound?.agents.find(a => a.initials === agent.initials);
-                            const vote = roundAgent?.vote;
-                            const showVote = vote && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
+                            const roundAgent = currentRound?.agents.find(a => a.agentId === agent.agentId);
+                            const hasResponse = !!roundAgent;
+                            const conf = roundAgent?.confidence ?? 0;
+                            const showVote = hasResponse && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
                             const ringCls = isSpinning ? 'ring-2 ring-blue-200/60 ring-offset-1' : '';
                             return (
                                 <div key={agent.initials} className={`absolute flex flex-col items-center rt-counter-orbit ${!isSpinning ? 'stopped' : ''}`}
@@ -385,7 +517,7 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                                         {showVote && (
                                             <div key={`${playRoundIdx}-${agent.initials}`}
                                                 className="absolute -top-2 left-1/2 -translate-x-1/2 rt-float-vote pointer-events-none">
-                                                <span className="text-[16px]">{vote === 'agree' ? '👍' : '👎'}</span>
+                                                <span className="text-[11px] font-bold bg-white/90 backdrop-blur rounded-full px-1.5 py-0.5 shadow-sm text-blue-600 border border-blue-100">{conf}%</span>
                                             </div>
                                         )}
                                     </div>
@@ -412,7 +544,9 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                 {/* Rounds */}
                 {data.rounds.map((round) => {
                     const isExpanded = expandedRound === round.round;
-                    const isConsensus = round.result === 'consensus';
+                    const isReached = round.status === 'reached';
+                    const statusLabel = isReached ? '✓ Consensus' : round.status === 'diverging' ? '✗ Diverging' : '⟳ Forming';
+                    const statusCls = isReached ? 'bg-emerald-50 text-emerald-600' : round.status === 'diverging' ? 'bg-red-50 text-red-500' : 'bg-amber-50 text-amber-600';
                     return (
                         <div key={round.round} className="relative">
                             {round.round < data.rounds.length && (
@@ -423,17 +557,15 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                                 className="flex items-center gap-3 w-full text-left group"
                             >
                                 <div className={`w-[30px] h-[30px] rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold ${
-                                    isConsensus ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
+                                    isReached ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
                                 }`}>
                                     R{round.round}
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2">
                                         <span className="text-[13px] font-semibold text-gray-800">Round {round.round}</span>
-                                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                                            isConsensus ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
-                                        }`}>
-                                            {isConsensus ? '✓ Consensus' : '⟳ Disagreement'}
+                                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${statusCls}`}>
+                                            {statusLabel}
                                         </span>
                                     </div>
                                     <p className="text-[11px] text-gray-400 mt-0.5 truncate">{round.summary}</p>
@@ -445,27 +577,96 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
 
                             {isExpanded && (
                                 <div className="mt-3 ml-[42px] space-y-2.5">
-                                    {round.agents.map((agent) => {
-                                        const isAgree = agent.vote === 'agree';
-                                        const agentColor = AGENT_COLORS[agent.initials] || '#6b7280';
-                                        return (
-                                            <div key={agent.initials} className={`rounded-xl border px-3.5 py-3 ${isAgree ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'}`}>
-                                                <div className="flex items-center justify-between mb-1.5">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="w-6 h-6 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: agentColor }}>
-                                                            <span className="[&>svg]:w-3 [&>svg]:h-3">{AGENT_ICON(agent.initials)}</span>
+                                    {(() => {
+                                        // Group agents with identical reasoning to avoid duplicate text
+                                        const groups: { agents: typeof round.agents; reasoning: string }[] = [];
+                                        for (const agent of round.agents) {
+                                            const key = (agent.reasoning || '').trim();
+                                            const existing = groups.find(g => g.reasoning === key);
+                                            if (existing) {
+                                                existing.agents.push(agent);
+                                            } else {
+                                                groups.push({ agents: [agent], reasoning: key });
+                                            }
+                                        }
+                                        return groups.map((group, gi) => {
+                                            const isMerged = group.agents.length > 1;
+                                            const avgConf = Math.round(group.agents.reduce((s, a) => s + a.confidence, 0) / group.agents.length);
+                                            const confColor = avgConf >= 75 ? 'bg-emerald-500' : avgConf >= 50 ? 'bg-blue-500' : 'bg-amber-500';
+                                            return (
+                                                <div key={gi} className="rounded-xl border border-gray-200 bg-white px-3.5 py-3">
+                                                    {/* Header: agent(s) + confidence */}
+                                                    {isMerged ? (
+                                                        <>
+                                                            <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                                                                {group.agents.map(a => {
+                                                                    const color = AGENT_COLORS[a.initials] || '#6b7280';
+                                                                    return (
+                                                                        <div key={a.initials} className="flex items-center gap-1 bg-gray-50 rounded-full pl-0.5 pr-2 py-0.5">
+                                                                            <div className="w-5 h-5 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: color }}>
+                                                                                <span className="[&>svg]:w-2.5 [&>svg]:h-2.5">{AGENT_ICON(a.initials)}</span>
+                                                                            </div>
+                                                                            <span className="text-[10px] font-medium text-gray-600">{a.name}</span>
+                                                                            <span className="text-[9px] text-gray-400">{a.confidence}%</span>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                            <p className="text-[10px] text-gray-400 mb-1.5 italic">Shared consensus view (avg. {avgConf}% confidence)</p>
+                                                        </>
+                                                    ) : (
+                                                        <div className="flex items-center justify-between mb-2">
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: AGENT_COLORS[group.agents[0].initials] || '#6b7280' }}>
+                                                                    <span className="[&>svg]:w-3 [&>svg]:h-3">{AGENT_ICON(group.agents[0].initials)}</span>
+                                                                </div>
+                                                                <span className="text-[12px] font-semibold text-gray-800">{group.agents[0].name}</span>
+                                                            </div>
+                                                            <span className="text-[11px] font-bold text-gray-500">{group.agents[0].confidence}%</span>
                                                         </div>
-                                                        <span className="text-[12px] font-semibold text-gray-800">{agent.name}</span>
+                                                    )}
+                                                    {/* Confidence bar */}
+                                                    <div className="w-full h-1.5 bg-gray-100 rounded-full mb-2 overflow-hidden">
+                                                        <div className={`h-full rounded-full transition-all duration-500 ${confColor}`} style={{ width: `${isMerged ? avgConf : group.agents[0].confidence}%` }} />
                                                     </div>
-                                                    <div className="flex items-center gap-1.5">
-                                                        <span className="text-[14px]">{isAgree ? '👍' : '👎'}</span>
-                                                        <span className={`text-[11px] font-bold ${isAgree ? 'text-emerald-600' : 'text-red-600'}`}>{isAgree ? 'Agree' : 'Disagree'}</span>
-                                                    </div>
+                                                    {/* Reasoning — formatted */}
+                                                    {group.reasoning && (
+                                                        <div className="text-[11px] text-gray-600 leading-relaxed [&>p]:mb-1.5 [&>ul]:ml-3 [&>ul]:list-disc [&>ul]:mb-1.5 [&>ol]:ml-3 [&>ol]:list-decimal [&>ol]:mb-1.5">
+                                                            {group.reasoning.split(/\n{2,}/).map((para, pi) => {
+                                                                const trimmed = para.trim();
+                                                                if (!trimmed) return null;
+                                                                if (/^[-•*]\s/.test(trimmed)) {
+                                                                    const items = trimmed.split(/\n/).filter(Boolean);
+                                                                    return (<ul key={pi}>{items.map((item, ii) => (<li key={ii}>{item.replace(/^[-•*]\s*/, '')}</li>))}</ul>);
+                                                                }
+                                                                if (/^\d+[.)]\s/.test(trimmed)) {
+                                                                    const items = trimmed.split(/\n/).filter(Boolean);
+                                                                    return (<ol key={pi}>{items.map((item, ii) => (<li key={ii}>{item.replace(/^\d+[.)]\s*/, '')}</li>))}</ol>);
+                                                                }
+                                                                return (
+                                                                    <p key={pi}>
+                                                                        {trimmed.split('\n').map((line, li, arr) => {
+                                                                            const parts = line.split(/(\*\*[^*]+\*\*)/g);
+                                                                            return (
+                                                                                <span key={li}>
+                                                                                    {parts.map((part, pk) =>
+                                                                                        /^\*\*(.+)\*\*$/.test(part)
+                                                                                            ? <strong key={pk} className="font-semibold text-gray-700">{part.slice(2, -2)}</strong>
+                                                                                            : <span key={pk}>{part}</span>
+                                                                                    )}
+                                                                                    {li < arr.length - 1 && <br />}
+                                                                                </span>
+                                                                            );
+                                                                        })}
+                                                                    </p>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                <p className="text-[11px] text-gray-600 leading-relaxed">{agent.reasoning}</p>
-                                            </div>
-                                        );
-                                    })}
+                                            );
+                                        });
+                                    })()}
                                     <div className="flex items-start gap-2 py-2 px-1">
                                         <svg className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -1031,6 +1232,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     });
     const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const lastUserMsgRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
     const restoredFromPendingRef = useRef(
@@ -1046,7 +1249,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         })(),
     );
     // ─── Right Side Panel ─────────────────────────────────────
-    const [showGraphPanel, setShowGraphPanel] = useState(false);
+    const [showGraphPanel, setShowGraphPanel] = useState(() => (initialChatMode ?? 'auto') === 'roundtable');
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
     const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
@@ -1128,6 +1331,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
+    /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
+    const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
+        // Single flexible regex: optional ---, then a bold/heading title containing
+        // question/watch/关注/问题 keywords, then a bullet list, anchored at end of content.
+        // Covers: **Questions to watch:**, ## Follow-up Questions, **关注问题：**, etc.
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
+        const match = content.match(pattern);
+        if (match) {
+            const questions = match[1].split('\n')
+                .map(l => l.trim())
+                .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
+                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
+                .filter(Boolean);
+            if (questions.length > 0) {
+                return { body: content.slice(0, match.index).trimEnd(), questions };
+            }
+        }
+        return { body: content, questions: [] };
+    }, []);
+
     // Chat title: summarize the user's question into a short topic label
     const chatTitle = useMemo(() => {
         const raw = initialMessage.trim() || messages.find(m => m.role === 'user')?.content?.trim() || '';
@@ -1160,24 +1383,40 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [inputText]);
 
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
-    const currentRoundtableData = buildRoundtableData();
+    // Show real roundtable data from consensus_done event, otherwise empty
+    const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
+    const currentConsensus = activeGraphMsgIdx !== null ? consensusResults[activeGraphMsgIdx] : null;
+    const currentRoundtableData: RoundtableData = currentConsensus
+        ? buildRoundtableFromConsensus(currentConsensus)
+        : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
 
-    // Auto-scroll
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages, thinkingProcesses]);
+    // Scroll user’s question to top when a new message is sent
+    const scrollUserMsgToTop = useCallback(() => {
+        requestAnimationFrame(() => {
+            const el = lastUserMsgRef.current;
+            const container = scrollContainerRef.current;
+            if (el && container) {
+                const elTop = el.offsetTop - container.offsetTop;
+                container.scrollTo({ top: elTop - 24, behavior: 'smooth' });
+            }
+        });
+    }, []);
 
     // ─── Real Socket.IO Integration ────────────────────────────
     const activeMsgIdxRef = useRef<number>(-1);
     const progressChunkIdxRef = useRef(0);
+    /** Monotonic counter — incremented each time sendToAI fires so stale events from a previous run are ignored */
+    const chatGenRef = useRef(0);
+    const activeChatGenRef = useRef(0);
 
     useEffect(() => {
         progressChunkIdxRef.current = 0;
         const onRouting = (data: { sessionId: string }) => {
             saLog('← agent:chat:routing', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
+            // Capture gen at call time — onStarted will set the correct gen
             setThinkingProcesses(prev => ({
-                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: 'Routing...' }
+                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: 'Routing...', _gen: activeChatGenRef.current }
             }));
         };
 
@@ -1231,18 +1470,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
 
         const onProgress = (data: { sessionId: string; content: string }) => {
-            if (data.sessionId === sessionId && import.meta.env.DEV) {
+            if (data.sessionId !== sessionId) return;
+            // Drop stale events from a previous generation
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            if (import.meta.env.DEV) {
                 progressChunkIdxRef.current += 1;
                 const n = progressChunkIdxRef.current;
                 if (n === 1 || n % 35 === 0) {
                     saLog('← agent:chat:progress (sample)', { n, chunkLen: data?.content?.length ?? 0 });
                 }
             }
-            if (data.sessionId !== sessionId) return;
             setMessages(prev => {
                 const updated = [...prev];
-                const msgIdx = activeMsgIdxRef.current;
-                if (!updated[msgIdx]) return prev;
+                if (!updated[msgIdx] || !updated[msgIdx].isStreaming) return prev;
                 updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + data.content };
                 return updated;
             });
@@ -1251,6 +1492,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const onStreamDone = (data: { sessionId: string; content?: string }) => {
             saLog('← agent:chat:stream_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
             try {
                 sessionStorage.removeItem(SA_PENDING_KEY);
             } catch {
@@ -1258,11 +1500,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             }
             setMessages(prev => {
                 const updated = [...prev];
-                const msgIdx = activeMsgIdxRef.current;
                 if (!updated[msgIdx]) return prev;
+                // Guard: if this message is no longer streaming (previous run already finished
+                // or a new run already took over), ignore stale stream_done
+                if (!updated[msgIdx].isStreaming) return prev;
                 updated[msgIdx] = { 
                     ...updated[msgIdx], 
-                    content: data.content || updated[msgIdx].content,
+                    // Only use server content if we have nothing accumulated (e.g. reconnect)
+                    content: updated[msgIdx].content || data.content || '',
                     isStreaming: false, 
                     timestamp: new Date().toLocaleTimeString() 
                 };
@@ -1353,15 +1598,37 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
+        const onContentReplace = (data: { sessionId: string; content: string }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setMessages(prev => {
+                const updated = [...prev];
+                if (!updated[msgIdx] || !updated[msgIdx].isStreaming) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], content: data.content };
+                return updated;
+            });
+        };
+
+        const onConsensusDone = (data: { sessionId: string; result: any }) => {
+            saLog('← agent:chat:consensus_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setConsensusResults(prev => ({ ...prev, [msgIdx]: data.result }));
+        };
+
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
         socket.on('agent:chat:started', onStarted);
         socket.on('agent:chat:module', onModule);
         socket.on('agent:chat:progress', onProgress);
+        socket.on('agent:chat:content_replace', onContentReplace);
         socket.on('agent:chat:stream_done', onStreamDone);
         socket.on('agent:chat:error', onError);
         socket.on('agent:chat:tool_trace', onToolTrace);
         socket.on('agent:chat:thinking_log', onThinkingLog);
+        socket.on('agent:chat:consensus_done', onConsensusDone);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -1369,10 +1636,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:started', onStarted);
             socket.off('agent:chat:module', onModule);
             socket.off('agent:chat:progress', onProgress);
+            socket.off('agent:chat:content_replace', onContentReplace);
             socket.off('agent:chat:stream_done', onStreamDone);
             socket.off('agent:chat:error', onError);
             socket.off('agent:chat:tool_trace', onToolTrace);
             socket.off('agent:chat:thinking_log', onThinkingLog);
+            socket.off('agent:chat:consensus_done', onConsensusDone);
         };
     }, [sessionId]);
 
@@ -1540,10 +1809,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [sessionId, chatMode, chatSelectedAgent]);
 
     const sendToAI = useCallback((text: string, existingMessages?: Message[]) => {
+        // Bump generation so stale events from a previous run are dropped
+        chatGenRef.current += 1;
+        activeChatGenRef.current = chatGenRef.current;
+
         saLog('sendToAI()', {
             textPreview: text.slice(0, 100),
             mode: chatMode,
             sessionId,
+            gen: activeChatGenRef.current,
             agentId: chatSelectedAgent,
             ...socket.getDebugState(),
         });
@@ -1663,8 +1937,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const initialMessages = [userMsg];
         setMessages(initialMessages);
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => sendToAI(initialMessage, initialMessages), 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 80); }, 50);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSend = () => {
@@ -1676,6 +1950,35 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setMessages(newMessages);
         setInputText('');
         sendToAI(text, newMessages);
+        // Scroll so the user’s question appears at the top
+        setTimeout(scrollUserMsgToTop, 80);
+    };
+
+    const handleStop = () => {
+        if (!isStreaming) return;
+        // Tell backend to abort
+        socket.emit('agent:chat:stop', { sessionId });
+        // Bump generation so stale events are dropped
+        chatGenRef.current += 1;
+        activeChatGenRef.current = chatGenRef.current;
+        setIsStreaming(false);
+        // Mark the assistant message as cancelled
+        setMessages(prev => {
+            const idx = activeMsgIdxRef.current;
+            if (idx >= 0 && idx < prev.length && prev[idx]?.role === 'assistant') {
+                const updated = [...prev];
+                updated[idx] = { ...updated[idx], content: '__cancelled__', isStreaming: false };
+                return updated;
+            }
+            return prev;
+        });
+        // Deactivate thinking
+        setThinkingProcesses(prev => {
+            const idx = activeMsgIdxRef.current;
+            if (!prev[idx]) return prev;
+            return { ...prev, [idx]: { ...prev[idx], isActive: false } };
+        });
+        try { sessionStorage.removeItem(SA_PENDING_KEY); } catch { /* ignore */ }
     };
 
     return (
@@ -1714,11 +2017,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Content Row ══ */}
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
-                <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-                    <div className="flex-1 overflow-y-auto px-4 md:px-10 py-8">
-                        <div className="max-w-2xl mx-auto space-y-8">
+                <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
+                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
+                        <div className="max-w-4xl mx-auto space-y-8">
                             {messages.map((msg, i) => (
-                                <div key={i}>
+                                <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
                                             <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm">
@@ -1740,18 +2043,31 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         }}
                                                     />
                                                 )}
-                                                {msg.content ? (
-                                                    <div className="markdown-content text-[13px] text-gray-700 leading-relaxed space-y-1 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                        {renderMarkdownContent(
-                                                            msg.role === 'assistant'
-                                                                ? stripInternalResearchCitations(msg.content)
-                                                                : msg.content,
-                                                        )}
-                                                    </div>
-                                                ) : null}
+                                                {msg.content === '__cancelled__' ? (() => {
+                                                    const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
+                                                    const isChinese = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
+                                                    return <p className="text-[13px] text-gray-400 italic">{isChinese ? '回复已取消' : 'Response cancelled'}</p>;
+                                                })() : msg.content ? (() => {
+                                                    const cleaned = msg.role === 'assistant' ? stripInternalResearchCitations(msg.content) : msg.content;
+                                                    const { body: bodyNoQuestions } = msg.role === 'assistant' && !msg.isStreaming
+                                                        ? extractFollowUpQuestions(cleaned)
+                                                        : { body: cleaned };
+                                                    const { quote, body } = msg.role === 'assistant' && !msg.isStreaming
+                                                        ? extractQuoteSnapshot(bodyNoQuestions)
+                                                        : { quote: null, body: bodyNoQuestions };
+                                                    return (
+                                                        <>
+                                                            {quote && <QuoteCard quote={quote} />}
+                                                            <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
+                                                                {renderMarkdownContent(body)}
+                                                            </div>
+                                                        </>
+                                                    );
+                                                })() : null}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div className="flex items-center gap-0.5 mt-3">
-                                                        {/* Copy */}
+                                                        {/* Copy — hide for cancelled */}
+                                                        {msg.content !== '__cancelled__' && (
                                                         <button
                                                             onClick={() => handleCopy(i, msg.content)}
                                                             title="Copy markdown"
@@ -1763,6 +2079,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2} /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" strokeWidth={2} /></svg>
                                                             )}
                                                         </button>
+                                                        )}
                                                         {/* Retry */}
                                                         <button
                                                             onClick={() => {
@@ -1777,6 +2094,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 const prev = messages.slice(0, i);
                                                                 setMessages(prev);
                                                                 sendToAI(userText, prev);
+                                                                setTimeout(scrollUserMsgToTop, 80);
                                                             }}
                                                             title="Retry"
                                                             className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-all"
@@ -1805,6 +2123,38 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         </button>
                                                     </div>
                                                 )}
+                                                {/* Follow-up questions */}
+                                                {!msg.isStreaming && msg.content && msg.role === 'assistant' && (() => {
+                                                    const { questions } = extractFollowUpQuestions(
+                                                        stripInternalResearchCitations(msg.content)
+                                                    );
+                                                    if (questions.length === 0) return null;
+                                                    return (
+                                                        <div className="mt-3 flex flex-col gap-1.5">
+                                                            <span className="text-[10.5px] font-medium text-gray-300 tracking-wide">Related questions</span>
+                                                            <div className="flex flex-col gap-1">
+                                                                {questions.map((q, qi) => (
+                                                                    <button
+                                                                        key={qi}
+                                                                        onClick={() => {
+                                                                            if (isStreaming) return;
+                                                                            const userMsg: Message = { role: 'user', content: q, timestamp: new Date().toLocaleTimeString() };
+                                                                            const newMsgs = [...messages, userMsg];
+                                                                            setMessages(newMsgs);
+                                                                            setInputText('');
+                                                                            sendToAI(q, newMsgs);
+                                                                            setTimeout(scrollUserMsgToTop, 80);
+                                                                        }}
+                                                                        className="group flex items-start gap-1.5 text-left text-[12px] text-gray-400 hover:text-gray-600 py-1 transition-colors cursor-pointer leading-snug"
+                                                                    >
+                                                                        <svg className="w-3 h-3 mt-[3px] shrink-0 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
+                                                                        <span className="group-hover:underline underline-offset-2 decoration-gray-300">{q}</span>
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                     )}
@@ -1815,9 +2165,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </div>
 
                     {/* Input */}
-                    <div className="shrink-0 pt-2 pb-8 px-4 md:px-8 bg-gradient-to-t from-white via-white to-transparent">
-                        <div className="max-w-3xl mx-auto">
-                            <div className="bg-white border border-gray-200 rounded-2xl relative" style={{ boxShadow: '0 2px 24px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04)' }}>
+                    <div className="absolute bottom-0 left-0 right-0 pt-2 pb-4 px-4 md:px-8 pointer-events-none" style={{ zIndex: 10 }}>
+                        <div className="max-w-2xl mx-auto pointer-events-auto">
+                            <div className="bg-white/90 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-gray-100" style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06)' }}>
                                 {/* Voice overlay: Recording */}
                                 {voiceState === 'recording' && (
                                     <div className="absolute inset-x-0 top-0 bottom-[52px] flex items-center justify-center">
@@ -1878,8 +2228,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                                     placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up question...'}
                                     disabled={isStreaming || voiceState !== 'idle'}
-                                    className="w-full bg-transparent outline-none resize-none text-[14px] text-gray-900 placeholder:text-gray-400 px-4 pt-4 pb-2 leading-relaxed overflow-y-auto"
-                                    style={{ minHeight: '56px', maxHeight: '200px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
+                                    className="w-full bg-transparent outline-none resize-none text-[14px] text-gray-900 placeholder:text-gray-400 px-4 pt-3 pb-1.5 leading-relaxed overflow-y-auto"
+                                    style={{ minHeight: '42px', maxHeight: '200px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
                                 <div className="flex items-center justify-between px-3 pb-3">
                                     {/* Left: mode selector + agent selector */}
@@ -1901,7 +2251,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         return (
                                                             <button
                                                                 key={m.id}
-                                                                onClick={() => { setChatMode(m.id); setChatModeOpen(false); }}
+                                                                onClick={() => {
+                                                                    setChatMode(m.id);
+                                                                    setChatModeOpen(false);
+                                                                    // Auto-open Roundtable Graph when selecting roundtable mode
+                                                                    if (m.id === 'roundtable') {
+                                                                        setShowGraphPanel(true);
+                                                                        setShowThinkingPanel(false);
+                                                                    }
+                                                                }}
                                                                 className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
                                                             >
                                                                 <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400'}`}>
@@ -1946,11 +2304,21 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             )}
                                         </button>
                                         <button
-                                            onClick={handleSend}
-                                            disabled={!inputText.trim() || isStreaming}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${inputText.trim() && !isStreaming ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
+                                            onClick={isStreaming ? handleStop : handleSend}
+                                            disabled={!isStreaming && !inputText.trim()}
+                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${
+                                                isStreaming
+                                                    ? 'bg-gray-900 text-white hover:bg-gray-700'
+                                                    : inputText.trim()
+                                                        ? 'bg-gray-900 text-white hover:bg-gray-800'
+                                                        : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                                            }`}
                                         >
-                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
+                                            {isStreaming ? (
+                                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                                            ) : (
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
+                                            )}
                                         </button>
                                     </div>
                                 </div>

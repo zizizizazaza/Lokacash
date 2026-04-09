@@ -21,6 +21,10 @@ export function createModuleEmitter(userId: string, sessionId: string) {
 
     emitStarted(mode: string, route: string, hidden?: boolean) {
       emitToUser(userId, 'agent:chat:started', { sessionId, mode, route, hidden });
+    },
+
+    emitContentReplace(content: string) {
+      emitToUser(userId, 'agent:chat:content_replace', { sessionId, content });
     }
   };
 }

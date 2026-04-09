@@ -30,6 +30,8 @@ const activeResearchSessions = new Set<string>();
 const activeHedgeFundSessions = new Set<string>();
 const activeStockAnalysisSessions = new Set<string>();
 const activeChatSessions = new Map<string, string>();
+/** Abort controllers keyed by sessionId — used to cancel a previous agent:chat run when a new one arrives */
+const chatAbortControllers = new Map<string, AbortController>();
 
 export function setupSocket(server: HttpServer) {
   io = new Server(server, {
@@ -394,15 +396,37 @@ Text: "${query}"`;
       },
     );
 
+    socket.on('agent:chat:stop', (data: { sessionId?: string }) => {
+      const sid = data?.sessionId;
+      if (!sid) return;
+      const ctrl = chatAbortControllers.get(sid);
+      if (ctrl) {
+        console.log(`[agent:chat:stop] User-initiated abort for session ${sid}`);
+        ctrl.abort();
+        chatAbortControllers.delete(sid);
+      }
+    });
+
     socket.on('agent:chat', async (data: { content: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean }) => {
       if (!data?.content) return;
 
+      const sessionId = data.sessionId || crypto.randomUUID();
+
+      // ── Cancel any previous in-flight run for the same session ──
+      const prevAbort = chatAbortControllers.get(sessionId);
+      if (prevAbort) {
+        console.log(`[agent:chat] Aborting previous run for session ${sessionId}`);
+        prevAbort.abort();
+      }
+      const abortController = new AbortController();
+      chatAbortControllers.set(sessionId, abortController);
+      const isAborted = () => abortController.signal.aborted;
+
       console.log('[agent:chat]', {
-        sessionId: data.sessionId,
+        sessionId,
         contentPreview: data.content.slice(0, 80),
       });
 
-      const sessionId = data.sessionId || crypto.randomUUID();
       const emitter = createModuleEmitter(userId, sessionId);
 
       if (!data.hidden) {
@@ -435,6 +459,7 @@ Text: "${query}"`;
       });
 
       const streamToChat = (chunk: string) => {
+        if (isAborted()) return;
         emitter.emitProgress(chunk);
       };
 
@@ -454,7 +479,7 @@ Text: "${query}"`;
 
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done || isAborted()) break;
             streamBuffer += decoder.decode(value, { stream: true });
             const lines = streamBuffer.split('\n');
             streamBuffer = lines.pop() || ''; 
@@ -485,6 +510,11 @@ Text: "${query}"`;
           };
 
           const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
+          if (isAborted()) {
+            activeChatSessions.delete(sessionId);
+            chatAbortControllers.delete(sessionId);
+            return;
+          }
           try {
             await prisma.chatMessage.create({
               data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
@@ -500,6 +530,7 @@ Text: "${query}"`;
           emitter.emitStreamDone('');
         }
         activeChatSessions.delete(sessionId);
+        chatAbortControllers.delete(sessionId);
         return;
       }
 
@@ -688,6 +719,13 @@ Text: "${query}"`;
       }
 
       const results = await Promise.allSettled(promises);
+      if (isAborted()) {
+        console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
+        activeChatSessions.delete(sessionId);
+        chatAbortControllers.delete(sessionId);
+        return;
+      }
+      console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
       let contextString = "【User Original Request】\n" + data.content + "\n\n";
       results.forEach(r => {
         if (r.status === 'fulfilled') {
@@ -697,61 +735,68 @@ Text: "${query}"`;
 
       streamToChat('*Orchestrator synthesizing raw reports...*\n\n');
 
-      const synthesizePrompt = `You are the Final Investment Synthesizer Agent — the "Big Boss" and quality gatekeeper of the entire multi-agent research pipeline.
+      const synthesizePrompt = `You are the Final Investment Synthesizer — a senior analyst who writes sharp, opinionated research reports that people actually want to read.
 
-Your sole responsibility: take the raw outputs from multiple specialist agents below and synthesize them into ONE single, coherent, professional final report for the user.
+Your job: take raw outputs from multiple specialist agents and synthesize them into ONE cohesive, insightful analysis. Write like a top-tier analyst blogger — authoritative, direct, with clear opinions backed by evidence.
 
-**Internal Analysis (do NOT output, do in your head first):**
-- What is each agent's core finding?
-- Where do they agree? Where do they contradict?
-- What is the most actionable alpha signal for the user?
-- What are the top risks the user MUST know?
+**Internal Analysis (do NOT output, think through first):**
+- What is the core narrative here?
+- Where do agents agree? Where do they contradict?
+- What is the real alpha signal?
+- What claim sounds right but might be wrong?
 
-**Output the Final Report using this exact structure:**
+**Writing Style:**
+- Write in an analyst blog tone — confident, clear, opinionated. Use "My take:" to give direct assessments.
+- Use narrative paragraphs, NOT bullet-point dumps. Mix in tables when comparing claims/evidence.
+- Every section title must be UNIQUE and topic-specific — never generic labels like "Key Findings" or "Deep Analysis".
+- Use **bold text** for subsections. NEVER use ### or #### headings.
 
-# [A precise report title tailored to the user's actual question]
+**Report Structure (adapt section count and titles to the topic):**
 
-**Executive Summary** — 3-5 sentences capturing the essential market narrative or investment thesis.
+# [A sharp, specific headline that captures the core insight — like a news article title]
 
-## Key Findings
-Bullet points ordered by importance. For each finding, cite its source:
-- If the fact comes from the Search Report AND a specific URL is available in that report, cite it as a clickable Markdown link, e.g. ([Reddit](https://reddit.com/...)) or ([Bloomberg](https://bloomberg.com/...)). Use the most relevant URL from the search report for that specific fact.
-- If no specific URL is available for a search finding, write [Search].
-- For analysis or simulation findings, write [Analysis] or [Simulation] respectively.
+## Key Takeaways
+- 4-6 bullet points. Each one a standalone insight. No fluff.
 
-## Deep Analysis
-Discuss market data, macro context, sentiment, technical signals. Use **bold text** for any subsections — NEVER use ### or ####.
-Reference agents inline: e.g., [Analysis Agent], [Search Agent], [Simulation Agent].
-If simulation reports include multiple analyst panelists (e.g., Warren Buffett, Charlie Munger, etc.), you MUST list EVERY SINGLE panelist with their signal and key reasoning — do not omit anyone.
+## [Topic-Specific Section Title — e.g., "The Liquidity Squeeze Nobody's Talking About"]
+Narrative analysis. Mix data points with interpretation. Use "My take:" for your direct opinion.
+If search reports contain URLs, cite them as clickable Markdown links inline, e.g. ([Bloomberg](https://...)).
+For analysis/simulation findings, cite as [Analysis] or [Simulation].
 
-## Risk & Uncertainty
-List the top 3 risks as bullet points with severity (High / Medium / Low) and impact on the decision.
-If any data is missing or conflicting, explicitly state: "Data insufficient — recommend triggering [Agent name] for supplementary query."
+## [Another Topic-Specific Section Title — e.g., "Why the Bears Are Wrong This Time"]
+Continue the analysis. Challenge assumptions. Surface contradictions between agents.
 
-## Scenario Forecast
-- **Base Case (most likely):** ...
-- **Bull Case (optimistic):** ...
-- **Bear Case (pessimistic):** ...
+If simulation reports include multiple analyst panelists, present them in a table:
 
-## Action Recommendation
-State clearly: Buy / Hold / Sell / Watch — with key entry/exit signals and suggested position sizing or allocation guidance.
-If this is a broad market query (not a specific stock), give macro allocation guidance instead.
+| Claim | Evidence | Market Reaction | My Take |
+|-------|----------|-----------------|---------|
+| ... | ... | ... | ... |
 
-## Confidence Score: X/10
-Brief justification. Deduct points for data gaps, conflicting signals, or high macro uncertainty.
+## [Risk Section with Topic-Specific Title — e.g., "Three Things That Could Blow This Up"]
+Top risks as narrative bullets with severity context. Be specific, not generic.
+
+**Bottom line:** [One paragraph — the clearest, most actionable conclusion. State Buy/Hold/Sell/Watch if applicable, with entry/exit signals.]
+
+Significance: [High / Medium / Low] · Categories: [2-3 relevant tags, e.g., "Market Structure, Macro, Sentiment"]
 
 ---
-**⚡ Bottom Line:** [One single sentence — the clearest possible conclusion for the user's question.]
+
+**Questions to watch:**
+- [Forward-looking question that would change the thesis]
+- [Question about a data point that needs monitoring]
+- [Question about a risk that could materialize]
 
 ═══ ABSOLUTE RULES ═══
-1. DO NOT use '### ' or '#### ' heading levels — they break the frontend UI renderer. Use **bold text** for subsections.
-2. Synthesize, do not concatenate. Connect findings across all agents. Surface agreements, contradictions, and emergent insights.
-3. Never fabricate. Only use information present in the raw reports below.
-4. INLINE CITATIONS: If search reports contain URLs or news sources, retain them as clickable Markdown links (e.g., [Bloomberg](https://...)) next to relevant facts.
-5. Mirror the user's language. If the user wrote in Chinese, respond in Chinese. If English, respond in English.
-6. Length: 600-1000 words. Clarity over length.
+1. DO NOT use '### ' or '#### ' heading levels — they break the frontend. Use **bold text** for subsections.
+2. Section titles MUST be unique and specific to the topic. NEVER use generic titles like "Key Findings", "Deep Analysis", "Risk & Uncertainty", "Scenario Forecast", or "Action Recommendation".
+3. Synthesize, do not concatenate. Connect findings across agents. Surface agreements, contradictions, and emergent insights.
+4. Never fabricate. Only use information present in the raw reports below.
+5. INLINE CITATIONS: Retain URLs from search reports as clickable Markdown links next to relevant facts.
+6. Mirror the user's language. If the user wrote in Chinese, respond in Chinese. If English, respond in English.
+7. Length: 600-1200 words. Depth over brevity, but no padding.
+8. End with "Questions to watch" — 3-4 forward-looking questions that would change the investment thesis.
 
-Begin directly with the report title. No meta-commentary like "Here is the synthesized report".
+Begin directly with the headline. No meta-commentary.
 
 ═══ RAW AGENT REPORTS ═══
 ${contextString}
@@ -761,7 +806,9 @@ Write the final synthesis report now:
 `;
 
       try {
+        console.log('[agent:chat] Starting synthesis stream, prompt length:', synthesizePrompt.length);
         const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent');
+        console.log('[agent:chat] Synthesis stream obtained, reading...');
         const synReader = synthesisStream.getReader();
         const synDecoder = new TextDecoder();
         let synFullContent = '';
@@ -769,8 +816,8 @@ Write the final synthesis report now:
         
         while (true) {
           const { done, value } = await synReader.read();
-          if (done) {
-            if (synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
+          if (done || isAborted()) {
+            if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
               try {
                 const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
                 const delta = parsed.choices?.[0]?.delta?.content || '';
@@ -796,6 +843,13 @@ Write the final synthesis report now:
           }
         }
 
+        if (isAborted()) {
+          console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
+          activeChatSessions.delete(sessionId);
+          chatAbortControllers.delete(sessionId);
+          return;
+        }
+
         const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
         
         const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
@@ -815,33 +869,62 @@ Write the final synthesis report now:
         if (data.mode === 'roundtable') {
           emitter.emitModule('consensus', 'active', { status: 'building', round: 1, maxRounds: 3 });
           emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
+
+          // Strip trailing "Questions to watch" section from synthesis before sending to consensus
+          // (it will be extracted by the frontend and shown outside the answer)
+          const questionsPattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题)[^\n]*?\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
+          const questionsMatch = synFullContent.match(questionsPattern);
+          const cleanedSynthesis = questionsMatch
+            ? synFullContent.slice(0, questionsMatch.index).trimEnd()
+            : synFullContent;
+          // Keep the questions for appending after consensus
+          const questionsSection = questionsMatch ? questionsMatch[0] : '';
+
+          // If questions were found and stripped, replace the streamed content so the
+          // frontend no longer shows them in the middle of the response.
+          if (questionsMatch) {
+            emitter.emitContentReplace(cleanedSynthesis);
+          }
+
           try {
             streamToChat('\n\n*Sending report to Expert Council for consensus evaluation...*\n');
-            const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${synFullContent}`;
+            const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${cleanedSynthesis}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
-            let expertDebateText = '';
             
-            if (consensusResult.consensus?.agentResponses?.length) {
-              expertDebateText += `\n\n#### 🕵️‍♂️ Individual Expert Analysis\n\n`;
-              consensusResult.consensus.agentResponses.forEach((resp: any, idx: number) => {
-                const agentNames = ['Fundamental Analyst', 'Macro Strategist', 'Sentiment Engine', 'Quant Tracker'];
-                let name = agentNames[idx] || resp.agentId;
-                // mapping agent_0, agent_1 to names if possible
-                if (resp.agentId === 'agent_0') name = 'Fundamental Analyst';
-                if (resp.agentId === 'agent_1') name = 'Macro Strategist';
-                if (resp.agentId === 'agent_2') name = 'Sentiment Engine';
-                if (resp.agentId === 'agent_3') name = 'Quant Tracker';
-                
-                expertDebateText += `**${name}** (Confidence: ${Math.round(resp.confidence * 100)}%):\n${resp.answer}\n\n`;
-              });
+            // Build Expert Council section — only show individual experts if they differ
+            let expertSection = '';
+            const agentResponses = consensusResult.consensus?.agentResponses || [];
+            if (agentResponses.length > 0) {
+              const agentNames = ['Fundamental Analyst', 'Macro Strategist', 'Sentiment Engine', 'Quant Tracker'];
+              const nameMap: Record<string, string> = {
+                agent_0: 'Fundamental Analyst',
+                agent_1: 'Macro Strategist',
+                agent_2: 'Sentiment Engine',
+                agent_3: 'Quant Tracker',
+              };
+              // Check if all experts gave the same answer (consensus engine often duplicates)
+              const answers = agentResponses.map((r: any) => r.answer?.trim());
+              const uniqueAnswers = new Set(answers);
+              
+              if (uniqueAnswers.size > 1) {
+                // Experts actually disagree — show individual perspectives
+                expertSection += `\n\n**Individual Expert Perspectives:**\n\n`;
+                agentResponses.forEach((resp: any, idx: number) => {
+                  const name = nameMap[resp.agentId] || agentNames[idx] || resp.agentId;
+                  const conf = Math.round(resp.confidence * 100);
+                  expertSection += `**${name}** (${conf}% confidence):\n${resp.answer}\n\n`;
+                });
+              }
             }
 
             if (finalAnswerText) {
-              const fullConsensusText = `\n\n### ⚡ Expert Council Verdict\n${finalAnswerText}${expertDebateText}`;
-              finalDbContent += fullConsensusText;
-              streamToChat(fullConsensusText);
+              const fullConsensusText = `\n\n---\n\n## Expert Council Verdict\n\n${finalAnswerText}${expertSection}`;
+              finalDbContent = cleanedSynthesis + fullConsensusText + questionsSection;
+              streamToChat(fullConsensusText + questionsSection);
+            } else {
+              finalDbContent = cleanedSynthesis + questionsSection;
             }
             
             if (consensusResult.consensus) {
@@ -870,8 +953,8 @@ Write the final synthesis report now:
               result: consensusResult
             });
           } catch (e: any) {
-            finalDbContent += `\n\n### ⚠️ Consensus Error\n${e.message}`;
-            streamToChat(`\n\n### ⚠️ Consensus Error\n${e.message}`);
+            finalDbContent = cleanedSynthesis + `\n\n---\n\n## ⚠️ Consensus Error\n${e.message}` + questionsSection;
+            streamToChat(`\n\n---\n\n## ⚠️ Consensus Error\n${e.message}` + questionsSection);
             consensusFlowData = {
               status: 'concluded',
               round: 1,
@@ -911,10 +994,12 @@ Write the final synthesis report now:
         emitter.emitModule('done', 'completed', { duration: dur });
         emitter.emitStreamDone(finalDbContent);
       } catch (err: any) {
+        console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
         emitToUser(userId, 'agent:chat:error', { sessionId, error: err.message });
         emitter.emitModule('done', 'completed', { duration: 0 });
       }
       activeChatSessions.delete(sessionId);
+      chatAbortControllers.delete(sessionId);
     });
     socket.on('disconnect', () => {
       console.log(`🔌 Client disconnected: ${socket.id}`);

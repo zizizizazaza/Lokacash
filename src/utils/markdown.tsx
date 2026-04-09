@@ -1,5 +1,120 @@
 import React from 'react';
 
+// ─── Quote Snapshot Card ────────────────────────────────────────
+
+interface QuoteData {
+  symbol: string;
+  name?: string;
+  market?: string;
+  price?: string;
+  change?: string;
+  volume?: string;
+  asOf?: string;
+}
+
+/**
+ * Parse a "Quote Snapshot" / "标的信息" section from markdown content.
+ * Returns the parsed data and the content with the section removed.
+ */
+export function extractQuoteSnapshot(content: string): { quote: QuoteData | null; body: string } {
+  // Match heading (## or ### or **bold**) containing "Quote Snapshot" or "标的信息"
+  // followed by bullet list items, up to the next heading or horizontal rule
+  const pattern = /\n?(?:#{1,3}\s+|(?:\*\*))(?:[^\n]*?(?:Quote\s*Snapshot|标的信息)[^\n]*?)(?:\*\*)?\s*\n((?:\s*[-•*]\s+.+\n?)+)/i;
+  const match = content.match(pattern);
+  if (!match) return { quote: null, body: content };
+
+  const lines = match[1].split('\n').filter(l => l.trim());
+  const data: Record<string, string> = {};
+
+  for (const line of lines) {
+    const kv = line.replace(/^\s*[-•*]\s+/, '').trim();
+    // Match **Key**: Value or **Key**：Value
+    const m = kv.match(/\*\*(.+?)\*\*\s*[:：]\s*(.+)/);
+    if (m) {
+      data[m[1].trim().toLowerCase()] = m[2].trim();
+    }
+  }
+
+  // Map known keys
+  const symbol = data['symbol'] || data['证券代码'] || data['代码'] || '';
+  if (!symbol) return { quote: null, body: content };
+
+  const quote: QuoteData = {
+    symbol,
+    name: data['name'] || data['股票名称'] || data['名称'] || undefined,
+    market: data['market'] || data['所属市场'] || data['市场'] || data['交易所'] || undefined,
+    price: data['last price'] || data['last'] || data['最新价'] || data['现价'] || undefined,
+    change: data['change (%)'] || data['change'] || data['chg%'] || data['涨跌幅'] || data['涨跌'] || undefined,
+    volume: data['volume'] || data['成交量'] || data['成交额'] || undefined,
+    asOf: data['as of'] || data['数据时点'] || data['报价时间'] || data['交易日'] || undefined,
+  };
+
+  // Extract name from symbol if it contains parentheses: "TSLA (Tesla, Inc.)"
+  if (!quote.name) {
+    const nameMatch = symbol.match(/\((.+?)\)/);
+    if (nameMatch) quote.name = nameMatch[1];
+  }
+
+  // Clean symbol of parenthetical
+  quote.symbol = symbol.replace(/\s*\(.+?\)/, '').trim();
+
+  const body = content.slice(0, match.index! + (match.index! > 0 ? 0 : 0)) +
+    content.slice(match.index! + match[0].length);
+
+  return { quote, body: body.replace(/^\n{3,}/, '\n\n') };
+}
+
+/** Renders a stock quote snapshot as a compact card */
+export function QuoteCard({ quote }: { quote: QuoteData }) {
+  const isPositive = quote.change ? /^\+|涨/.test(quote.change) : null;
+  const isNegative = quote.change ? /^-|跌/.test(quote.change) : null;
+  const changeColor = isPositive ? 'text-emerald-600' : isNegative ? 'text-red-500' : 'text-gray-500';
+  const changeBg = isPositive ? 'bg-emerald-50' : isNegative ? 'bg-red-50' : 'bg-gray-50';
+
+  return (
+    <div className="flex items-center gap-4 px-4 py-3 mb-4 rounded-xl border border-gray-200 bg-gray-50/60 shadow-sm">
+      {/* Symbol & Name */}
+      <div className="min-w-0">
+        <div className="flex items-baseline gap-2">
+          <span className="text-[15px] font-bold text-gray-900 tracking-tight">{quote.symbol}</span>
+          {quote.market && (
+            <span className="text-[10px] font-medium text-gray-400 uppercase">{quote.market}</span>
+          )}
+        </div>
+        {quote.name && (
+          <p className="text-[11px] text-gray-400 truncate mt-0.5">{quote.name}</p>
+        )}
+      </div>
+
+      {/* Price */}
+      {quote.price && (
+        <div className="ml-auto text-right shrink-0">
+          <p className="text-[17px] font-semibold text-gray-900 tabular-nums">{quote.price}</p>
+          {quote.change && (
+            <span className={`inline-block text-[11px] font-medium px-1.5 py-0.5 rounded ${changeBg} ${changeColor} tabular-nums`}>
+              {quote.change}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Volume & Time */}
+      <div className="shrink-0 text-right border-l border-gray-200 pl-4 hidden sm:block">
+        {quote.volume && (
+          <p className="text-[11px] text-gray-400">
+            <span className="text-gray-500 font-medium">{quote.volume}</span> vol
+          </p>
+        )}
+        {quote.asOf && (
+          <p className="text-[10px] text-gray-300 mt-0.5">{quote.asOf}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Markdown Rendering ─────────────────────────────────────────
+
 const LINK_CHIP =
   'inline-flex items-center align-middle gap-0.5 max-w-[min(100%,13rem)] mx-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium leading-tight ' +
   'text-indigo-700 bg-indigo-50/90 hover:bg-indigo-100 border border-indigo-200/70 shadow-sm ' +
@@ -177,8 +292,9 @@ function findNextSpecial(s: string): number {
   };
   idx('`');
   idx('**');
-  if (s.startsWith('**')) candidates.push(0);
-  else if (s.startsWith('*') && s[1] !== '*') candidates.push(0);
+  // Detect single * for italic (not preceded by another *)
+  const singleStar = s.search(/(?<!\*)\*(?!\*)/);
+  if (singleStar >= 0) candidates.push(singleStar);
   idx('[');
   const parenHttp = s.indexOf('(http');
   if (parenHttp >= 0) candidates.push(parenHttp);
@@ -207,7 +323,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
     }
     if (/^#{3}\s/.test(line)) {
       elements.push(
-        <h3 key={i} className="text-[14px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
+        <h3 key={i} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
           {parseLine(line.replace(/^#{3}\s/, ''))}
         </h3>,
       );
@@ -216,7 +332,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
     }
     if (/^#{2}\s/.test(line)) {
       elements.push(
-        <h2 key={i} className="text-[16px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
+        <h2 key={i} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
           {parseLine(line.replace(/^#{2}\s/, ''))}
         </h2>,
       );
@@ -225,7 +341,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
     }
     if (/^#\s/.test(line) && !line.startsWith('##')) {
       elements.push(
-        <h1 key={i} className="text-[17px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
+        <h1 key={i} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
           {parseLine(line.replace(/^#\s/, ''))}
         </h1>,
       );
@@ -242,7 +358,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
       elements.push(
         <blockquote
           key={`bq-${i}`}
-          className="border-l-[3px] border-indigo-300 pl-3.5 my-3 py-1 text-[13px] text-gray-600 italic bg-indigo-50/30 rounded-r-lg"
+          className="border-l-[3px] border-indigo-300 pl-3.5 my-3 py-1 text-[14px] text-gray-600 italic bg-indigo-50/30 rounded-r-lg"
         >
           {quoteLines.map((ql, qi) => (
             <p key={qi} className="leading-relaxed">
@@ -267,10 +383,10 @@ export function renderMarkdownContent(text: string): React.ReactNode {
         <ol
           key={`ol-${i}`}
           start={startNum}
-          className="list-decimal list-outside ml-5 my-3 space-y-2"
+          className="list-decimal list-outside ml-5 my-3.5 space-y-2.5"
         >
           {items.map((t, li) => (
-            <li key={li} className="text-[13px] text-gray-700 leading-relaxed pl-1 [&_strong]:text-gray-900">
+            <li key={li} className="text-[14.5px] text-gray-700 leading-[1.7] pl-1.5 marker:text-gray-400 marker:font-medium [&_strong]:text-gray-900">
               {parseLine(t)}
             </li>
           ))}
@@ -286,9 +402,9 @@ export function renderMarkdownContent(text: string): React.ReactNode {
         i++;
       }
       elements.push(
-        <ul key={`ul-${i}`} className="list-disc list-outside ml-5 my-3 space-y-2 marker:text-gray-400">
+        <ul key={`ul-${i}`} className="list-disc list-outside ml-5 my-3.5 space-y-2.5 marker:text-indigo-300">
           {items.map((t, li) => (
-            <li key={li} className="text-[13px] text-gray-700 leading-relaxed pl-1 [&_strong]:font-semibold [&_strong]:text-gray-900">
+            <li key={li} className="text-[14.5px] text-gray-700 leading-[1.7] pl-1.5 [&_strong]:font-semibold [&_strong]:text-gray-900">
               {parseLine(t)}
             </li>
           ))}
@@ -302,8 +418,57 @@ export function renderMarkdownContent(text: string): React.ReactNode {
       i++;
       continue;
     }
+
+    // ── Table: | col | col | ──
+    if (/^\|.+\|/.test(line.trim())) {
+      const tableRows: string[] = [];
+      while (i < lines.length && /^\|.+\|/.test(lines[i].trim())) {
+        tableRows.push(lines[i]);
+        i++;
+      }
+      // Parse: first row = header, second row might be separator (|---|---|), rest = body
+      const parseRow = (row: string) =>
+        row.split('|').slice(1, -1).map(cell => cell.trim());
+
+      const headerCells = parseRow(tableRows[0]);
+      let bodyStart = 1;
+      // Skip separator row like |---|---|
+      if (tableRows[1] && /^\|[\s\-:]+\|/.test(tableRows[1].replace(/[^|:\-\s]/g, ''))) {
+        bodyStart = 2;
+      }
+      const bodyRows = tableRows.slice(bodyStart).map(parseRow);
+
+      elements.push(
+        <div key={`tbl-${i}`} className="my-4 overflow-x-auto rounded-lg border border-gray-200">
+          <table className="w-full text-[13.5px] text-left">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {headerCells.map((cell, ci) => (
+                  <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+                    {parseLine(cell)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {bodyRows.map((cells, ri) => (
+                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                  {cells.map((cell, ci) => (
+                    <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
+                      {parseLine(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
     elements.push(
-      <p key={i} className="text-[13px] text-gray-700 leading-[1.75] break-words [&_strong]:font-semibold [&_strong]:text-gray-900">
+      <p key={i} className="text-[14.5px] text-gray-700 leading-[1.75] break-words [&_strong]:font-semibold [&_strong]:text-gray-900">
         {parseLine(line)}
       </p>,
     );
