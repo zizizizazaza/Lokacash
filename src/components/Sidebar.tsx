@@ -259,7 +259,7 @@ export const Sidebar: React.FC<{
               {conversations.length > 0 ? (
                 conversations.map((c) => (
                   <div key={c.id} className="relative group/recent">
-                    <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (onCloseMobileDrawer) onCloseMobileDrawer(); }} title={c.title} className="w-full text-left flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-all">
+                    <button onClick={() => { navigate(`/?session=${c.id}`); if (onCloseMobileDrawer) onCloseMobileDrawer(); }} title={c.title} className="w-full text-left flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-all">
                       <span className="truncate pr-2">{c.title}</span>
                       {activeSessions.has(c.id) && (
                         <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
@@ -363,7 +363,7 @@ export const Sidebar: React.FC<{
             {conversations.length > 0 ? (
               conversations.map((c) => (
                 <div key={c.id} className="relative group/recent">
-                  <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (window.innerWidth < 768) onToggle(); }} title={c.title} className={`w-full text-left flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] ${textSecondary} hover:${textPrimary} ${hoverBg} transition-all`}>
+                  <button onClick={() => { navigate(`/?session=${c.id}`); if (window.innerWidth < 768) onToggle(); }} title={c.title} className={`w-full text-left flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] ${textSecondary} hover:${textPrimary} ${hoverBg} transition-all`}>
                     <span className="truncate pr-2">{c.title}</span>
                     {activeSessions.has(c.id) && (
                       <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
