@@ -111,6 +111,7 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
                     {
                         "title": r.title,
                         "snippet": r.snippet,
+                        "url": r.url,
                         "source": r.source,
                     }
                     for r in response.results[:3]  # limit to 3 per dimension to save tokens

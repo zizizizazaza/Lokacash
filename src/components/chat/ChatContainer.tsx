@@ -12,14 +12,13 @@
  *  - Contain duplicated socket handlers
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
 import { socket } from '../../services/socket';
 import { renderMarkdownContent } from '../../utils/markdown';
+import { stripInternalResearchCitations } from '../../utils/researchCitations';
 
 import type { ChatMode, Message, ThinkingProcess, AgentThought, KnowledgeGraphData } from '../../types/chat';
 import { MODES, AGENT_COUNCIL, buildKnowledgeGraph, AGENT_APPS } from '../../constants/modes';
 import { getApp } from '../apps';
-import type { AgentAppAdapter } from '../apps';
 
 import ModeSelector from './ModeSelector';
 import ThinkingPanel from './ThinkingPanel';
@@ -113,7 +112,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
 
     if (currentMode === 'auto') return; // routing will handle panel injection
 
-    const useConsensusEngine = currentMode === 'collaborate' || currentMode === 'roundtable';
+    const useConsensusEngine = currentMode === 'roundtable';
     if (useConsensusEngine) {
       const msgIdx = (existingMessages ?? messages).length;
       const agents: AgentThought[] = AGENT_COUNCIL.map(a => ({
@@ -175,8 +174,8 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
         const msgIdx = keys[0];
         const tp = prev[msgIdx];
         if (!tp) return prev;
-        const updatedAgents = tp.agents.map((agent: any, idx: number) => {
-          const realResponse = data.result.consensus.agentResponses[idx];
+        const updatedAgents = tp.agents.map((agent: any) => {
+          const realResponse = data.result.consensus.agentResponses?.find((r: any) => r.agentId === agent.agentId);
           if (realResponse) {
             return { ...agent, status: 'completed', summary: realResponse.answer.slice(0, 150), details: realResponse.answer, confidence: Math.round(realResponse.confidence * 100), verdict: realResponse.confidence > 0.7 ? 'bullish' : 'neutral', steps: [{ label: `${agent.agentName} responded`, status: 'done' }] };
           }
@@ -209,7 +208,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
     onRouted: (data) => {
       setIsRouting(false);
       setCurrentMode(data.mode as ChatMode);
-      const useConsensusEngine = data.mode === 'collaborate' || data.mode === 'roundtable';
+      const useConsensusEngine = data.mode === 'roundtable';
       if (useConsensusEngine) {
         setMessages(prev => {
           const msgIdx = prev.length - 1;
@@ -241,6 +240,19 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
             updated.push({ role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true, appLogs: [data.log], isAppRunning: true, appType: app || undefined });
           } else {
             updated[updated.length - 1] = { ...last, appLogs: [...(last.appLogs || []), data.log] };
+          }
+          return updated;
+        });
+      },
+      onStep: (data) => {
+        // Structured step events (stock analysis): accumulate into appSteps
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (!last || last.role !== 'assistant') {
+            updated.push({ role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true, appSteps: [data], isAppRunning: true, appType: app || undefined });
+          } else {
+            updated[updated.length - 1] = { ...last, appSteps: [...(last.appSteps || []), data] };
           }
           return updated;
         });
@@ -348,7 +360,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
           if (m.metadata) {
             try {
               const parsedMeta = JSON.parse(m.metadata);
-              if (parsedMeta && (parsedMeta.mode === 'collaborate' || parsedMeta.mode === 'roundtable')) {
+              if (parsedMeta && parsedMeta.mode === 'roundtable') {
                 const agents = AGENT_COUNCIL.map((a, aIdx) => {
                   const r = parsedMeta.agentResponses && parsedMeta.agentResponses[aIdx];
                   return { agentId: a.id, agentName: a.name, agentIcon: a.icon, agentColor: a.color, status: r ? 'completed' : 'waiting', summary: r ? r.answer.slice(0, 150) : '', details: r ? r.answer : '', confidence: r ? Math.round(r.confidence * 100) : 0, verdict: r && r.confidence > 0.7 ? 'bullish' : 'neutral', steps: [{ label: r ? `${a.name} responded` : 'No response', status: 'done' }] };
@@ -367,6 +379,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
         }
         // Check if backend is still processing
         if (data.length > 0 && data[data.length - 1].role === 'user') {
+          // Check generic chat first
           socket.emit('agent:chat:check', { sessionId: restoreSessionId }, (res: { isRunning: boolean; mode?: string }) => {
             if (res.isRunning) {
               setIsStreaming(true);
@@ -374,6 +387,27 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
               window.dispatchEvent(new CustomEvent('session-started', { detail: { id: restoreSessionId, title: data[0].content.slice(0, 60), agentId: 'superagent' } }));
             }
           });
+          // Check stock analysis session (reconnection replay)
+          if (activeApp === 'stockanalysis') {
+            socket.emit('agent:stockanalysis:check', { sessionId: restoreSessionId }, (res: { isRunning: boolean; steps?: any[]; report?: string }) => {
+              if (res.isRunning || (res.steps && res.steps.length > 0)) {
+                setIsStreaming(!!res.isRunning);
+                setMessages(prev => [
+                  ...prev,
+                  {
+                    role: 'assistant',
+                    content: res.report || '',
+                    timestamp: new Date().toLocaleTimeString(),
+                    isStreaming: !!res.isRunning,
+                    appSteps: res.steps || [],
+                    isAppRunning: !!res.isRunning,
+                    appType: 'stockanalysis',
+                  },
+                ]);
+                window.dispatchEvent(new CustomEvent('session-started', { detail: { id: restoreSessionId, title: data[0].content.slice(0, 60), agentId: 'stockanalysis' } }));
+              }
+            });
+          }
         }
       } catch (err) {
         console.error('Failed to load chat history', err);
@@ -405,7 +439,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
       }]);
       setIsStreaming(true);
       setTimeout(() => adapter!.start({ query: initialMessage, sessionId, mode: currentMode }), 50);
-    } else if (app === 'research' && (currentMode === 'collaborate' || currentMode === 'roundtable')) {
+    } else if (app === 'research' && currentMode === 'roundtable') {
       // Signal Radar + consensus = two-phase
       setWorkflowPhase('research');
       setTimeout(() => {
@@ -519,9 +553,10 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
                         )}
 
                         {/* App progress logs (HedgeFund, StockAnalysis, etc.) */}
-                        {(msg.isAppRunning || (msg.appLogs && msg.appLogs.length > 0)) && (
+                        {(msg.isAppRunning || (msg.appLogs && msg.appLogs.length > 0) || (msg.appSteps && msg.appSteps.length > 0)) && (
                           <AppProgressLogs
                             logs={msg.appLogs || []}
+                            steps={msg.appSteps}
                             isRunning={!!msg.isAppRunning}
                             accentColor={adapter?.accentColor || 'blue'}
                             runningLabel={adapter?.runningLabel}
@@ -542,7 +577,11 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
                         {msg.content ? (
                           <>
                             <div className="text-[13px] text-gray-700 leading-relaxed markdown-content">
-                              {renderMarkdownContent(msg.content)}
+                              {renderMarkdownContent(
+                                msg.role === 'assistant'
+                                  ? stripInternalResearchCitations(msg.content)
+                                  : msg.content,
+                              )}
                             </div>
                             {msg.collapsibleReport && (
                               <details className="mt-4 group border border-gray-200 rounded-xl bg-gray-50 overflow-hidden text-left relative z-10 transition-all hover:bg-gray-100/50">
@@ -551,7 +590,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
                                   Expand to view the raw background data report
                                 </summary>
                                 <div className="px-5 py-4 border-t border-gray-200 bg-white text-[13px] text-gray-700 leading-relaxed markdown-content">
-                                  {renderMarkdownContent(msg.collapsibleReport)}
+                                  {renderMarkdownContent(stripInternalResearchCitations(msg.collapsibleReport))}
                                 </div>
                               </details>
                             )}

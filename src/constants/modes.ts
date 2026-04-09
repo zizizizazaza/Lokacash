@@ -25,15 +25,7 @@ export const MODES: ModeConfig[] = [
       React.createElement('path', { d: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z' }))
   },
   {
-    id: 'collaborate', label: 'Collaborate', desc: 'Agents split work, assemble one answer',
-    icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-      React.createElement('rect', { x: 3, y: 3, width: 7, height: 7, rx: 1 }),
-      React.createElement('rect', { x: 14, y: 3, width: 7, height: 7, rx: 1 }),
-      React.createElement('rect', { x: 3, y: 14, width: 7, height: 7, rx: 1 }),
-      React.createElement('rect', { x: 14, y: 14, width: 7, height: 7, rx: 1 }))
-  },
-  {
-    id: 'roundtable', label: 'Roundtable', desc: 'Multi-agent debate & cross-validation',
+    id: 'roundtable', label: 'Roundtable', desc: 'Specialist run first, then consensus on the result',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       React.createElement('circle', { cx: 12, cy: 5, r: 2 }),
       React.createElement('circle', { cx: 5, cy: 19, r: 2 }),
@@ -124,7 +116,7 @@ export const AGENT_APPS: Record<string, AgentAppConfig> = {
   research: {
     id: 'research',
     name: 'Signal Radar',
-    supportedModes: ['fast', 'collaborate', 'roundtable'],
+    supportedModes: ['fast', 'roundtable'],
     socketPrefix: 'agent:research',
     accentColor: 'blue',
     runningLabel: 'Signal Radar acquiring intelligence...',

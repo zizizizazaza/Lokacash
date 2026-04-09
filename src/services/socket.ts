@@ -12,9 +12,11 @@ if (API_BASE.startsWith('http')) {
   SOCKET_URL = url.origin;
   SOCKET_PATH = url.pathname.replace(/\/?$/, '') + '/socket.io';
 } else {
-  SOCKET_URL = window.location.origin.replace('3000', '3002');
+  SOCKET_URL = window.location.origin;
   SOCKET_PATH = API_BASE.replace(/\/?$/, '') + '/socket.io';
 }
+
+const LOG = '[LokaSocket]';
 
 class SocketClient {
   private socket: Socket | null = null;
@@ -22,6 +24,8 @@ class SocketClient {
   private tokenGetter: (() => Promise<string | null>) | null = null;
   private listeners: Record<string, Function[]> = {};
   private isRefreshing = false; // Prevent concurrent refresh loops
+  private emitQueue: { event: string; args: unknown[] }[] = [];
+  private static readonly EMIT_QUEUE_MAX = 32;
 
   setToken(token: string) {
     if (this.token === token) return;
@@ -37,12 +41,40 @@ class SocketClient {
   clearToken() {
     this.token = null;
     this.tokenGetter = null;
+    this.emitQueue = [];
     this.disconnect();
   }
 
+  private flushEmitQueue() {
+    if (!this.socket?.connected) return;
+    const n = this.emitQueue.length;
+    if (n) console.log(LOG, 'flushEmitQueue', n, 'event(s)');
+    while (this.emitQueue.length > 0) {
+      const item = this.emitQueue.shift()!;
+      console.log(LOG, 'emit (from queue) →', item.event);
+      this.socket.emit(item.event, ...(item.args as []));
+    }
+  }
+
+  getDebugState() {
+    return {
+      connected: Boolean(this.socket?.connected),
+      socketId: this.socket?.id ?? null,
+      queuedEmits: this.emitQueue.length,
+      socketUrl: SOCKET_URL,
+      socketPath: SOCKET_PATH,
+      hasToken: Boolean(this.token),
+    };
+  }
+
   private connect() {
-    if (!this.token) return;
-    
+    if (!this.token) {
+      console.warn(LOG, 'connect() skipped — no token');
+      return;
+    }
+
+    console.log(LOG, 'connect()', { url: SOCKET_URL, path: SOCKET_PATH });
+
     if (this.socket) {
       this.socket.disconnect();
     }
@@ -57,12 +89,13 @@ class SocketClient {
     });
 
     this.socket.on('connect', () => {
-      console.log('✅ WebSocket Connected');
+      console.log('✅ WebSocket Connected', LOG, 'id=', this.socket?.id, 'queued=', this.emitQueue.length);
       this.isRefreshing = false; // Reset on successful connect
+      this.flushEmitQueue();
     });
 
-    this.socket.on('disconnect', () => {
-      console.log('🔴 WebSocket Disconnected');
+    this.socket.on('disconnect', (reason) => {
+      console.log('🔴 WebSocket Disconnected', LOG, reason);
     });
 
     this.socket.on('connect_error', async (err) => {
@@ -102,12 +135,30 @@ class SocketClient {
     });
   }
 
-  /** Reconnect with a fresh token (e.g. after Privy refreshes it or on visibility change) */
+  /**
+   * Reconnect with a fresh token. Same token + already connected → no action; same token but no instance → connect;
+    */
   reconnectWithToken(token: string) {
+    if (!token) return;
+    if (this.token === token) {
+      if (this.socket?.connected) {
+        console.log(LOG, 'reconnectWithToken: same token, already connected');
+        return;
+      }
+      if (!this.socket) {
+        console.log(LOG, 'reconnectWithToken: same token, no socket → connect()');
+        this.connect();
+      } else {
+        console.log(LOG, 'reconnectWithToken: same token, socket exists but not connected (wait reconnect)');
+      }
+      return;
+    }
+    console.log(LOG, 'reconnectWithToken: new token → reconnect');
     this.token = token;
     if (this.socket) {
       (this.socket.auth as any).token = token;
-      this.socket.disconnect().connect();
+      this.socket.disconnect();
+      this.socket.connect();
     } else {
       this.connect();
     }
@@ -133,9 +184,29 @@ class SocketClient {
   }
 
   emit(event: string, ...args: any[]) {
-    if (this.socket?.connected) {
-      this.socket.emit(event, ...args);
+    if (!this.socket?.connected) {
+      if (this.emitQueue.length >= SocketClient.EMIT_QUEUE_MAX) {
+        console.warn(LOG, 'emit queue full, drop oldest');
+        this.emitQueue.shift();
+      }
+      this.emitQueue.push({ event, args });
+      const preview =
+        event === 'agent:chat' && args[0] && typeof args[0] === 'object'
+          ? { mode: (args[0] as { mode?: string }).mode, sessionId: (args[0] as { sessionId?: string }).sessionId }
+          : undefined;
+      console.warn(LOG, 'emit QUEUED (offline)', event, preview ?? '', 'queueLen=', this.emitQueue.length);
+      return;
     }
+    const preview =
+      event === 'agent:chat' && args[0] && typeof args[0] === 'object'
+        ? { mode: (args[0] as { mode?: string }).mode, sessionId: (args[0] as { sessionId?: string }).sessionId }
+        : undefined;
+    console.log(LOG, 'emit →', event, preview ?? '');
+    this.socket.emit(event, ...args);
+  }
+
+  get connected(): boolean {
+    return Boolean(this.socket?.connected);
   }
 }
 

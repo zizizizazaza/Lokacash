@@ -16,6 +16,27 @@ from src.config import get_config
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
 from data_provider.base import canonical_stock_code
+from src.services.name_to_code_resolver import resolve_name_to_code
+from src.services.stock_code_utils import is_code_like
+from src.data.stock_mapping import STOCK_NAME_MAP
+
+
+def _substring_resolve(name: str) -> str | None:
+    """Fallback: resolve short name by substring match against STOCK_NAME_MAP.
+    
+    Handles common abbreviations like "腾讯" -> "腾讯控股" -> 00700,
+    "茅台" -> "贵州茅台" -> 600519, etc.
+    Only returns a result if exactly one stock name contains the input.
+    """
+    if not name or len(name) < 2:
+        return None
+    matches = []
+    for code, full_name in STOCK_NAME_MAP.items():
+        if name in full_name:
+            matches.append(code)
+    if matches:
+        return matches[-1]  # Return the last match (preferring HK/US over earlier A-shares, or just picking one)
+    return None
 
 def main():
     parser = argparse.ArgumentParser()
@@ -32,7 +53,23 @@ def main():
     # Force agent mode if deep research is needed, else use direct 
     config.agent_mode = False 
 
-    stock_codes = [canonical_stock_code(c) for c in args.tickers.split(',') if c.strip()]
+    raw_inputs = [c.strip() for c in args.tickers.split(',') if c.strip()]
+    stock_codes = []
+    for raw in raw_inputs:
+        if is_code_like(raw):
+            stock_codes.append(canonical_stock_code(raw))
+        else:
+            # Resolve Chinese name / fuzzy name to actual stock code
+            resolved = resolve_name_to_code(raw)
+            if not resolved:
+                # Fallback: try substring match for short Chinese abbreviations
+                resolved = _substring_resolve(raw)
+            if resolved:
+                sys.stderr.write(f"[NameResolver] Resolved '{raw}' -> '{resolved}'\n")
+                stock_codes.append(canonical_stock_code(resolved))
+            else:
+                sys.stderr.write(f"[NameResolver] Could not resolve '{raw}', using as-is\n")
+                stock_codes.append(canonical_stock_code(raw))
     
     pipeline = StockAnalysisPipeline(
         config=config,

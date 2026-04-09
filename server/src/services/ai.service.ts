@@ -136,6 +136,15 @@ function buildSystemPrompt(assetContext?: AssetContext): string {
 }
 
 
+export interface OrchestratorPlan {
+  isSimpleChat: boolean;
+  capabilities: {
+    analysis: { needed: boolean; tickers?: string[] };
+    search: { needed: boolean; query?: string };
+    simulate: { needed: boolean; tickers?: string[] };
+  };
+}
+
 export class LokaAIService {
   private apiKey: string;
   private baseUrl: string;
@@ -246,24 +255,49 @@ export class LokaAIService {
   }
 
   /**
-   * Intelligently routes queries based on complexity.
-   * Returns 'fast' for simple facts/chatter, and 'collaborate' for complex analytical requests.
+   * Intelligently routes queries acting as a Map-Reduce SuperAgent Orchestrator.
+   * Understands what sub-agents are needed to satisfy a query in parallel.
    */
-  async evaluateRouting(query: string): Promise<'fast' | 'collaborate'> {
+  async evaluateRouting(query: string): Promise<OrchestratorPlan> {
     if (!this.isConfigured) {
-      return 'fast'; // Fallback to fast if no API key
+      return {
+        isSimpleChat: true,
+        capabilities: {
+          analysis: { needed: false },
+          search: { needed: false },
+          simulate: { needed: false }
+        }
+      };
     }
 
-    const routerPrompt = `You are a strict query routing engine for the Loka AI financial assistant.
-Analyze the following user query and output ONLY ONE WORD: either "fast" or "collaborate".
+    const routerPrompt = `You are the Coordinator for a Super Agent. Your job is to analyze the user's query and decide which underlying specialist agents must be triggered in parallel. 
+Output JSON only, no markdown.
+
+JSON SCHEMA:
+{
+  "isSimpleChat": boolean, // True ONLY if the query is a greeting, basic platform Q&A, or simple chat (e.g., "hi", "how are you", "what can you do"). If it requires real world data, searching, or analysis, set false.
+  "capabilities": {
+    "analysis": { "needed": boolean, "tickers": ["..."] }, // SET TRUE if the user asks for deep fundamentals, technicals, or buy/sell advice on specific stocks/assets. Extract tickers.
+    "search": { "needed": boolean, "query": "..." }, // SET TRUE if the user asks for market sentiment, current news, public opinion, or macro context (e.g. "What are people saying about X", "impact of Fed rate cut"). Provide a concise English search query.
+    "simulate": { "needed": boolean, "tickers": ["..."] } // SET TRUE if the user explicitly asks for a simulation, prediction, multi-investor debate, or "what if" scenarios (e.g., "Simulate Fed cuts on tech stocks", "What would Buffett do"). Extract tickers, or ["QQQ", "SPY"] if it's a broad market macro simulation.
+  }
+}
 
 RULES:
-- Return "fast" IF: The query is a greeting, small talk, simple definition (e.g. "What is Bitcoin?"), translation, basic math, or asking for platform help.
-- Return "collaborate" IF: The query requires complex reasoning, market analysis, reviewing financial health, predicting trends, cross-verifying arguments, or giving specific speculative investment advice.
+1. "isSimpleChat": When true, ALL capabilities must be false. Use for trivial fast talk.
+2. "analysis": Corresponds to the Stock Analysis tool. Needs tickers. Do NOT use for broad abstract theories.
+3. "search": Corresponds to Deep Web/Social Search. Great for sentiment and recent events.
+4. "simulate": Corresponds to AI Hedge Fund Simulation. Triggers multi-persona debates and heavy computations. Use only when forecasting or simulating.
+TIP: A user can trigger multiple! "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
 
-Query: "${query}"
+Examples:
+Query: "大家对特斯拉怎么看" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Tesla TSLA market sentiment opinion"},"simulate":{"needed":false}}}
+Query: "今天英伟达怎么走的" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["NVDA"]},"search":{"needed":true,"query":"Nvidia NVDA stock news today"},"simulate":{"needed":false}}}
+Query: "深度分析一下阿里和腾讯的投资价值" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["BABA", "TCEHY"]},"search":{"needed":false},"simulate":{"needed":false}}}
+Query: "模拟：如果第三季度降息50个基点对科技股有什么影响" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["QQQ"]},"search":{"needed":true,"query":"Fed 50bps rate cut impact on tech sector"},"simulate":{"needed":true,"tickers":["QQQ"]}}}
+Query: "hi, 你能干啥" -> {"isSimpleChat":true,"capabilities":{"analysis":{"needed":false},"search":{"needed":false},"simulate":{"needed":false}}}
 
-Return exactly one word, lowercase.`;
+Query: "${query}"`;
 
     try {
       const response = await fetch(this.baseUrl, {
@@ -275,22 +309,65 @@ Return exactly one word, lowercase.`;
         body: JSON.stringify({
           model: this.model,
           messages: [{ role: 'user', content: routerPrompt }],
-          max_tokens: 10,
+          max_tokens: 220,
           temperature: 0,
+          response_format: { type: "json_object" }
         }),
+        signal: AbortSignal.timeout(25000),
       });
 
       if (response.ok) {
         const data = await response.json() as any;
-        const result = (data.choices?.[0]?.message?.content || '').trim().toLowerCase();
-        if (result === 'collaborate' || result.includes('collaborate')) {
-          return 'collaborate';
+        const resultText = (data.choices?.[0]?.message?.content || '{}').trim();
+        let parsed;
+        try {
+           parsed = JSON.parse(resultText);
+        } catch(e) {
+           // fallback parsing if the model wrapped it in codeblocks
+           const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+           if (jsonMatch) {
+             parsed = JSON.parse(jsonMatch[0]);
+           } else {
+             throw e;
+           }
         }
+        
+        console.log('[evaluateRouting] Orchestrator Plan:', JSON.stringify(parsed, null, 2));
+        
+        // Ensure defaults fall back gracefully
+        const safePlan: OrchestratorPlan = {
+          isSimpleChat: Boolean(parsed.isSimpleChat),
+          capabilities: {
+            analysis: {
+              needed: Boolean(parsed.capabilities?.analysis?.needed),
+              tickers: parsed.capabilities?.analysis?.tickers || undefined,
+            },
+            search: {
+              needed: Boolean(parsed.capabilities?.search?.needed),
+              query: parsed.capabilities?.search?.query || undefined,
+            },
+            simulate: {
+              needed: Boolean(parsed.capabilities?.simulate?.needed),
+              tickers: parsed.capabilities?.simulate?.tickers || undefined,
+            }
+          }
+        };
+
+        return safePlan;
       }
+      console.warn('evaluateRouting HTTP not ok:', response.status, await response.text().catch(() => ''));
     } catch (err) {
       console.warn('evaluateRouting failed, fallback to fast:', err);
     }
     
-    return 'fast'; // Default
+    // Fallback if AI fails or network timeout
+    return {
+      isSimpleChat: true,
+      capabilities: {
+        analysis: { needed: false },
+        search: { needed: false },
+        simulate: { needed: false }
+      }
+    };
   }
 }

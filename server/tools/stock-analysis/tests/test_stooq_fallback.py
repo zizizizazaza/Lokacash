@@ -78,6 +78,26 @@ class TestStooqFallback(unittest.TestCase):
             self.assertEqual(quote.price, 900.0)
             mock_stooq.assert_called_once_with("NVDA")
 
+    @patch('data_provider.yfinance_fetcher.urlopen')
+    def test_us_daily_history_from_stooq(self, mock_urlopen):
+        """Yahoo 日线失败时，Stooq 日线 CSV 可解析为与 yfinance 兼容的 DataFrame"""
+        mock_history_payload = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2026-03-08,118.0,119.0,117.0,118.5,1000000\n"
+            "2026-03-09,118.5,121.0,118.0,120.0,1100000\n"
+            "2026-03-10,120.0,122.0,119.0,121.5,1200000\n"
+        )
+        mock_history_response = MagicMock()
+        mock_history_response.read.return_value = mock_history_payload.encode('utf-8')
+        mock_history_response.__enter__.return_value = mock_history_response
+        mock_urlopen.return_value = mock_history_response
+
+        df = self.fetcher._fetch_us_daily_history_from_stooq("BABA", "2026-03-09", "2026-03-10")
+        self.assertIsNotNone(df)
+        self.assertEqual(len(df), 2)
+        self.assertIn("Open", df.columns)
+        self.assertEqual(float(df["Close"].iloc[-1]), 121.5)
+
 
 if __name__ == '__main__':
     unittest.main()

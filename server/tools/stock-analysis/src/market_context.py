@@ -17,10 +17,10 @@ def detect_market(stock_code: Optional[str]) -> str:
     """Detect market from stock code.
 
     Returns:
-        One of 'cn', 'hk', 'us', or 'cn' as fallback.
+        One of 'cn', 'hk', 'us', or 'global' as fallback when no code is given.
     """
     if not stock_code:
-        return "cn"
+        return "global"
 
     code = stock_code.strip().upper()
 
@@ -47,7 +47,7 @@ def detect_market(stock_code: Optional[str]) -> str:
 
 _MARKET_ROLES = {
     "cn": {
-        "zh": " A 股",
+        "zh": "A 股",
         "en": "China A-shares",
     },
     "hk": {
@@ -57,6 +57,10 @@ _MARKET_ROLES = {
     "us": {
         "zh": "美股",
         "en": "US stock",
+    },
+    "global": {
+        "zh": "全球（A股/港股/美股）",
+        "en": "Global (A-shares/HK/US)",
     },
 }
 
@@ -89,6 +93,16 @@ _MARKET_GUIDELINES = {
         "en": (
             "- This analysis covers a **US stock** (listed on NYSE/NASDAQ).\n"
             "- US stocks have no daily price limits (but have circuit breakers), allow T+0 and pre/after-market trading. Consider USD FX, Fed policy, and SEC regulations."
+        ),
+    },
+    "global": {
+        "zh": (
+            "- 本次分析可能涉及 **A股**、**港股** 或 **美股**，请结合用户的提问自动判断所属市场。\n"
+            "- 获取数据后，请遵循该市场的特定交易规则进行解析（例如 A 股的涨跌停限制与 T+1 制度，港美股的无涨跌停与 T+0 制度等）。"
+        ),
+        "en": (
+            "- This analysis may cover **A-shares**, **HK stocks**, or **US stocks**. Please infer the market automatically based on the user's query.\n"
+            "- Once the entity is identified, apply the specific trading rules of that market in your analysis (e.g., limits and T+1 for A-shares; no limits and T+0 for HK/US)."
         ),
     },
 }

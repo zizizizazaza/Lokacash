@@ -934,8 +934,13 @@ const Market: React.FC = () => {
       .filter(s => {
         // Category filter — compare lowercase slugs
         if (potCat !== 'All') {
-          const sCat = (s.category || '').toLowerCase().replace(/\s+/g, '-');
-          if (sCat !== potCat.toLowerCase()) return false;
+          if (potCat.toLowerCase() === 'loka') {
+            // Special: filter by source
+            if (s.source !== 'loka') return false;
+          } else {
+            const sCat = (s.category || '').toLowerCase().replace(/\s+/g, '-');
+            if (sCat !== potCat.toLowerCase()) return false;
+          }
         }
         // Revenue (30d) filter
         const rev30 = s.revenue?.last30Days ?? 0;
@@ -1064,10 +1069,10 @@ const Market: React.FC = () => {
             {/* Top row: status chips + filter button + sort */}
             <div className="flex flex-wrap items-center gap-2">
               {(() => {
-                const primaryCats = ['All', 'SaaS', 'AI', 'Health', 'Marketing', 'Content', 'Education'];
+                const primaryCats = ['All', 'Loka', 'SaaS', 'AI', 'Health', 'Marketing', 'Content', 'Education'];
                 const moreCats = ['E-Commerce', 'Fintech', 'Dev Tools', 'Social Media', 'Sales', 'Security', 'Real Estate', 'Recruiting'];
                 const catKeyMap: Record<string, string> = {
-                  'All': 'All', 'SaaS': 'saas', 'AI': 'artificial-intelligence', 'Health': 'health-fitness', 'Marketing': 'marketing',
+                  'All': 'All', 'Loka': 'loka', 'SaaS': 'saas', 'AI': 'artificial-intelligence', 'Health': 'health-fitness', 'Marketing': 'marketing',
                   'Content': 'content-creation', 'Education': 'education', 'E-Commerce': 'ecommerce', 'Fintech': 'fintech',
                   'Dev Tools': 'developer-tools', 'Social Media': 'social-media', 'Sales': 'sales',
                   'Security': 'security', 'Real Estate': 'real-estate', 'Recruiting': 'recruiting',
@@ -1084,8 +1089,15 @@ const Market: React.FC = () => {
                         <button
                           key={cat}
                           onClick={() => { setPotCat(key); setPotCatExpanded(false); }}
-                          className={`px-4 py-1.5 rounded-full text-xs font-bold tracking-wide transition-all whitespace-nowrap ${isActive ? 'bg-gray-900 text-white' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'}`}
+                          className={`px-4 py-1.5 rounded-full text-xs font-bold tracking-wide transition-all whitespace-nowrap flex items-center gap-1 ${
+                            cat === 'Loka'
+                              ? isActive
+                                ? 'bg-[#00E676] text-black shadow-sm'
+                                : 'text-[#00C853] hover:text-black hover:bg-[#00E676]/10'
+                              : isActive ? 'bg-gray-900 text-white' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'
+                          }`}
                         >
+                          {cat === 'Loka' && <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>}
                           {cat}
                         </button>
                       );
@@ -1355,23 +1367,28 @@ const Market: React.FC = () => {
                 const growthStr = growthPct != null ? (growthPct >= 0 ? `↑ ${Math.round(growthPct)}%` : `↓ ${Math.abs(Math.round(growthPct))}%`) : '';
 
 
-
                 // Build tags
                 const tags: string[] = [];
+                const isLoka = s.source === 'loka' || s.lokaVerified;
+                if (isLoka) tags.push('Loka Verified');
                 if (s.paymentProvider) tags.push(`Verified ${s.paymentProvider.charAt(0).toUpperCase() + s.paymentProvider.slice(1)}`);
                 if (s.targetAudience) tags.push(s.targetAudience.charAt(0).toUpperCase() + s.targetAudience.slice(1));
                 if (growthPct != null && growthPct > 50) tags.push('Fast Growing');
 
                 // Label for top performers
                 let label = '';
-                if (s.rank === 1) label = '🏆 #1';
+                if (isLoka) label = '✅ Loka';
+                else if (s.rank === 1) label = '🏆 #1';
                 else if (growthPct != null && growthPct > 100) label = 'Explosive Growth';
                 else if (growthPct != null && growthPct > 30) label = 'Trending';
 
-                // Cofounder info
-                const founder = s.cofounders?.[0]?.xName || s.xHandle || '—';
-                // Use unavatar.io for X/Twitter profile pics as list API doesn't have avatar
-                const founderAvatar = s.cofounders?.[0]?.avatarUrl || (s.xHandle ? `https://unavatar.io/x/${s.xHandle}` : null);
+                // Cofounder info — Loka companies use founderName/founderAvatar instead of cofounders array
+                const founder = isLoka
+                  ? (s.founderName || s.name || '—')
+                  : (s.cofounders?.[0]?.xName || s.xHandle || '—');
+                const founderAvatar = isLoka
+                  ? (s.founderAvatar || null)
+                  : (s.cofounders?.[0]?.avatarUrl || (s.xHandle ? `https://unavatar.io/x/${s.xHandle}` : null));
                 // MoM Growth = revenue growth (growth30d)
                 // Filter extreme values (>200% or <-90%) as unreliable — matches TrustMRR behavior
                 const momGrowth = (growthPct != null && growthPct > -90 && growthPct < 200) ? growthPct : null;
@@ -1401,7 +1418,7 @@ const Market: React.FC = () => {
                       activeSubscriptions: s.activeSubscriptions || undefined,
                     };
                     navigate(`/market/startup/${s.slug}`, { state: { project: mappedProject } });
-                  }} className="bg-white rounded-2xl overflow-hidden border border-gray-200 hover:border-gray-400 hover:shadow-xl transition-all flex flex-col group cursor-pointer">
+                  }} className={`bg-white rounded-2xl overflow-hidden border hover:shadow-xl transition-all flex flex-col group cursor-pointer ${isLoka ? 'border-[#00E676]/60 hover:border-[#00C853] ring-1 ring-[#00E676]/20' : 'border-gray-200 hover:border-gray-400'}`}>
 
                     {/* Card Body */}
                     <div className="p-5 pb-0 flex-1 flex flex-col">
@@ -1415,7 +1432,7 @@ const Market: React.FC = () => {
                         <div className="flex-1 min-w-0 pt-0.5">
                           <h4 className="text-[15px] font-bold text-gray-900 leading-snug truncate mb-1">{s.name}</h4>
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border leading-none shrink-0 ${tagColor}`}>{cat.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</span>
+                            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border leading-none shrink-0 ${tagColor}`}>{cat.replace(/-/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())}</span>
                             {label && (
                               <span className="text-[9px] font-black text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded leading-none shrink-0 tracking-wide">
                                 {label}
@@ -1441,7 +1458,7 @@ const Market: React.FC = () => {
                       {tags.length > 0 && (
                         <div className="flex flex-wrap items-center gap-1.5 mb-3">
                           {tags.slice(0, 3).map(t => (
-                            <span key={t} className="text-[9px] font-bold text-gray-500 bg-gray-50 border border-gray-100 px-2 py-0.5 rounded">{t}</span>
+                            <span key={t} className={`text-[9px] font-bold px-2 py-0.5 rounded ${t === 'Loka Verified' ? 'text-[#00C853] bg-[#00E676]/10 border border-[#00E676]/30' : 'text-gray-500 bg-gray-50 border border-gray-100'}`}>{t}</span>
                           ))}
                         </div>
                       )}

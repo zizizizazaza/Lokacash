@@ -181,6 +181,8 @@ export const FEATURED_AGENTS = [
     ),
     prompt: 'Simulate: What if Fed cuts rates by 50bps in Q3? Model the impact on tech stocks.',
     route: null as string | null,
+    /** 指向全局意图分发器 (auto)，而不是写死的 hedgefund */
+    agentId: 'auto',
   },
   {
     id: 'ai-trader',

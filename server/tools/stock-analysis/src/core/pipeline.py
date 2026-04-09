@@ -408,6 +408,25 @@ class StockAnalysisPipeline:
                 fundamental_context,
             )
             
+            # [UI_METADATA] Inject metadata logging for Node.js frontend UI sync
+            import json
+            try:
+                metadata = {
+                    "fundamental": {
+                        "PE": enhanced_context.get("realtime", {}).get("pe_ratio"),
+                        "Turnover": enhanced_context.get("realtime", {}).get("turnover_rate"),
+                        "PB": enhanced_context.get("realtime", {}).get("pb_ratio")
+                    },
+                    "technical": {
+                        "MA_Alignment": enhanced_context.get("trend_analysis", {}).get("ma_alignment"),
+                        "Trend": enhanced_context.get("trend_analysis", {}).get("trend_status"),
+                        "Signal": enhanced_context.get("trend_analysis", {}).get("buy_signal")
+                    }
+                }
+                logger.info(f"[UI_METADATA] {json.dumps(metadata, ensure_ascii=False)}")
+            except Exception as e:
+                logger.debug(f"Failed to emit UI_METADATA: {e}")
+            
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             result = self.analyzer.analyze(enhanced_context, news_context=news_context)
 

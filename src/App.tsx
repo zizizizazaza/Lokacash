@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { usePrivy, useLogout } from '@privy-io/react-auth';
 import { Page } from './types';
-import { I } from './components/Icons';
 import AnimStyles from './components/AnimStyles';
 import { Sidebar } from './components/Sidebar';
 import SuperAgentHome from './components/SuperAgentHome';
@@ -47,7 +46,7 @@ const App: React.FC = () => {
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [isDark, setIsDark] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [showLaunch, setShowLaunch] = useState(true);
+
 
   const { ready, authenticated, user, getAccessToken } = usePrivy();
   const { logout } = useLogout({
@@ -55,7 +54,7 @@ const App: React.FC = () => {
   });
   const isLoggedIn = ready && authenticated;
 
-  // ── Socket + API token initialization ──
+  // ── Socket + API token (do not rely on the entire `user` object, otherwise it will repeatedly reconnect → WS flash)──
   useEffect(() => {
     if (ready && authenticated) {
       getAccessToken().then(token => {
@@ -64,20 +63,9 @@ const App: React.FC = () => {
           api.setTokenGetter(getAccessToken);
           socket.setTokenGetter(getAccessToken);
           socket.reconnectWithToken(token);
-
-          // Force sync to DB so it doesn't 404
-          const email = user?.email?.address;
-          const name = user?.google?.name || user?.twitter?.username || user?.email?.address?.split('@')[0];
-          const avatar = (user?.google as any)?.pictureUrl || user?.twitter?.profilePictureUrl || (user?.discord as any)?.avatarUrl;
-          api.syncPrivyUser({ email, name, avatar }).then(() => {
-            window.dispatchEvent(new Event('loka-profile-updated'));
-          }).catch(console.error);
         }
       }).catch(err => console.warn('[Auth] Token fetch failed:', err));
 
-
-
-      // Periodic token refresh (every 5 min)
       const interval = setInterval(() => {
         getAccessToken().then(freshToken => {
           if (freshToken) {
@@ -87,7 +75,6 @@ const App: React.FC = () => {
         }).catch(err => console.warn('[Auth] Refresh failed:', err));
       }, 5 * 60 * 1000);
 
-      // Visibility-based token refresh
       const handleVisibility = () => {
         if (document.visibilityState === 'visible') {
           getAccessToken().then(freshToken => {
@@ -108,7 +95,18 @@ const App: React.FC = () => {
       api.clearToken();
       socket.clearToken();
     }
-  }, [ready, authenticated, getAccessToken, user]);
+  }, [ready, authenticated, getAccessToken]);
+
+  // ── Privy → DB user sync (decoupled from Socket)──
+  useEffect(() => {
+    if (!ready || !authenticated || !user) return;
+    const email = user?.email?.address;
+    const name = user?.google?.name || user?.twitter?.username || user?.email?.address?.split('@')[0];
+    const avatar = (user?.google as any)?.pictureUrl || user?.twitter?.profilePictureUrl || (user?.discord as any)?.avatarUrl;
+    api.syncPrivyUser({ email, name, avatar }).then(() => {
+      window.dispatchEvent(new Event('loka-profile-updated'));
+    }).catch(console.error);
+  }, [ready, authenticated, user]);
 
   // Derive user display info from Privy user object
   // Fetch profile from backend for accurate name/avatar

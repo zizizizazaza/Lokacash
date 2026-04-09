@@ -35,20 +35,25 @@ router.post('/connect-key', authRequired, async (req: AuthRequest, res: Response
       return res.status(400).json({ error: 'Must be a live Stripe Restricted API Key (starts with rk_live_)' });
     }
 
-    // Validate the key by making a test API call
-    const testStripe = new Stripe(apiKey, { apiVersion: '2025-03-31.basil' as any });
+    // Validate the key by making a test API call (use SDK default API version)
+    const testStripe = new Stripe(apiKey);
+    let keyValid = false;
     try {
       await testStripe.charges.list({ limit: 1 });
+      keyValid = true;
     } catch (stripeErr: any) {
+      console.error('[Stripe] charges.list validation error:', stripeErr?.type, stripeErr?.message, stripeErr?.statusCode);
       if (stripeErr?.type === 'StripeAuthenticationError') {
-        return res.status(400).json({ error: 'Invalid API key or insufficient permissions' });
+        return res.status(400).json({ error: 'Invalid API key. Please check that the key is correct and your Stripe account is activated for live mode.' });
       }
       // Permission error (key valid but missing charge read scope) — try subscriptions
       try {
         await testStripe.subscriptions.list({ limit: 1 });
+        keyValid = true;
       } catch (subErr: any) {
+        console.error('[Stripe] subscriptions.list validation error:', subErr?.type, subErr?.message, subErr?.statusCode);
         if (subErr?.type === 'StripeAuthenticationError') {
-          return res.status(400).json({ error: 'Invalid API key' });
+          return res.status(400).json({ error: 'Invalid API key. Please verify the key in your Stripe Dashboard.' });
         }
         return res.status(400).json({ error: 'API key validation failed. Please check permissions (Charges Read or Subscriptions Read required)' });
       }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
@@ -10,7 +10,7 @@ const SuperAgentHome: React.FC = () => {
   const [input, setInput] = useState('');
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
-  const [mode, setMode] = useState<'auto' | 'fast' | 'collaborate' | 'roundtable'>('auto');
+  const [mode, setMode] = useState<'auto' | 'fast' | 'roundtable'>('auto');
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const [chatMessage, setChatMessage] = useState<string | null>(null);
@@ -88,6 +88,8 @@ const SuperAgentHome: React.FC = () => {
     if ((location.state as any)?.newChat) {
       setChatMessage(null);
       setInput('');
+      setSelectedAgent(null);
+      setSelectedScenario(null);
     }
   }, [(location.state as any)?.newChat]); // eslint-disable-line
 
@@ -100,10 +102,12 @@ const SuperAgentHome: React.FC = () => {
   const MODES = [
     { id: 'auto' as const, label: 'Auto', desc: 'System picks the best mode for you', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
     { id: 'fast' as const, label: 'Fast', desc: 'Single agent, quick response', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-    { id: 'collaborate' as const, label: 'Deep', desc: 'Agents split work, assemble one answer', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg> },
-    { id: 'roundtable' as const, label: 'Roundtable', desc: 'Multi-agent debate & cross-validation', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
+    { id: 'roundtable' as const, label: 'Roundtable', desc: 'Run specialist agents, then remote consensus on the result', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
   ];
   const currentMode = MODES.find(m => m.id === mode)!;
+
+  const [searchParams] = useSearchParams();
+  const sessionParam = searchParams.get('session');
 
   useEffect(() => {
     if (!modeOpen) return;
@@ -112,8 +116,16 @@ const SuperAgentHome: React.FC = () => {
     return () => document.removeEventListener('mousedown', h);
   }, [modeOpen]);
 
-  if (chatMessage) {
-    return <SuperAgentChat initialMessage={chatMessage} selectedAgentId={selectedAgent || undefined} onBack={() => setChatMessage(null)} />;
+  if (chatMessage || sessionParam) {
+    return (
+      <SuperAgentChat
+        initialMessage={chatMessage || ''}
+        initialSessionId={sessionParam || undefined}
+        initialChatMode={sessionParam ? undefined : mode}
+        selectedAgentId={selectedAgent || undefined}
+        onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
+      />
+    );
   }
 
   return (
@@ -351,9 +363,15 @@ const SuperAgentHome: React.FC = () => {
                 return (
                   <button key={a.id}
                     onClick={() => {
-                      if ((a as any).agentId) { setSelectedAgent((a as any).agentId); setSelectedScenario(null); }
-                      else if (a.route) { navigate(a.route); }
-                      else if (a.prompt) { setChatMessage(a.prompt); }
+                      if ((a as any).agentId) {
+                        setSelectedAgent((a as any).agentId);
+                        setSelectedScenario(null);
+                        if (a.prompt) setChatMessage(a.prompt);
+                      } else if (a.route) {
+                        navigate(a.route);
+                      } else if (a.prompt) {
+                        setChatMessage(a.prompt);
+                      }
                     }}
                     className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:border-gray-300 hover:text-gray-900 hover:shadow-sm whitespace-nowrap">
                     <Ic /> {a.name}
@@ -368,9 +386,15 @@ const SuperAgentHome: React.FC = () => {
                 return (
                   <button key={a.id}
                     onClick={() => {
-                      if ((a as any).agentId) { setSelectedAgent((a as any).agentId); setSelectedScenario(null); }
-                      else if (a.route) { navigate(a.route); }
-                      else if (a.prompt) { setChatMessage(a.prompt); }
+                      if ((a as any).agentId) {
+                        setSelectedAgent((a as any).agentId);
+                        setSelectedScenario(null);
+                        if (a.prompt) setChatMessage(a.prompt);
+                      } else if (a.route) {
+                        navigate(a.route);
+                      } else if (a.prompt) {
+                        setChatMessage(a.prompt);
+                      }
                     }}
                     className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:border-gray-300 hover:text-gray-900 hover:shadow-sm whitespace-nowrap">
                     <Ic /> {a.name}

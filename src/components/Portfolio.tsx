@@ -59,7 +59,7 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
   // Enterprise verification
   const [isVerified, setIsVerified] = useState(false);
   const [showVerifyWizard, setShowVerifyWizard] = useState(false);
-  const [verifyStep, setVerifyStep] = useState(0); // 0=companyInfo, 1=kyc, 2=stripe
+  const [verifyStep, setVerifyStep] = useState(0); // 0=companyInfo, 1=stripe
   const [verifyDone, setVerifyDone] = useState(false);
   const [stripeConnected, setStripeConnected] = useState(false);
   const [stripeApiKeyInput, setStripeApiKeyInput] = useState('');
@@ -75,7 +75,9 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
   });
   const [licenseUploading, setLicenseUploading] = useState(false);
   const licenseInputRef = useRef<HTMLInputElement>(null);
-  const VERIFY_TOTAL = 3;
+  const [logoUploading, setLogoUploading] = useState(false);
+  const logoInputRef = useRef<HTMLInputElement>(null);
+  const VERIFY_TOTAL = 2;
   const [userProfile, setUserProfile] = useState({
     name: '',
     avatar: '',
@@ -305,6 +307,21 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
       alert('Failed to upload file. Please try again.');
     } finally {
       setLicenseUploading(false);
+    }
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLogoUploading(true);
+    try {
+      const result = await api.uploadFile(file);
+      setVerifyData(prev => ({ ...prev, companyLogo: result.url }));
+    } catch (err) {
+      console.error('Logo upload failed:', err);
+      alert('Failed to upload logo. Please try again.');
+    } finally {
+      setLogoUploading(false);
     }
   };
 
@@ -745,13 +762,12 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                   Complete company verification to access fundraising on Loka.
                 </h2>
                 <p className="verify-animate text-[13px] leading-relaxed mb-10" style={{ color: 'oklch(55% 0.01 250)', animationDelay: '80ms' }}>
-                  Three simple steps — takes about 5 minutes.
+                  Two simple steps — takes about 5 minutes.
                 </p>
 
                 <div className="space-y-2 mb-12">
                   {[
                     { icon: <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>, label: 'Company Information', desc: 'Business license, profile details & website' },
-                    { icon: <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>, label: 'KYC Verification', desc: 'Identity documents for beneficial owners' },
                     { icon: <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>, label: 'Connect Stripe', desc: 'Authorize read-only access to verify revenue' },
                   ].map((s, i) => (
                     <div key={i} className="verify-animate verify-step-row flex items-start gap-4" style={{ animationDelay: `${180 + i * 120}ms` }}>
@@ -839,7 +855,6 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                     <div className="done-fade rounded-xl border border-gray-100 overflow-hidden mb-8" style={{ animationDelay: '0.45s' }}>
                       {[
                         { label: 'Company Information', status: '✓ Complete' },
-                        { label: 'KYC / UBO', status: '✓ Approved' },
                         { label: 'Stripe Revenue', status: '✓ Connected' },
                       ].map((item, i) => (
                         <div key={i} className={`flex items-center justify-between px-4 py-3 ${i > 0 ? 'border-t border-gray-50' : ''}`}>
@@ -869,6 +884,28 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                     <div className="mb-2">
                       <h4 className="text-[14px] font-bold" style={{ color: 'oklch(25% 0.02 260)' }}>Company Information</h4>
                       <p className="text-[11px] mt-1 leading-relaxed" style={{ color: 'oklch(58% 0.01 250)' }}>Business license, basic info and company profile</p>
+                    </div>
+                    {/* Company Logo Upload */}
+                    <input type="file" ref={logoInputRef} className="hidden" accept=".jpg,.jpeg,.png,.svg,.webp" onChange={handleLogoUpload} />
+                    <div className="flex items-center gap-4 mb-1">
+                      <div
+                        onClick={() => logoInputRef.current?.click()}
+                        className={`w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 cursor-pointer border-2 border-dashed transition-all overflow-hidden ${
+                          verifyData.companyLogo ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-gray-400 bg-gray-50'
+                        }`}
+                      >
+                        {logoUploading ? (
+                          <div className="w-5 h-5 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+                        ) : verifyData.companyLogo ? (
+                          <img src={verifyData.companyLogo} alt="Company Logo" className="w-full h-full object-cover" />
+                        ) : (
+                          <svg className="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                        )}
+                      </div>
+                      <div>
+                        <p className="text-[12px] font-semibold text-gray-700">Company Logo</p>
+                        <p className="text-[10px] text-gray-400 mt-0.5">{verifyData.companyLogo ? 'Click to replace' : 'JPG, PNG, SVG · Optional'}</p>
+                      </div>
                     </div>
                     {/* License Upload */}
                     <input type="file" ref={licenseInputRef} className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={handleLicenseUpload} />
@@ -941,27 +978,6 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                           ))}
                         </div>
                       </div>
-                    </div>
-                  </div>
-                ) : verifyStep === 1 ? (
-                  /* ── Step 2: KYC — Auto-approved in development ── */
-                  <div className="space-y-4">
-                    <div className="mb-2">
-                      <h4 className="text-[14px] font-bold" style={{ color: 'oklch(25% 0.02 260)' }}>KYC / UBO Verification</h4>
-                      <p className="text-[11px] mt-1 leading-relaxed" style={{ color: 'oklch(58% 0.01 250)' }}>Identity verification for beneficial owners</p>
-                    </div>
-                    <div className="flex items-center gap-3 p-4 bg-green-50 rounded-xl border border-green-100">
-                      <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center shrink-0">
-                        <svg className="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
-                      </div>
-                      <div>
-                        <p className="text-[13px] font-semibold text-green-700">Auto-Approved</p>
-                        <p className="text-[11px] text-green-600 leading-relaxed">KYC verification is automatically approved in development mode. In production, this step will require identity document uploads and third-party verification.</p>
-                      </div>
-                    </div>
-                    <div className="flex items-start gap-2.5 p-3 bg-amber-50 rounded-xl border border-amber-100">
-                      <svg className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                      <p className="text-[10px] text-amber-700 leading-relaxed">In production, all shareholders with ≥ 25% ownership will need to complete individual KYC through our verification partner.</p>
                     </div>
                   </div>
                 ) : (
@@ -1102,7 +1118,7 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                     )}
                     <button
                       onClick={handleNextStep}
-                      disabled={verifyStep === 2 && !stripeConnected}
+                      disabled={verifyStep === 1 && !stripeConnected}
                       className="flex-1 py-3 text-white text-[13px] font-semibold rounded-xl transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
                       style={{ background: 'oklch(30% 0.03 260)' }}
                     >
@@ -1121,8 +1137,12 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                 {/* Header with logo */}
                 <div className="flex items-start gap-4 mb-5">
                   {/* Company Logo */}
-                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center shrink-0 text-white text-lg font-black" style={{ background: 'oklch(30% 0.03 260)' }}>
-                    {verifyData.companyName ? verifyData.companyName.charAt(0).toUpperCase() : 'C'}
+                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center shrink-0 text-white text-lg font-black overflow-hidden" style={verifyData.companyLogo ? {} : { background: 'oklch(30% 0.03 260)' }}>
+                    {verifyData.companyLogo ? (
+                      <img src={verifyData.companyLogo} alt="Company Logo" className="w-full h-full object-cover" />
+                    ) : (
+                      verifyData.companyName ? verifyData.companyName.charAt(0).toUpperCase() : 'C'
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">

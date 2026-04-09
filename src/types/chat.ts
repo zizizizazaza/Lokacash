@@ -4,7 +4,7 @@
  */
 
 // ─── Chat Mode ──────────────────────────────────────────────
-export type ChatMode = 'auto' | 'fast' | 'collaborate' | 'roundtable';
+export type ChatMode = 'auto' | 'fast' | 'roundtable';
 
 // ─── Message ────────────────────────────────────────────────
 export interface Message {
@@ -14,6 +14,8 @@ export interface Message {
   isStreaming?: boolean;
   // App-specific log trails (rendered by each App adapter)
   appLogs?: string[];
+  /** Structured step events (stock analysis agent) */
+  appSteps?: any[];
   isAppRunning?: boolean;
   appType?: string; // 'hedgefund' | 'stockanalysis' | etc.
   collapsibleReport?: string; // Background report to render as a collapsible <details> block

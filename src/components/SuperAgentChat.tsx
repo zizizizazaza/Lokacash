@@ -2,11 +2,17 @@
  * SuperAgentChat — Chat Detail Page
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import * as d3 from 'd3';
-import { QUICK_ACTIONS } from '../constants';
+import { socket } from '../services/socket';
+import { api } from '../services/api';
+import { renderMarkdownContent } from '../utils/markdown';
+import { stripInternalResearchCitations } from '../utils/researchCitations';
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+
+function saLog(...args: unknown[]) {
+    console.log('[SuperAgentChat]', ...args);
+}
 
 // ─── Types and Interfaces ────────────────────────────────────
 
@@ -16,22 +22,13 @@ const InputIcons = {
   Image: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
 };
 
-const AGENT_NAMES: Record<string, string> = {
-  invest: 'Investment Analysis',
-  research: 'Signal Radar',
-  forecast: 'Forecast',
-  scout: 'Project Scout',
-  sentiment: 'Sentiment Check',
-  portfolio: 'Portfolio Review',
-};
 
 const ChatChevron = () => <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>;
 
 const CHAT_MODES = [
-  { id: 'auto' as const,        label: 'Auto',        desc: 'System picks the best mode for you',     icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
+  { id: 'auto' as const,        label: 'Auto',        desc: 'Auto-route to the best agent mode',       icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
   { id: 'fast' as const,        label: 'Fast',        desc: 'Single agent, quick response',            icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-  { id: 'collaborate' as const, label: 'Deep', desc: 'Agents split work, assemble one answer', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg> },
-  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Multi-agent debate & cross-validation',  icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
+  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Specialist run first, then remote consensus on the result', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
 ];
 
 interface Message {
@@ -39,81 +36,145 @@ interface Message {
     content: string;
     timestamp: string;
     isStreaming?: boolean;
+    /** From DB; used to restore Thinking Process when reopening a session */
+    metadata?: string | null;
 }
 
-interface AgentStep {
+interface SearchSource {
+    favicon: string;
+    title: string;
+    domain: string;
+    url?: string;
+}
+
+interface DataProvider {
+    name: string;
+    status: 'pending' | 'active' | 'done';
+}
+
+// ─── Modular Thinking Flow ──────────────────────────────────
+interface SearchSubSection {
+    id: 'social' | 'data_providers';
     label: string;
-    status: 'done' | 'active' | 'pending';
-    detailType?: 'table' | 'news';
+    status: 'pending' | 'active' | 'done';
+    sources?: SearchSource[];
+    providers?: DataProvider[];
+    totalFound?: number;
 }
 
-interface AgentThought {
-    agentId: string;
-    agentName: string;
-    agentIcon: string;
-    agentColor: string;
-    status: 'waiting' | 'analyzing' | 'completed';
-    summary: string;
-    details?: string;
-    verdict?: 'bullish' | 'bearish' | 'neutral';
+interface SearchModuleData {
+    variant: 'social' | 'data_providers' | 'combined';
+    description?: string;
+    sources?: SearchSource[];
+    providers?: DataProvider[];
+    totalFound?: number;
+    // Combined mode: multiple sub-sections
+    sections?: SearchSubSection[];
+}
+
+interface AnalysisStage {
+    id: string;
+    label: string;
+    status: 'pending' | 'active' | 'done';
+    result?: { label: string; value: string; color?: string }[];
+}
+
+interface AnalysisModuleData {
+    stages: AnalysisStage[];
+    decision?: { verdict: string; score: number; color: string; action: string };
+}
+
+interface SimPanelist {
+    name: string;
+    avatar: string;
+    status: 'pending' | 'active' | 'done';
+    verdict?: string;
     confidence?: number;
-    steps?: AgentStep[];
 }
 
-interface ThinkingProcess {
-    agents: AgentThought[];
-    consensus?: { verdict: 'bullish' | 'bearish' | 'neutral'; confidence: number; duration: number };
+interface SimulationModuleData {
+    panelists: SimPanelist[];
+    prediction?: { verdict: string; confidence: number };
+}
+
+interface ConsensusModuleData {
+    round: number;
+    maxRounds: number;
+    status: 'building' | 'discussing' | 'concluded';
+    conclusion?: { verdict: string; confidence: number };
+}
+
+interface ThinkingModule {
+    type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'done';
+    status: 'pending' | 'active' | 'completed';
+    data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | { duration?: number };
+}
+
+interface ToolTraceItem {
+    tool?: string;
+    displayName: string;
+    status: 'running' | 'done' | 'error';
+    durationSec?: number;
+}
+
+interface ThinkingFlow {
+    modules: ThinkingModule[];
     isActive: boolean;
-    phase?: 'generating' | 'evaluating' | 'persuading';
+    route?: string;  // which agent route triggered this
+    toolTrace?: ToolTraceItem[];
+    planningMessage?: string;
+    /** Signal Radar: last30days stderr / status lines (not shown in main chat) */
+    signalResearchLog?: string;
 }
 
-// ─── Agent Council Config ───────────────────────────────────
-const AGENT_COUNCIL = [
-    {
-        id: 'risk_assessor',
-        name: 'Risk Assessor',
-        icon: '🛡️',
-        color: 'orange',
-        steps: [
-            'Verifying revenue streams & financial statements',
-            'Evaluating credit score & default probability',
-            'Analyzing market position & competitive landscape',
-            'Generating risk assessment report',
-        ],
-    },
-    {
-        id: 'market_analyst',
-        name: 'Market Analyst',
-        icon: '📊',
-        color: 'blue',
-        steps: [
-            'Retrieving recent Stock OHLC Data',
-            'Analyzing revenue structure & market share',
-            'Reviewing active users & ARR growth',
-        ],
-    },
-    {
-        id: 'web_search',
-        name: 'Web Search Agent',
-        icon: '🌐',
-        color: 'green',
-        steps: [
-            'Finding recent news & events',
-            'Cross-referencing catalysts',
-            'Summarizing market sentiment',
-        ],
-    },
-    {
-        id: 'trading_strategist',
-        name: 'Trading Strategist',
-        icon: '📈',
-        color: 'purple',
-        steps: [
-            'Correlating technical indicators',
-            'Formulating short-term strategy',
-        ],
-    },
-];
+const SA_SID_KEY = 'loka_superagent_sid';
+const SA_PENDING_KEY = 'loka_sa_analysis_pending';
+
+/** Backend may send 0–1 or 0–100 */
+function confidenceToPercent(n: number | undefined): number {
+    if (n == null || Number.isNaN(n)) return 0;
+    if (n >= 0 && n <= 1) return Math.round(n * 100);
+    return Math.round(Math.min(100, Math.max(0, n)));
+}
+
+function buildTraceFromSteps(steps: unknown[]): ToolTraceItem[] {
+    const trace: ToolTraceItem[] = [];
+    if (!Array.isArray(steps)) return trace;
+    for (const raw of steps) {
+        const s = raw as Record<string, unknown>;
+        if (!s || typeof s !== 'object') continue;
+        if (s.type === 'tool_start') {
+            trace.push({
+                tool: s.tool as string | undefined,
+                displayName: (s.displayName as string) || (s.tool as string) || 'tool',
+                status: 'running',
+            });
+        } else if (s.type === 'tool_done') {
+            for (let i = trace.length - 1; i >= 0; i--) {
+                if (trace[i].status === 'running' && trace[i].tool === s.tool) {
+                    trace[i] = {
+                        ...trace[i],
+                        status: s.success === false ? 'error' : 'done',
+                        durationSec: typeof s.duration === 'number' ? s.duration : undefined,
+                    };
+                    break;
+                }
+            }
+        }
+    }
+    return trace;
+}
+
+function extractPlanningMessage(steps: unknown[]): string | undefined {
+    if (!Array.isArray(steps)) return undefined;
+    let last: string | undefined;
+    for (const raw of steps) {
+        const s = raw as Record<string, unknown>;
+        if (s?.type === 'thinking' && typeof s.message === 'string') last = s.message;
+    }
+    return last;
+}
+
 
 // ─── Knowledge Graph Types ──────────────────────────────────
 interface KGNode {
@@ -323,272 +384,427 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) =>
     );
 };
 
-// ─── AgentStepPanel Component ───────────────────────────────
-const AgentStepPanel: React.FC<{ agent: AgentThought; isExpanded: boolean; onToggle: () => void }> = ({ agent, isExpanded, onToggle }) => {
-    const isActive = agent.status === 'analyzing';
-    const isDone = agent.status === 'completed';
+// ─── ThinkingInlineTrigger (one-liner that opens right side panel) ───
+const ThinkingInlineTrigger: React.FC<{
+    thinking: ThinkingFlow;
+    onOpen: () => void;
+}> = ({ thinking, onOpen }) => {
+    const doneModule = thinking.modules.find(m => m.type === 'done');
+    const dur = doneModule?.status === 'completed' ? (doneModule.data as any)?.duration : null;
+    const durLabel =
+        typeof dur === 'number' && !Number.isNaN(dur) ? String(dur) : '?';
+    const activeModule = thinking.modules.find(m => m.status === 'active');
+    const labels: Record<string, string> = { search: 'Searching...', analysis: 'Analyzing...', simulation: 'Simulating...', consensus: 'Reaching consensus...' };
+    const label = thinking.isActive ? (activeModule ? labels[activeModule.type] || 'Processing...' : 'Processing...') : `Loka completed in ${durLabel}s`;
 
     return (
-        <div className={`transition-all duration-300`}>
-            <button onClick={onToggle} className="w-full flex items-center gap-3 py-2 text-left group">
-                {/* Status icon */}
-                <div className="shrink-0">
-                    {isActive ? (
-                        <div className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                    ) : isDone ? (
-                        <div className="w-5 h-5 rounded-full bg-gray-900 flex items-center justify-center">
-                            <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
-                        </div>
-                    ) : (
-                        <div className="w-5 h-5 rounded-full border-2 border-gray-200" />
-                    )}
+        <button onClick={onOpen} className="group flex items-center gap-2 py-1.5 mb-2 hover:opacity-80 transition-opacity">
+            {thinking.isActive ? (
+                <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+            ) : (
+                <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+            )}
+            <span className="text-[13px] font-medium text-gray-600">{label}</span>
+            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+        </button>
+    );
+};
+
+// ─── Shared sub-components for SidePanel ────────────────────
+const StatusIcon: React.FC<{ status: string; size?: 'sm' | 'md' }> = ({ status, size = 'md' }) => {
+    const s = size === 'sm' ? 'w-3.5 h-3.5' : 'w-5 h-5';
+    const bw = size === 'sm' ? 'border-[1.5px]' : 'border-2';
+    if (status === 'done' || status === 'completed') return <svg className={`${s} text-emerald-500 shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>;
+    if (status === 'error' || status === 'failed') return <svg className={`${s} text-red-500 shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>;
+    if (status === 'active' || status === 'analyzing') return <div className={`${s} ${bw} border-blue-400 border-t-transparent rounded-full animate-spin shrink-0`} />;
+    return <div className={`${size === 'sm' ? 'w-3 h-3' : 'w-4 h-4'} rounded-full border-2 border-gray-200 shrink-0`} />;
+};
+
+const PlatformLogo: React.FC<{ platform: string }> = ({ platform }) => {
+    const s = 'w-4 h-4 shrink-0';
+    switch (platform) {
+        case 'reddit': return <svg className={s} viewBox="0 0 24 24" fill="#FF4500"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 13.23c.04.24.06.48.06.72 0 3.22-3.53 5.82-7.88 5.82S1.31 17.17 1.31 13.95c0-.26.02-.51.06-.78-.74-.39-1.24-1.17-1.24-2.07 0-1.29 1.04-2.33 2.33-2.33.59 0 1.13.22 1.54.58 1.56-1.03 3.6-1.66 5.84-1.72l1.17-5.21.03-.01 3.7.87c.25-.58.83-.99 1.51-.99a1.67 1.67 0 0 1 0 3.33c-.88 0-1.6-.68-1.66-1.55l-3.18-.75-.95 4.22c2.15.09 4.1.72 5.62 1.72.41-.36.95-.57 1.54-.57 1.29 0 2.33 1.04 2.33 2.33 0 .88-.49 1.65-1.21 2.04z"/></svg>;
+        case 'x': return <svg className={s} viewBox="0 0 24 24" fill="#000"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>;
+        case 'youtube': return <svg className={s} viewBox="0 0 24 24" fill="#FF0000"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>;
+        case 'telegram': return <svg className={s} viewBox="0 0 24 24" fill="#26A5E4"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.656 8.153c-.184 1.937-1.003 6.636-1.418 8.806-.176.918-.522 1.226-.856 1.256-.727.067-1.28-.48-1.984-.942-1.103-.722-1.726-1.173-2.797-1.878-1.238-.815-.435-1.264.27-1.997.185-.19 3.394-3.112 3.456-3.376.008-.033.015-.157-.058-.223-.074-.065-.182-.043-.261-.025-.112.025-1.9 1.207-5.36 3.545-.507.348-.966.518-1.378.509-.454-.01-1.326-.257-1.974-.468-.794-.258-1.426-.395-1.37-.834.028-.228.335-.463.92-.704 3.6-1.568 6-2.603 7.2-3.104 3.432-1.427 4.145-1.675 4.61-1.683.102-.002.332.024.48.144a.52.52 0 0 1 .175.334c.016.094.035.308.02.475z"/></svg>;
+        case 'discord': return <svg className={s} viewBox="0 0 24 24" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.12-.098.246-.198.373-.292a.074.074 0 0 1 .078.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078-.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>;
+        case 'hackernews': return <svg className={s} viewBox="0 0 24 24" fill="#F0652F"><path d="M0 0v24h24V0H0zm12.8 14.4V20h-1.6v-5.6L7 4h1.8l3.2 6.4L15.2 4H17l-4.2 10.4z"/></svg>;
+        case 'weibo': return <svg className={s} viewBox="0 0 24 24" fill="#E6162D"><path d="M10.098 20.323c-3.977.391-7.414-1.406-7.672-4.02-.259-2.609 2.759-5.047 6.74-5.441 3.979-.394 7.413 1.404 7.671 4.018.259 2.6-2.759 5.049-6.739 5.443z"/></svg>;
+        case 'wechat': return <svg className={s} viewBox="0 0 24 24" fill="#07C160"><path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.078.285-.022.58.143.802a.77.77 0 0 0 .63.326.687.687 0 0 0 .355-.096l1.862-1.095a.735.735 0 0 1 .563-.082 10.2 10.2 0 0 0 2.313.27c.236 0 .47-.012.7-.031a6.395 6.395 0 0 1-.236-1.709c0-3.605 3.36-6.53 7.499-6.53.254 0 .504.013.75.035C16.805 4.707 13.082 2.188 8.691 2.188z"/></svg>;
+        default: return <svg className={s} viewBox="0 0 24 24" fill="#6B7280"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>;
+    }
+};
+
+const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
+    const content = (
+        <>
+            <div className="shrink-0 w-5 h-5 flex items-center justify-center"><PlatformLogo platform={source.favicon} /></div>
+            <span className="text-[12px] text-gray-600 truncate flex-1 leading-snug">{source.title}</span>
+            <span className="text-[10px] text-gray-400 shrink-0 ml-2">{source.domain}</span>
+        </>
+    );
+    const className = "flex items-center gap-2.5 px-3 py-2 hover:bg-gray-50 rounded-lg transition-colors cursor-pointer group";
+    
+    if (source.url) {
+        return (
+            <a href={source.url} target="_blank" rel="noreferrer" className={className} title={source.title}>
+                {content}
+            </a>
+        );
+    }
+    
+    return (
+        <div className={className} title={source.title}>
+            {content}
+        </div>
+    );
+};
+
+// ─── ThinkingProcessSidePanel (modular right panel) ─────────
+const ThinkingProcessSidePanel: React.FC<{
+    thinking: ThinkingFlow;
+    onClose: () => void;
+}> = ({ thinking, onClose }) => {
+
+    // ── Sub-section renderers for Search Module ──
+    const SocialSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
+        <div>
+            <div className="flex items-center gap-2 mb-2">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    section.status === 'done' ? 'bg-emerald-500' : section.status === 'active' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300'
+                }`} />
+                <span className={`text-[12px] font-semibold ${
+                    section.status === 'done' ? 'text-gray-700' : section.status === 'active' ? 'text-blue-600' : 'text-gray-300'
+                }`}>{section.label}</span>
+                {section.status === 'done' && section.totalFound && (
+                    <span className="text-[10px] text-emerald-600 font-medium">{section.totalFound} sources</span>
+                )}
+            </div>
+            {section.sources && section.sources.length > 0 && (
+                <div className="ml-4 bg-gray-50 rounded-xl border border-gray-100 divide-y divide-gray-100 overflow-hidden mb-2">
+                    {section.sources.map((src, i) => <SourceCard key={i} source={src} />)}
                 </div>
-                <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-semibold text-gray-700">{agent.agentIcon} {agent.agentName}</span>
-                        {isActive && <span className="text-[10px] text-blue-500 font-medium animate-pulse">Thinking...</span>}
-                        {isDone && agent.verdict && (
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
-                                agent.verdict === 'bullish' ? 'bg-emerald-50 text-emerald-600' :
-                                agent.verdict === 'bearish' ? 'bg-red-50 text-red-600' : 'bg-gray-100 text-gray-500'
-                            }`}>{agent.verdict === 'bullish' ? '↑ Low Risk' : agent.verdict === 'bearish' ? '↓ High Risk' : '— Moderate'}</span>
+            )}
+        </div>
+    );
+
+    const DataProvidersSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
+        <div>
+            <div className="flex items-center gap-2 mb-2">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    section.status === 'done' ? 'bg-emerald-500' : section.status === 'active' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300'
+                }`} />
+                <span className={`text-[12px] font-semibold ${
+                    section.status === 'done' ? 'text-gray-700' : section.status === 'active' ? 'text-blue-600' : 'text-gray-300'
+                }`}>{section.label}</span>
+                {section.status === 'done' && section.totalFound && (
+                    <span className="text-[10px] text-emerald-600 font-medium">{section.totalFound} connected</span>
+                )}
+            </div>
+            {section.providers && (
+                <div className="ml-4 flex flex-wrap gap-1.5 mb-2">
+                    {section.providers.map((p, i) => (
+                        <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
+                            p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                            p.status === 'active' ? 'bg-blue-50 text-blue-600 animate-pulse' :
+                            'bg-gray-50 text-gray-300'
+                        }`}>
+                            {p.status === 'done' ? '✓' : p.status === 'active' ? '⟳' : '·'} {p.name}
+                        </span>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+
+    // ── Search Module Renderer ──
+    const SearchModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = mod.data as SearchModuleData | undefined;
+        if (!d) return null;
+
+        // Combined mode: render sub-sections
+        if (d.variant === 'combined' && d.sections) {
+            return (
+                <div>
+                    <div className="flex items-center gap-2.5 mb-3">
+                        <StatusIcon status={mod.status} />
+                        <span className="text-[14px] font-bold text-gray-900">Searching</span>
+                    </div>
+                    <div className="ml-7 space-y-4 mb-3">
+                        {d.sections.map((sec, i) =>
+                            sec.id === 'social'
+                                ? <SocialSubSection key={i} section={sec} />
+                                : <DataProvidersSubSection key={i} section={sec} />
                         )}
                     </div>
-                    {isDone && agent.summary && (
-                        <p className="text-[10px] text-gray-400 mt-0.5 leading-relaxed">{agent.summary}</p>
+                </div>
+            );
+        }
+
+        // Legacy single-variant mode
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-2">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">{d.variant === 'social' ? 'Searching Web' : 'Fetching Data'}</span>
+                </div>
+                <div className="ml-7 space-y-3 mb-3">
+                    {d.description && <p className="text-[12px] text-gray-500 leading-relaxed">{d.description}</p>}
+                    {d.variant === 'social' && d.sources && d.sources.length > 0 && (
+                        <div className="bg-gray-50 rounded-xl border border-gray-100 divide-y divide-gray-100 overflow-hidden">
+                            {d.sources.map((src, i) => <SourceCard key={i} source={src} />)}
+                        </div>
+                    )}
+                    {d.variant === 'data_providers' && d.providers && (
+                        <div className="flex flex-wrap gap-1.5">
+                            {d.providers.map((p, i) => (
+                                <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
+                                    p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                                    p.status === 'active' ? 'bg-blue-50 text-blue-600 animate-pulse' :
+                                    'bg-gray-50 text-gray-300'
+                                }`}>
+                                    {p.status === 'done' ? '✓' : p.status === 'active' ? '⟳' : '·'} {p.name}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    {mod.status === 'completed' && d.totalFound && (
+                        <div className="flex items-center gap-1.5">
+                            <StatusIcon status="done" size="sm" />
+                            <span className="text-[11px] text-emerald-600 font-semibold">
+                                {d.variant === 'social' ? `Found ${d.totalFound} sources` : `${d.totalFound}/${d.totalFound} providers connected`}
+                            </span>
+                        </div>
                     )}
                 </div>
-                {(isDone || isActive) && (
-                    <svg className={`w-3.5 h-3.5 text-gray-300 transition-transform shrink-0 ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                )}
-            </button>
+            </div>
+        );
+    };
 
-            {isExpanded && (isActive || isDone) && (
-                <div className="ml-8 mb-2 space-y-1">
-                    {agent.steps?.map((step, idx) => (
-                        <div key={idx} className="flex items-center gap-2">
-                            {step.status === 'done' ? (
-                                <svg className="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                            ) : step.status === 'active' ? (
-                                <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                            ) : (
-                                <div className="w-3 h-3 rounded-full border border-gray-200 shrink-0" />
+    // ── Analysis Module Renderer ──
+    const AnalysisModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = mod.data as AnalysisModuleData | undefined;
+        if (!d) return null;
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-2">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">Analyzing</span>
+                </div>
+                <div className="ml-7 space-y-2 mb-3">
+                    {d.stages.map((stage) => (
+                        <div key={stage.id || stage.label}>
+                            <div className="flex items-start gap-2">
+                                <StatusIcon status={stage.status} size="sm" />
+                                <span className={`text-[12px] leading-snug ${
+                                    stage.status === 'done' ? 'text-gray-500' : stage.status === 'active' ? 'text-blue-600 font-medium' : 'text-gray-300'
+                                }`}>{stage.label}</span>
+                            </div>
+                            {stage.status === 'done' && stage.result && (
+                                <div className="ml-5 mt-1 flex flex-wrap gap-2">
+                                    {stage.result.map((r, j) => (
+                                        <span key={j} className={`text-[10px] px-2 py-0.5 rounded-md bg-gray-50 ${r.color || 'text-gray-600'}`}>
+                                            {r.label}: <b>{r.value}</b>
+                                        </span>
+                                    ))}
+                                </div>
                             )}
-                            <span className={`text-[10px] leading-relaxed ${
-                                step.status === 'done' ? 'text-gray-400 line-through' :
-                                step.status === 'active' ? 'text-blue-500 font-medium' : 'text-gray-300'
-                            }`}>{step.label}</span>
                         </div>
                     ))}
-                    {isDone && agent.details && (
-                        <div className="mt-2 text-[10px] text-gray-400 bg-gray-50 rounded-lg px-3 py-2 leading-relaxed border border-gray-100">
-                            {agent.details}
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
-    );
-};
-
-// ─── CollaborationProcess Component ─────────────────────────────────
-const CollaborationProcess: React.FC<{ thinking: ThinkingProcess }> = ({ thinking }) => {
-    const p = thinking.phase;
-    const isDone = !thinking.isActive;
-    const activePhase = isDone ? 3 : p === 'persuading' ? 2 : p === 'evaluating' ? 1 : 0;
-    const steps = [
-        { id: 0, label: 'Generating Answers' },
-        { id: 1, label: 'Peer Evaluation' },
-        { id: 2, label: 'Reaching Consensus' },
-    ];
-
-    return (
-        <div className="mt-3 pt-3 border-t border-gray-100 pb-1">
-            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 block">Agent Collaboration</span>
-            <div className="space-y-1.5 ml-1">
-                {steps.map(s => {
-                    const status = isDone || activePhase > s.id ? 'done' : activePhase === s.id ? 'active' : 'pending';
-                    return (
-                        <div key={s.id} className="flex items-center gap-2">
-                            {status === 'done' ? (
-                                <svg className="w-2.5 h-2.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
-                            ) : status === 'active' ? (
-                                <div className="w-2.5 h-2.5 border border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                            ) : (
-                                <div className="w-2.5 h-2.5 rounded-full border border-gray-200 shrink-0" />
-                            )}
-                            <span className={`text-[10px] ${
-                                status === 'done' ? 'text-gray-400 line-through' :
-                                status === 'active' ? 'text-blue-500 font-medium' : 'text-gray-300'
-                            }`}>{s.label}</span>
-                        </div>
-                    );
-                })}
-            </div>
-            {isDone && thinking.consensus && (
-                <div className="mt-3 bg-gray-50 rounded bg-opacity-50 p-2 flex items-center justify-between">
-                    <span className="text-[10px] text-gray-500 font-semibold uppercase">Final Verdict</span>
-                    <span className={`text-[10px] font-bold ${
-                        thinking.consensus.verdict === 'bullish' ? 'text-emerald-600' : 
-                        thinking.consensus.verdict === 'bearish' ? 'text-red-500' : 'text-gray-500'
-                    }`}>{thinking.consensus.verdict === 'bullish' ? '↑ Low Risk' : thinking.consensus.verdict === 'bearish' ? '↓ High Risk' : '— Moderate'} ({thinking.consensus.confidence}%)</span>
-                </div>
-            )}
-        </div>
-    );
-};
-
-// ─── ThinkingProcessPanel ───────────────────────────────────
-const ThinkingProcessPanel: React.FC<{
-    thinking: ThinkingProcess;
-    userQuery?: string;
-    onOpenGraph?: () => void;
-}> = ({ thinking, userQuery = '', onOpenGraph }) => {
-    const [collapsed, setCollapsed] = useState(false);
-    const completedCount = thinking.agents.filter(a => a.status === 'completed').length;
-    const allDone = !thinking.isActive && !!thinking.consensus;
-
-    useEffect(() => {
-        if (allDone) {
-            setCollapsed(false);
-        }
-    }, [allDone]);
-
-    const handleOpenGraph = () => {
-        onOpenGraph?.();
-    };
-    const kgData = allDone ? buildKnowledgeGraph() : null;
-
-    return (
-        <div className="mb-4">
-            {/* Header — single toggle */}
-            <button
-                onClick={() => setCollapsed(c => !c)}
-                className="flex items-center gap-2 mb-2 w-full text-left"
-            >
-                <div className="flex items-center gap-1.5">
-                    {thinking.isActive ? (
-                        <div className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                        <div className="w-3.5 h-3.5 rounded-full bg-gray-200 flex items-center justify-center">
-                            <svg className="w-2 h-2 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
-                        </div>
-                    )}
-                    <span className="text-[11px] font-semibold text-gray-500">
-                        {thinking.isActive ? 'Agents thinking...' : 'Analysis complete'}
-                    </span>
-                    <span className="text-[10px] text-gray-300">{completedCount}/{thinking.agents.length}</span>
-                </div>
-                <svg className={`w-3 h-3 text-gray-300 ml-auto transition-transform ${collapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-            </button>
-
-            {/* Body — flat list, no sub-collapse */}
-            {!collapsed && (
-                <div className="pl-2 border-l-2 border-gray-100 ml-2 space-y-3">
-                    {thinking.agents.map(agent => {
-                        const isActive = agent.status === 'analyzing';
-                        const isDone = agent.status === 'completed';
-                        return (
-                            <div key={agent.agentId}>
-                                {/* Flat step list */}
-                                <div className="space-y-0.5">
-                                    {agent.steps?.map((step, idx) => (
-                                        <div key={idx} className="flex flex-col gap-1.5">
-                                            <div className="flex items-center gap-1.5">
-                                                {step.status === 'done' ? (
-                                                    <svg className="w-2.5 h-2.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                                                ) : step.status === 'active' ? (
-                                                    <div className="w-2.5 h-2.5 border border-blue-500 border-t-transparent rounded-full animate-spin shrink-0" />
-                                                ) : (
-                                                    <div className="w-2.5 h-2.5 rounded-full border border-gray-200 shrink-0" />
-                                                )}
-                                                <span className={`text-[11px] ${
-                                                    step.status === 'done' ? 'text-gray-600 font-medium' :
-                                                    step.status === 'active' ? 'text-blue-600 font-bold' : 'text-gray-400'
-                                                }`}>{step.label}</span>
-                                            </div>
-                                            {/* Step Details rendering */}
-                                            {step.status !== 'pending' && step.detailType === 'table' && (
-                                                <div className="ml-4 mr-2 bg-gray-50 border border-gray-100 rounded p-2 overflow-x-auto">
-                                                    <table className="w-full text-left text-[9px] text-gray-500 whitespace-nowrap">
-                                                        <thead>
-                                                            <tr className="border-b border-gray-200 text-gray-400">
-                                                                <th className="pb-1 font-medium">Metric</th>
-                                                                <th className="pb-1 font-medium">Value</th>
-                                                                <th className="pb-1 font-medium">Benchmark</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            <tr className="border-b border-gray-100 last:border-0"><td className="py-1">MoM Growth</td><td className="py-1 text-gray-700">28%</td><td className="py-1">15%</td></tr>
-                                                            <tr className="border-b border-gray-100 last:border-0"><td className="py-1">Default Prob</td><td className="py-1 text-gray-700">2.3%</td><td className="py-1">{'<'} 5.0%</td></tr>
-                                                            <tr className="border-b border-gray-100 last:border-0"><td className="py-1">Profit Margin</td><td className="py-1 text-gray-700">65%</td><td className="py-1">40%</td></tr>
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            )}
-                                            {step.status !== 'pending' && step.detailType === 'news' && (
-                                                <div className="ml-4 mr-2 space-y-1.5">
-                                                    <div className="flex items-center gap-1.5 p-1.5 bg-gray-50 border border-gray-100 rounded">
-                                                        <div className="w-4 h-4 rounded bg-gray-200 shrink-0 flex items-center justify-center text-[8px]">📰</div>
-                                                        <span className="text-[9px] text-gray-600 truncate">Key executive departure impacts quarterly guidance</span>
-                                                    </div>
-                                                    <div className="flex items-center gap-1.5 p-1.5 bg-gray-50 border border-gray-100 rounded">
-                                                        <div className="w-4 h-4 rounded bg-gray-200 shrink-0 flex items-center justify-center text-[8px]">📰</div>
-                                                        <span className="text-[9px] text-gray-600 truncate">Institutional accumulation accelerates across top funds</span>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    ))}
-                                    {isDone && agent.summary && (
-                                        <p className="text-[10px] text-gray-400 mt-1">{agent.summary}</p>
-                                    )}
-                                </div>
+                    {d.decision && (
+                        <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 space-y-2">
+                            <div className="flex items-center justify-between">
+                                <span className={`text-[13px] font-bold ${d.decision.color}`}>{d.decision.verdict}</span>
+                                <span className="text-[11px] text-gray-400">{d.decision.action}</span>
                             </div>
+                            <div className="w-full bg-gray-200 rounded-full h-1.5">
+                                <div className={`h-1.5 rounded-full transition-all duration-700 ${d.decision.score > 60 ? 'bg-emerald-400' : d.decision.score > 40 ? 'bg-yellow-400' : 'bg-red-400'}`} style={{ width: `${d.decision.score}%` }} />
+                            </div>
+                            <div className="flex justify-between text-[10px] text-gray-400"><span>Score</span><span>{d.decision.score}/100</span></div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    // ── Simulation Module Renderer ──
+    const SimulationModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = mod.data as SimulationModuleData | undefined;
+        if (!d) return null;
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-2">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">Simulating</span>
+                </div>
+                <div className="ml-7 space-y-2 mb-3">
+                    {d.panelists.map((p, i) => {
+                        const colors = ['bg-blue-100 text-blue-700', 'bg-purple-100 text-purple-700', 'bg-emerald-100 text-emerald-700', 'bg-amber-100 text-amber-700', 'bg-rose-100 text-rose-700', 'bg-cyan-100 text-cyan-700'];
+                        const initials = p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2);
+                        return (
+                        <div key={i} className="flex items-center gap-2.5">
+                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${colors[i % colors.length]}`}>
+                                {initials}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[12px] font-medium text-gray-700">{p.name}</span>
+                                    {p.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing...</span>}
+                                </div>
+                                {p.status === 'done' && p.verdict && (
+                                    <span className={`text-[11px] ${p.verdict === 'Buy' ? 'text-emerald-600' : p.verdict === 'Sell' ? 'text-red-500' : 'text-yellow-600'}`}>
+                                        {p.verdict} · {confidenceToPercent(p.confidence)}% confidence
+                                    </span>
+                                )}
+                            </div>
+                            <StatusIcon status={p.status} size="sm" />
+                        </div>
                         );
                     })}
-                    <CollaborationProcess thinking={thinking} />
+                    {d.prediction && (
+                        <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 flex items-center justify-between">
+                            <span className="text-[11px] text-gray-500 font-medium">Prediction</span>
+                            <span className={`text-[12px] font-bold ${d.prediction.verdict === 'Buy' ? 'text-emerald-600' : 'text-yellow-600'}`}>
+                                {d.prediction.verdict} · {confidenceToPercent(d.prediction.confidence)}%
+                            </span>
+                        </div>
+                    )}
                 </div>
-            )}
+            </div>
+        );
+    };
 
-            {/* Collapsed summary */}
-            {collapsed && thinking.consensus && (
-                <div className="flex items-center gap-3 ml-6">
-                    <button onClick={() => setCollapsed(false)} className="flex items-center gap-2 text-[10px] text-gray-400 hover:text-gray-600 transition-colors">
-                        <span className={`font-bold ${
-                            thinking.consensus.verdict === 'bullish' ? 'text-emerald-500' :
-                            thinking.consensus.verdict === 'bearish' ? 'text-red-400' : 'text-gray-500'
-                        }`}>
-                            {thinking.consensus.verdict === 'bullish' ? '↑ Low Risk' : thinking.consensus.verdict === 'bearish' ? '↓ High Risk' : '— Moderate'}
-                        </span>
-                        <span>· {thinking.consensus.confidence}% confidence</span>
-                        <span className="text-[9px] underline ml-1">Expand</span>
-                    </button>
+    // ── Consensus Module Renderer ──
+    const ConsensusModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = mod.data as ConsensusModuleData | undefined;
+        if (!d) return null;
+        const steps = ['Building consensus group', 'Discussion in progress', 'Reaching conclusion'];
+        const stepIdx = d.status === 'concluded' ? 3 : d.status === 'discussing' ? 1 + (d.round > 1 ? 1 : 0) : 0;
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-2">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">Consensus</span>
                 </div>
-            )}
+                <div className="ml-7 space-y-1.5 mb-3">
+                    {steps.map((label, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                            <StatusIcon status={stepIdx > i ? 'done' : stepIdx === i ? 'active' : 'pending'} size="sm" />
+                            <span className={`text-[12px] ${stepIdx > i ? 'text-gray-500' : stepIdx === i ? 'text-blue-600 font-medium' : 'text-gray-300'}`}>
+                                {label}{i === 1 && d.status === 'discussing' ? ` (Round ${d.round}/${d.maxRounds})` : ''}
+                            </span>
+                        </div>
+                    ))}
+                    {d.conclusion && (
+                        <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 space-y-1">
+                            <div className="flex items-center justify-between">
+                                <span className="text-[11px] text-gray-500 font-medium">Verdict</span>
+                                <span className="text-[12px] font-bold text-emerald-600">{d.conclusion.verdict}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <span className="text-[11px] text-gray-500 font-medium">Confidence</span>
+                                <span className="text-[12px] font-semibold text-gray-700">{confidenceToPercent(d.conclusion.confidence)}%</span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    // ── Done Module Renderer ──
+    const DoneModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const dur = (mod.data as any)?.duration;
+        const showDur = typeof dur === 'number' && !Number.isNaN(dur) && dur > 0;
+        return (
+            <div className="pt-3 border-t border-gray-100">
+                <div className="flex items-center gap-2.5">
+                    <StatusIcon status="done" />
+                    <span className="text-[14px] font-bold text-gray-900">Done</span>
+                    {showDur && <span className="text-[11px] text-gray-400 ml-auto">{dur}s</span>}
+                </div>
+            </div>
+        );
+    };
+
+    return (
+        <div className="flex flex-col h-full bg-white">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+                <div>
+                    <h2 className="text-[14px] font-bold text-gray-900">Thinking Process</h2>
+                    {thinking.route && (
+                        <span className="text-[11px] text-blue-500 font-medium mt-0.5 block">Agent: {thinking.route}</span>
+                    )}
+                </div>
+                <button onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+                {thinking.signalResearchLog && (
+                    <div className="pb-4 border-b border-gray-100">
+                        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
+                            Searching Process
+                        </div>
+                        <pre className="text-[10px] text-gray-500 whitespace-pre-wrap break-words max-h-56 overflow-y-auto font-mono leading-relaxed bg-gray-50/80 rounded-lg px-2 py-2 border border-gray-100">
+                            {thinking.signalResearchLog}
+                        </pre>
+                    </div>
+                )}
+                {(thinking.planningMessage || (thinking.toolTrace && thinking.toolTrace.length > 0)) && (
+                    <div className="pb-4 border-b border-gray-100">
+                        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Tool Orchestration</div>
+                        {thinking.planningMessage && (
+                            <p className="text-[12px] text-gray-500 mb-2 leading-relaxed">{thinking.planningMessage}</p>
+                        )}
+                        {thinking.toolTrace && thinking.toolTrace.length > 0 && (
+                            <div className="space-y-1.5">
+                                {thinking.toolTrace.map((t, i) => (
+                                    <div key={`${t.tool}-${i}`} className="flex items-center gap-2 text-[12px] min-h-[22px]">
+                                        <StatusIcon
+                                            status={
+                                                t.status === 'running'
+                                                    ? 'active'
+                                                    : t.status === 'done'
+                                                      ? 'done'
+                                                      : t.status === 'error'
+                                                        ? 'error'
+                                                        : 'pending'
+                                            }
+                                            size="sm"
+                                        />
+                                        <span className={t.status === 'running' ? 'text-blue-600 font-medium' : 'text-gray-700'}>
+                                            {t.displayName}
+                                        </span>
+                                        {t.status === 'done' && t.durationSec != null && (
+                                            <span className="text-[10px] text-gray-400 ml-auto tabular-nums">
+                                                ({Number(t.durationSec).toFixed(2)}s)
+                                            </span>
+                                        )}
+                                        {t.status === 'error' && (
+                                            <span className="text-[10px] text-red-500 ml-auto">失败</span>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+                {thinking.modules.filter(m => m.type !== 'done' || m.status === 'completed').map((mod) => {
+                    switch (mod.type) {
+                        case 'search': return <SearchModule key="search" mod={mod} />;
+                        case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
+                        case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
+                        case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
+                        case 'done': return <DoneModule key="done" mod={mod} />;
+                        default: return null;
+                    }
+                })}
+            </div>
         </div>
     );
 };
-
-
-// ─── Markdown-like renderer for AI responses ────────────────
-const renderMarkdown = (text: string) => {
-    if (!text) return null;
-    // Simple markdown: bold, headers, lists
-    const lines = text.split('\n');
-    return lines.map((line, i) => {
-        if (line.startsWith('### ')) return <h3 key={i} className="text-sm font-bold text-gray-900 mt-4 mb-2">{line.slice(4)}</h3>;
-        if (line.startsWith('## ')) return <h2 key={i} className="text-base font-bold text-gray-900 mt-5 mb-2">{line.slice(3)}</h2>;
-        if (line.startsWith('# ')) return <h1 key={i} className="text-lg font-bold text-gray-900 mt-6 mb-3">{line.slice(2)}</h1>;
-        if (line.startsWith('- ') || line.startsWith('* ')) return <li key={i} className="text-sm text-gray-700 leading-relaxed ml-4 list-disc">{line.slice(2)}</li>;
-        if (line.match(/^\d+\.\s/)) return <li key={i} className="text-sm text-gray-700 leading-relaxed ml-4 list-decimal">{line.replace(/^\d+\.\s/, '')}</li>;
-        if (line.trim() === '') return <br key={i} />;
-        // Bold text
-        const boldParsed = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        return <p key={i} className="text-sm text-gray-700 leading-relaxed" dangerouslySetInnerHTML={{ __html: boldParsed }} />;
-    });
-};
-
 // ═════════════════════════════════════════════════════════════
 // SuperAgentChat — Main Component
 // ═════════════════════════════════════════════════════════════
@@ -597,21 +813,84 @@ interface SuperAgentChatProps {
     onBack: () => void;
     agentCount?: number;
     selectedAgentId?: string;
+    initialSessionId?: string;
+    /** From home screen mode selector (not used when opening history-only session). */
+    initialChatMode?: 'auto' | 'fast' | 'roundtable';
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId }) => {
-    const [messages, setMessages] = useState<Message[]>([]);
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
+    const [sessionId] = useState(() => {
+        if (initialSessionId) return initialSessionId;
+        try {
+            let s = sessionStorage.getItem(SA_SID_KEY);
+            if (!s) {
+                s = crypto.randomUUID();
+                sessionStorage.setItem(SA_SID_KEY, s);
+            }
+            return s;
+        } catch {
+            return crypto.randomUUID();
+        }
+    });
+
+    const [messages, setMessages] = useState<Message[]>(() => {
+        try {
+            const raw = sessionStorage.getItem(SA_PENDING_KEY);
+            if (!raw) return [];
+            const p = JSON.parse(raw) as {
+                sessionId?: string;
+                userContent?: string;
+                streaming?: boolean;
+            };
+            const sid = sessionStorage.getItem(SA_SID_KEY);
+            if (!p?.streaming || !p.userContent || p.sessionId !== sid) return [];
+            return [
+                { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
+                {
+                    role: 'assistant',
+                    content: '',
+                    timestamp: new Date().toLocaleTimeString(),
+                    isStreaming: true,
+                },
+            ];
+        } catch {
+            return [];
+        }
+    });
+
     const [inputText, setInputText] = useState('');
-    const [isStreaming, setIsStreaming] = useState(false);
-    const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingProcess>>({});
-    const [sessionId] = useState(() => crypto.randomUUID());
+    const [isStreaming, setIsStreaming] = useState(() => {
+        try {
+            const raw = sessionStorage.getItem(SA_PENDING_KEY);
+            if (!raw) return false;
+            const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
+            const sid = sessionStorage.getItem(SA_SID_KEY);
+            return !!(p?.streaming && p.sessionId === sid);
+        } catch {
+            return false;
+        }
+    });
+    const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const abortControllerRef = useRef<AbortController | null>(null);
     const hasSentInitial = useRef(false);
-    // ─── Knowledge Graph Panel ───────────────────────────────
+    const replayRecoverAttemptedRef = useRef(false);
+    const restoredFromPendingRef = useRef(
+        (() => {
+            try {
+                const raw = sessionStorage.getItem(SA_PENDING_KEY);
+                if (!raw) return false;
+                const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
+                return !!(p?.streaming && p.sessionId === sessionStorage.getItem(SA_SID_KEY));
+            } catch {
+                return false;
+            }
+        })(),
+    );
+    // ─── Right Side Panel ─────────────────────────────────────
     const [showGraphPanel, setShowGraphPanel] = useState(false);
+    const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
-    const [chatMode, setChatMode] = useState<'auto'|'fast'|'collaborate'|'roundtable'>('auto');
+    const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
@@ -690,10 +969,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
-    // Chat title derived from initial message
-    const chatTitle = initialMessage.length > 55
-        ? initialMessage.slice(0, 55).trim() + '…'
-        : initialMessage;
+    // Chat title: condense to a short summary
+    const chatTitle = useMemo(() => {
+        const msg = initialMessage.trim();
+        // Remove question marks and common filler words
+        const cleaned = msg.replace(/[？?！!。，,]+$/g, '').trim();
+        // If short enough, use as-is
+        if (cleaned.length <= 20) return cleaned;
+        // Try to extract a short topic: take first meaningful clause
+        const clauseBreak = cleaned.search(/[，,、；;—]/);
+        if (clauseBreak > 4 && clauseBreak <= 25) return cleaned.slice(0, clauseBreak);
+        // For analysis/investment queries, extract the ticker/topic
+        const tickerMatch = cleaned.match(/(?:分析|analyze|analysis|invest|research|研究)\s*(.{1,15})/i);
+        if (tickerMatch) return `${tickerMatch[1].trim()} Analysis`;
+        // Default: truncate intelligently
+        const words = cleaned.split(/\s+/);
+        if (words.length <= 4) return cleaned.length > 25 ? cleaned.slice(0, 22) + '…' : cleaned;
+        return words.slice(0, 4).join(' ') + '…';
+    }, [initialMessage]);
 
     useEffect(() => {
         if (!chatModeOpen) return;
@@ -721,7 +1014,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [inputText]);
 
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
-    const currentQuery = activeGraphMsgIdx !== null ? messages.slice(0, activeGraphMsgIdx).reverse().find(m => m.role === 'user')?.content ?? '' : '';
     const currentKgData = currentThinking ? buildKnowledgeGraph() : null;
 
     // Auto-scroll
@@ -729,183 +1021,507 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, thinkingProcesses]);
 
-    // ─── Simulate thinking process ──────────────────────────
-    const simulateThinking = useCallback(async (msgIdx: number) => {
-        const council = AGENT_COUNCIL.slice(0, agentCount);
-        const agents: AgentThought[] = council.map(a => ({
-            agentId: a.id, agentName: a.name, agentIcon: a.icon, agentColor: a.color,
-            status: 'waiting', summary: '', steps: a.steps.map(s => ({ label: s, status: 'pending' as const })),
-        }));
-        setThinkingProcesses(prev => ({ ...prev, [msgIdx]: { agents, isActive: true, phase: 'generating' } }));
+    // ─── Real Socket.IO Integration ────────────────────────────
+    const activeMsgIdxRef = useRef<number>(-1);
+    const progressChunkIdxRef = useRef(0);
 
-        await Promise.all(agents.map(async (agent, aIdx) => {
-            // Set to analyzing
+    useEffect(() => {
+        progressChunkIdxRef.current = 0;
+        const onRouting = (data: { sessionId: string }) => {
+            saLog('← agent:chat:routing', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            setThinkingProcesses(prev => ({
+                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: 'Routing...' }
+            }));
+        };
+
+        const onRouted = (data: { sessionId: string; mode: string }) => {
+            saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            // Mode updated
+        };
+
+        const onStarted = (data: { sessionId: string; mode: string; route: string }) => {
+            saLog('← agent:chat:started', { expect: sessionId, got: data?.sessionId, route: data?.route, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+             setThinkingProcesses(prev => ({
+                 ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: data.route }
+             }));
+        };
+
+        const onModule = (data: { sessionId: string; moduleType: string; status: string; data?: any }) => {
+            saLog('← agent:chat:module', { expect: sessionId, got: data?.sessionId, moduleType: data?.moduleType, status: data?.status, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            
             setThinkingProcesses(prev => {
-                const tp = { ...prev[msgIdx] };
-                const updatedAgents = [...tp.agents];
-                updatedAgents[aIdx] = { ...updatedAgents[aIdx], status: 'analyzing' };
-                return { ...prev, [msgIdx]: { ...tp, agents: updatedAgents } };
+                const msgIdx = activeMsgIdxRef.current;
+                const flow = prev[msgIdx] || { modules: [], isActive: true, route: 'Loka Agent' };
+                const mods = [...flow.modules];
+                
+                let modIdx = mods.findIndex(m => m.type === data.moduleType);
+                if (modIdx === -1) {
+                    mods.push({ type: data.moduleType as any, status: data.status as any, data: data.data });
+                } else {
+                    const prev = mods[modIdx];
+                    const prevStatus = prev.status;
+                    const incoming = data.status as string;
+                    const isDowngradeToActive =
+                        (incoming === 'active' || incoming === 'analyzing') &&
+                        (prevStatus === 'completed' || prevStatus === 'done' || prevStatus === 'concluded');
+                    const nextStatus = isDowngradeToActive ? prevStatus : incoming;
+                    mods[modIdx] = { ...prev, status: nextStatus as any };
+                    if (data.data) {
+                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...data.data };
+                    }
+                }
+                
+                return { ...prev, [msgIdx]: { ...flow, modules: mods } };
             });
+        };
 
-            const steps = council[aIdx].steps;
-            for (let sIdx = 0; sIdx < steps.length; sIdx++) {
-                await new Promise(r => setTimeout(r, 400 + Math.random() * 600));
-                setThinkingProcesses(prev => {
-                    const tp = { ...prev[msgIdx] };
-                    const updatedAgents = [...tp.agents];
-                    const updatedSteps = [...(updatedAgents[aIdx].steps || [])];
-                    if (sIdx > 0) updatedSteps[sIdx - 1] = { ...updatedSteps[sIdx - 1], status: 'done' };
-                    // Inject mock detailType for specific steps
-                    let detailType: 'table' | 'news' | undefined;
-                    if (updatedSteps[sIdx].label.includes('financial statements') || updatedSteps[sIdx].label.includes('Stock OHLC Data')) detailType = 'table';
-                    if (updatedSteps[sIdx].label.includes('competitive landscape') || updatedSteps[sIdx].label.includes('news & events')) detailType = 'news';
-                    updatedSteps[sIdx] = { ...updatedSteps[sIdx], status: 'active', detailType };
-                    updatedAgents[aIdx] = { ...updatedAgents[aIdx], steps: updatedSteps };
-                    return { ...prev, [msgIdx]: { ...tp, agents: updatedAgents } };
-                });
+        const onProgress = (data: { sessionId: string; content: string }) => {
+            if (data.sessionId === sessionId && import.meta.env.DEV) {
+                progressChunkIdxRef.current += 1;
+                const n = progressChunkIdxRef.current;
+                if (n === 1 || n % 35 === 0) {
+                    saLog('← agent:chat:progress (sample)', { n, chunkLen: data?.content?.length ?? 0 });
+                }
             }
-
-            // Complete agent
-            await new Promise(r => setTimeout(r, 300));
-            const verdicts: ('bullish' | 'neutral')[] = ['bullish', 'neutral'];
-            const verdict = verdicts[Math.floor(Math.random() * 2)];
-            const confidence = 65 + Math.floor(Math.random() * 30);
-            const summaries = [
-                'Low default probability (2.3%). Revenue growth at 28% MoM exceeds benchmark.',
-                'Moderate risk detected. Revenue concentration >40% in single client. Profit margin adequate at 65%.',
-                'Strong credit profile. Consistent revenue history over 12 months. Diversified customer base across 50+ clients.',
-            ];
-            const summary = summaries[Math.floor(Math.random() * summaries.length)];
-            const details = `Risk Score: ${verdict === 'bullish' ? 'A+' : 'B+'} | Default Probability: ${(Math.random() * 5).toFixed(1)}% | Revenue Stability: ${(75 + Math.random() * 20).toFixed(0)}%`;
-
-            setThinkingProcesses(prev => {
-                const tp = { ...prev[msgIdx] };
-                const updatedAgents = [...tp.agents];
-                const completedSteps = (updatedAgents[aIdx].steps || []).map(s => ({ ...s, status: 'done' as const }));
-                updatedAgents[aIdx] = { ...updatedAgents[aIdx], status: 'completed', summary, details, verdict, confidence, steps: completedSteps };
-                return { ...prev, [msgIdx]: { ...tp, agents: updatedAgents } };
+            if (data.sessionId !== sessionId) return;
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + data.content };
+                return updated;
             });
-        }));
+        };
 
-        // Move to evaluating phase
-        setThinkingProcesses(prev => ({ ...prev, [msgIdx]: { ...prev[msgIdx], phase: 'evaluating' } }));
-        await new Promise(r => setTimeout(r, 1200));
+        const onStreamDone = (data: { sessionId: string; content?: string }) => {
+            saLog('← agent:chat:stream_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            try {
+                sessionStorage.removeItem(SA_PENDING_KEY);
+            } catch {
+                /* ignore */
+            }
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { 
+                    ...updated[msgIdx], 
+                    content: data.content || updated[msgIdx].content,
+                    isStreaming: false, 
+                    timestamp: new Date().toLocaleTimeString() 
+                };
+                return updated;
+            });
+            setIsStreaming(false);
+            setThinkingProcesses(prev => {
+                const msgIdx = activeMsgIdxRef.current;
+                if (!prev[msgIdx]) return prev;
+                return { ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } };
+            });
+        };
 
-        // Move to persuading phase
-        setThinkingProcesses(prev => ({ ...prev, [msgIdx]: { ...prev[msgIdx], phase: 'persuading' } }));
-        await new Promise(r => setTimeout(r, 1500));
+        const onError = (data: { sessionId: string; error: string }) => {
+            saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            try {
+                sessionStorage.removeItem(SA_PENDING_KEY);
+            } catch {
+                /* ignore */
+            }
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + data.error, isStreaming: false };
+                return updated;
+            });
+            setIsStreaming(false);
+        };
 
-        // Generate consensus
-        setThinkingProcesses(prev => ({
-            ...prev,
-            [msgIdx]: {
-                ...prev[msgIdx],
-                isActive: false,
-                consensus: {
-                    verdict: Math.random() > 0.3 ? 'bullish' : 'neutral',
-                    confidence: 70 + Math.floor(Math.random() * 25),
-                    duration: 2 + Math.random() * 3,
+        const onThinkingLog = (data: { sessionId: string; line: string }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setThinkingProcesses((prev) => {
+                const flow = prev[msgIdx] || { modules: [], isActive: true };
+                const prevLog = flow.signalResearchLog || '';
+                const next = prevLog ? `${prevLog}\n${data.line}` : data.line;
+                const capped = next.length > 120_000 ? next.slice(-120_000) : next;
+                return { ...prev, [msgIdx]: { ...flow, signalResearchLog: capped } };
+            });
+        };
+
+        const onToolTrace = (data: { sessionId: string; step: Record<string, unknown> }) => {
+            const st = data?.step;
+            const t = st && typeof st === 'object' ? (st as { type?: string }).type : undefined;
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const step = data.step;
+            if (t !== 'thinking' && t !== 'tool_start' && t !== 'tool_done') {
+                return;
+            }
+            if (import.meta.env.DEV) {
+                saLog('← agent:chat:tool_trace', { expect: sessionId, got: data?.sessionId, stepType: t, match: true });
+            }
+            setThinkingProcesses(prev => {
+                const flow = prev[msgIdx] || { modules: [], isActive: true };
+                if (step.type === 'thinking') {
+                    return {
+                        ...prev,
+                        [msgIdx]: { ...flow, planningMessage: String(step.message || '') },
+                    };
+                }
+                const trace = [...(flow.toolTrace || [])];
+                if (step.type === 'tool_start') {
+                    trace.push({
+                        tool: step.tool as string | undefined,
+                        displayName: (step.displayName as string) || (step.tool as string) || '',
+                        status: 'running',
+                    });
+                } else if (step.type === 'tool_done') {
+                    for (let i = trace.length - 1; i >= 0; i--) {
+                        if (trace[i].status === 'running' && trace[i].tool === step.tool) {
+                            trace[i] = {
+                                ...trace[i],
+                                status: step.success === false ? 'error' : 'done',
+                                durationSec: typeof step.duration === 'number' ? step.duration : undefined,
+                            };
+                            break;
+                        }
+                    }
+                } else {
+                    return prev;
+                }
+                return { ...prev, [msgIdx]: { ...flow, toolTrace: trace } };
+            });
+        };
+
+        socket.on('agent:chat:routing', onRouting);
+        socket.on('agent:chat:routed', onRouted);
+        socket.on('agent:chat:started', onStarted);
+        socket.on('agent:chat:module', onModule);
+        socket.on('agent:chat:progress', onProgress);
+        socket.on('agent:chat:stream_done', onStreamDone);
+        socket.on('agent:chat:error', onError);
+        socket.on('agent:chat:tool_trace', onToolTrace);
+        socket.on('agent:chat:thinking_log', onThinkingLog);
+
+        return () => {
+            socket.off('agent:chat:routing', onRouting);
+            socket.off('agent:chat:routed', onRouted);
+            socket.off('agent:chat:started', onStarted);
+            socket.off('agent:chat:module', onModule);
+            socket.off('agent:chat:progress', onProgress);
+            socket.off('agent:chat:stream_done', onStreamDone);
+            socket.off('agent:chat:error', onError);
+            socket.off('agent:chat:tool_trace', onToolTrace);
+            socket.off('agent:chat:thinking_log', onThinkingLog);
+        };
+    }, [sessionId]);
+
+    /** Reconnect / Refresh: replay tool orchestration and completed reports from server buffer */
+    useEffect(() => {
+        replayRecoverAttemptedRef.current = false;
+        const replay = () => {
+            saLog('emit agent:chat:replay', { sessionId, ...socket.getDebugState() });
+            socket.emit(
+                'agent:chat:replay',
+                { sessionId },
+                (res: {
+                    ok?: boolean;
+                    isRunning?: boolean;
+                    steps?: unknown[];
+                    report?: string;
+                    status?: string;
+                }) => {
+                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, isRunning: res?.isRunning, status: res?.status });
+
+                    const stepsLen = Array.isArray(res?.steps) ? res.steps.length : 0;
+                    const hasSteps = stepsLen > 0;
+
+                    if (res?.ok && hasSteps) {
+                        const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        const trace = buildTraceFromSteps(res.steps!);
+                        const planning = extractPlanningMessage(res.steps!);
+                        setThinkingProcesses(prev => ({
+                            ...prev,
+                            [msgIdx]: {
+                                ...(prev[msgIdx] || {
+                                    modules: [],
+                                    isActive: !!res.isRunning,
+                                    route: 'Investment Analyst',
+                                }),
+                                toolTrace: trace,
+                                planningMessage: planning,
+                                isActive: !!res.isRunning,
+                            },
+                        }));
+                        if (res.report) {
+                            setMessages(prev => {
+                                const c = [...prev];
+                                if (c[msgIdx]) {
+                                    c[msgIdx] = {
+                                        ...c[msgIdx],
+                                        content: res.report,
+                                        isStreaming: false,
+                                        timestamp: new Date().toLocaleTimeString(),
+                                    };
+                                }
+                                return c;
+                            });
+                            if (!res.isRunning) setIsStreaming(false);
+                        }
+                        return;
+                    }
+
+                    if (res?.ok && res.report && !res.isRunning) {
+                        const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        setMessages(prev => {
+                            const c = [...prev];
+                            if (c[msgIdx]) {
+                                c[msgIdx] = {
+                                    ...c[msgIdx],
+                                    content: res.report!,
+                                    isStreaming: false,
+                                    timestamp: new Date().toLocaleTimeString(),
+                                };
+                            }
+                            return c;
+                        });
+                        setIsStreaming(false);
+                        setThinkingProcesses(prev => ({
+                            ...prev,
+                            [msgIdx]: { ...(prev[msgIdx] || { modules: [], isActive: false }), isActive: false },
+                        }));
+                        return;
+                    }
+
+                    if (res?.ok && res.isRunning) {
+                        saLog('replay: server session still running, wait for push');
+                        return;
+                    }
+
+                    /** Server has no memory buffer (common during restart or never successfully started) and local still has SA_PENDING: resend agent:chat */
+                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; assistantMsgIdx?: number } | null = null;
+                    try {
+                        const raw = sessionStorage.getItem(SA_PENDING_KEY);
+                        pending = raw ? (JSON.parse(raw) as typeof pending) : null;
+                    } catch {
+                        pending = null;
+                    }
+                    const canResend =
+                        pending?.streaming &&
+                        pending.sessionId === sessionId &&
+                        typeof pending.userContent === 'string' &&
+                        pending.userContent.length > 0 &&
+                        !replayRecoverAttemptedRef.current;
+
+                    if (canResend) {
+                        replayRecoverAttemptedRef.current = true;
+                        const msgIdx = typeof pending!.assistantMsgIdx === 'number' ? pending!.assistantMsgIdx! : 1;
+                        activeMsgIdxRef.current = msgIdx;
+                        saLog('replay empty → fallback emit agent:chat (local pending)', { sessionId, msgIdx });
+                        setThinkingProcesses(prev => ({
+                            ...prev,
+                            [msgIdx]: { modules: [], isActive: true, route: 'Routing...' },
+                        }));
+                        setIsStreaming(true);
+                        socket.emit('agent:chat', {
+                            content: pending!.userContent!,
+                            mode: chatMode,
+                            sessionId,
+                            agentId: chatSelectedAgent,
+                        });
+                        return;
+                    }
+
+                    saLog('replay empty and no resendable pending — stop spinner');
+                    try {
+                        sessionStorage.removeItem(SA_PENDING_KEY);
+                    } catch {
+                        /* ignore */
+                    }
+                    setIsStreaming(false);
+                    setThinkingProcesses(prev => {
+                        const idx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        if (!prev[idx]) return prev;
+                        return {
+                            ...prev,
+                            [idx]: { ...prev[idx], isActive: false, route: prev[idx].route || '—' },
+                        };
+                    });
+                    setMessages(prev => {
+                        const idx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
+                        if (!prev[idx] || prev[idx].role !== 'assistant') return prev;
+                        const cur = prev[idx].content || '';
+                        if (cur.trim().length > 0) return prev;
+                        const next = [...prev];
+                        next[idx] = {
+                            ...next[idx],
+                            content:
+                                '**Cannot restore conversation** (server has no buffer for this session). Please resend the question.',
+                            isStreaming: false,
+                            timestamp: new Date().toLocaleTimeString(),
+                        };
+                        return next;
+                    });
                 },
-            },
-        }));
-    }, [agentCount]);
+            );
+        };
+        const onConnectReplay = () => {
+            saLog('connect → replay');
+            replay();
+        };
+        if (socket.connected) {
+            saLog('replay on mount (already connected)');
+            replay();
+        }
+        socket.on('connect', onConnectReplay);
+        return () => {
+            socket.off('connect', onConnectReplay);
+        };
+    }, [sessionId, chatMode, chatSelectedAgent]);
 
-    // ─── Send to AI (streaming) ─────────────────────────────
-    const sendToAI = useCallback(async (text: string, existingMessages?: Message[]) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[]) => {
+        saLog('sendToAI()', {
+            textPreview: text.slice(0, 100),
+            mode: chatMode,
+            sessionId,
+            agentId: chatSelectedAgent,
+            ...socket.getDebugState(),
+        });
+
         setIsStreaming(true);
 
-        // Compute correct index from actual current messages
         const currentMessages = existingMessages ?? [];
-        const msgIdx = currentMessages.length; // index where assistant msg will be
+        const msgIdx = currentMessages.length;
+        activeMsgIdxRef.current = msgIdx;
 
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
         
-        // Open graph automatically out of the box
         setActiveGraphMsgIdx(msgIdx);
-        setShowGraphPanel(true);
+        setShowThinkingPanel(true);
+        setShowGraphPanel(false);
 
-        // Run thinking simulation
-        await simulateThinking(msgIdx);
+        setThinkingProcesses(prev => ({
+            ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
+        }));
 
         try {
-            const abortController = new AbortController();
-            abortControllerRef.current = abortController;
-
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            const token = sessionStorage.getItem('loka_token');
-            if (token) headers['Authorization'] = `Bearer ${token}`;
-
-            const response = await fetch(`${API_BASE}/chat/stream`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({ content: text, sessionId }),
-                signal: abortController.signal,
-            });
-
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-            const reader = response.body!.getReader();
-            const decoder = new TextDecoder();
-            let fullContent = '';
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-                const lines = chunk.split('\n');
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6).trim();
-                        if (data === '[DONE]') continue;
-                        try {
-                            const parsed = JSON.parse(data);
-                            if (parsed.content) {
-                                fullContent += parsed.content;
-                                setMessages(prev => {
-                                    const updated = [...prev];
-                                    updated[msgIdx] = { ...updated[msgIdx], content: fullContent };
-                                    return updated;
-                                });
-                            }
-                        } catch { /* skip malformed */ }
-                    }
-                }
-            }
-
-            setMessages(prev => {
-                const updated = [...prev];
-                updated[msgIdx] = { ...updated[msgIdx], isStreaming: false, timestamp: new Date().toLocaleTimeString() };
-                return updated;
-            });
-        } catch (err: any) {
-            if (err.name === 'AbortError') return;
-            // Fallback: show error
-            setMessages(prev => {
-                const updated = [...prev];
-                updated[msgIdx] = { ...updated[msgIdx], content: 'Sorry, I encountered an error. Please try again.', isStreaming: false };
-                return updated;
-            });
-        } finally {
-            setIsStreaming(false);
-            abortControllerRef.current = null;
+            sessionStorage.setItem(
+                SA_PENDING_KEY,
+                JSON.stringify({
+                    sessionId,
+                    userContent: text,
+                    assistantMsgIdx: msgIdx,
+                    streaming: true,
+                }),
+            );
+        } catch {
+            /* ignore */
         }
-    }, [sessionId, simulateThinking]);
+
+        socket.emit('agent:chat', {
+            content: text,
+            mode: chatMode,
+            sessionId,
+            agentId: chatSelectedAgent
+        });
+        saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
+
+    }, [chatMode, sessionId, chatSelectedAgent]);
+
+    // ─── Fetch History ──────────────────────────
+    useEffect(() => {
+        if (initialSessionId) {
+            api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
+                if (history && history.length > 0) {
+                    setMessages(
+                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => ({
+                            role: m.role as 'user' | 'assistant',
+                            content: m.content || '',
+                            timestamp: new Date(m.createdAt).toLocaleTimeString(),
+                            isStreaming: false,
+                            metadata: m.metadata ?? null,
+                        })),
+                    );
+                    const restoredThinking: Record<number, ThinkingFlow> = {};
+                    history.forEach(
+                        (m: { role: string; metadata?: string | null }, idx: number) => {
+                            if (m.role !== 'assistant' || !m.metadata) return;
+                            try {
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow };
+                                if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
+                                    restoredThinking[idx] = {
+                                        ...meta.thinkingFlow,
+                                        isActive: false,
+                                    };
+                                }
+                            } catch {
+                                /* ignore */
+                            }
+                        },
+                    );
+                    setThinkingProcesses(restoredThinking);
+                    activeMsgIdxRef.current = history.length - 1;
+                }
+            }).catch(console.error);
+        }
+    }, [initialSessionId]);
+
+    // ─── Push URL / Sync Session ID ────────────────────────
+    useEffect(() => {
+        if (!initialSessionId && !window.location.search.includes('session=')) {
+            window.history.replaceState(null, '', `/?session=${sessionId}`);
+        }
+    }, [sessionId, initialSessionId]);
 
     // ─── Auto-send initial message ──────────────────────────
     useEffect(() => {
         if (hasSentInitial.current) return;
+        if (initialSessionId) {
+            hasSentInitial.current = true;
+            saLog('initial: skipped auto-send because initialSessionId is provided (history load)');
+            return;
+        }
+        if (restoredFromPendingRef.current) {
+            saLog('initial: restored from SA_PENDING — skip emit agent:chat (wait replay/socket)');
+            hasSentInitial.current = true;
+            activeMsgIdxRef.current = 1;
+            setActiveGraphMsgIdx(1);
+            setShowThinkingPanel(true);
+            setThinkingProcesses(prev => ({
+                ...prev,
+                1: { ...prev[1], modules: prev[1]?.modules ?? [], isActive: true, route: 'Investment Analyst' },
+            }));
+            return;
+        }
+        if (!initialMessage.trim()) return;
         hasSentInitial.current = true;
+        
+        // Broadcast new session for sidebar
+        window.dispatchEvent(new CustomEvent('session-started', {
+            detail: { id: sessionId, title: initialMessage, agentId: chatSelectedAgent || 'auto' }
+        }));
+
         const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
-        // Pass the current messages array directly to avoid stale closure
+        saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
         setTimeout(() => sendToAI(initialMessage, initialMessages), 50);
-    }, [initialMessage, sendToAI]);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSend = () => {
         if (!inputText.trim() || isStreaming) return;
         const text = inputText.trim();
+        saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
         const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
@@ -922,32 +1538,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Header: chat title + graph toggle ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <div className="flex items-center gap-2">
-                    {currentKgData && (
-                        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setShowGraphPanel(g => !g)}>
-                            <svg className={`w-3.5 h-3.5 transition-colors ${showGraphPanel ? 'text-blue-500' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <circle cx="6" cy="6" r="3" strokeWidth="2"/>
-                                <circle cx="18" cy="6" r="3" strokeWidth="2"/>
-                                <circle cx="12" cy="18" r="3" strokeWidth="2"/>
-                                <line x1="8.83" y1="7.83" x2="15.17" y2="7.83" strokeWidth="1.5"/>
-                                <line x1="6.93" y1="8.5" x2="11.07" y2="15.5" strokeWidth="1.5"/>
-                                <line x1="17.07" y1="8.5" x2="12.93" y2="15.5" strokeWidth="1.5"/>
-                            </svg>
-                            <span className="text-[11px] font-medium text-gray-500">Multi-Agent Graph</span>
-                            <button
-                                type="button"
-                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
-                                    showGraphPanel ? 'bg-blue-500' : 'bg-gray-200'
-                                }`}
-                                aria-pressed={showGraphPanel}
-                            >
-                                <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform ${
-                                    showGraphPanel ? 'translate-x-[14px]' : 'translate-x-[2px]'
-                                }`} />
-                            </button>
-                        </div>
-                    )}
-                </div>
+                <button
+                    onClick={() => setShowGraphPanel(p => !p)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                        showGraphPanel ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
+                    }`}
+                >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="5" r="2.5" /><circle cx="19" cy="19" r="2.5" />
+                        <path d="M7.5 11L16.5 6M7.5 13L16.5 18" />
+                    </svg>
+                    Multi-Agent Graph
+                </button>
             </div>
 
             {/* ══ Content Row ══ */}
@@ -970,18 +1572,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
                                             <div className="flex-1 min-w-0">
                                                 {thinkingProcesses[i] && (
-                                                    <ThinkingProcessPanel
+                                                    <ThinkingInlineTrigger
                                                         thinking={thinkingProcesses[i]}
-                                                        userQuery={messages.slice(0, i).reverse().find(m => m.role === 'user')?.content ?? ''}
-                                                        onOpenGraph={() => {
+                                                        onOpen={() => {
                                                             setActiveGraphMsgIdx(i);
-                                                            setShowGraphPanel(true);
+                                                            setShowThinkingPanel(true);
+                                                            setShowGraphPanel(false);
                                                         }}
                                                     />
                                                 )}
                                                 {msg.content ? (
-                                                    <div className="text-[13px] text-gray-700 leading-relaxed space-y-1">
-                                                        {renderMarkdown(msg.content)}
+                                                    <div className="markdown-content text-[13px] text-gray-700 leading-relaxed space-y-1 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
+                                                        {renderMarkdownContent(
+                                                            msg.role === 'assistant'
+                                                                ? stripInternalResearchCitations(msg.content)
+                                                                : msg.content,
+                                                        )}
                                                     </div>
                                                 ) : msg.isStreaming ? (
                                                     <div className="flex items-center gap-1 py-1">
@@ -1141,54 +1747,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                 </div>
                                             )}
                                         </div>
-                                        {/* Agent selector */}
-                                        <div className="relative" ref={agentPickerRef}>
-                                            {chatSelectedAgent ? (() => {
-                                                const ag = QUICK_ACTIONS.find(a => a.id === chatSelectedAgent);
-                                                if (!ag) return null;
-                                                const AgIc = ag.icon;
-                                                return (
-                                                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-600 text-[12px] font-medium">
-                                                        <AgIc />
-                                                        <span>{ag.label}</span>
-                                                        <button
-                                                            onClick={() => setChatSelectedAgent(null)}
-                                                            className="ml-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center hover:bg-blue-100 transition-colors"
-                                                        >
-                                                            <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                                                        </button>
-                                                    </div>
-                                                );
-                                            })() : (
-                                                <button
-                                                    onClick={() => setAgentPickerOpen(v => !v)}
-                                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-all"
-                                                >
-                                                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4" /><path d="M6 20v-2a4 4 0 014-4h4a4 4 0 014 4v2" /></svg>
-                                                    Agent
-                                                    <ChatChevron />
-                                                </button>
-                                            )}
-                                            {agentPickerOpen && !chatSelectedAgent && (
-                                                <div className="absolute bottom-full left-0 mb-1.5 w-52 bg-white border border-gray-100 rounded-xl shadow-lg overflow-hidden z-30" style={{ animation: 'menu-pop 0.15s ease-out' }}>
-                                                    {QUICK_ACTIONS.map(ag => {
-                                                        const AgIc = ag.icon;
-                                                        return (
-                                                            <button
-                                                                key={ag.id}
-                                                                onClick={() => { setChatSelectedAgent(ag.id); setAgentPickerOpen(false); }}
-                                                                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-gray-50 transition-colors"
-                                                            >
-                                                                <div className="w-6 h-6 rounded-md bg-gray-100 flex items-center justify-center text-gray-500 shrink-0">
-                                                                    <AgIc />
-                                                                </div>
-                                                                <span className="text-[12px] font-medium text-gray-700">{ag.label}</span>
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-                                        </div>
+
                                     </div>
                                     {/* Right: action buttons */}
                                     <div className="flex items-center gap-1">
@@ -1228,10 +1787,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
                 </div>
 
+                {/* Thinking Process Side Panel */}
+                {showThinkingPanel && currentThinking && (
+                    <div className="w-[360px] shrink-0 border-l border-gray-100 overflow-hidden">
+                        <ThinkingProcessSidePanel
+                            thinking={currentThinking}
+                            onClose={() => setShowThinkingPanel(false)}
+                        />
+                    </div>
+                )}
+
                 {/* Knowledge Graph Card */}
-                {showGraphPanel && currentKgData && (
+                {showGraphPanel && !showThinkingPanel && currentKgData && (
                     <div className="w-[400px] shrink-0 border-l border-gray-100 overflow-hidden relative">
-                        {/* Close button */}
                         <button
                             onClick={() => setShowGraphPanel(false)}
                             className="absolute top-2 right-2 z-20 w-7 h-7 rounded-lg bg-white/80 backdrop-blur border border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all shadow-sm"
