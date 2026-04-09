@@ -7,7 +7,7 @@ import { socket } from '../services/socket';
 import { api } from '../services/api';
 import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
-
+import { IFlytekStreamer } from '../services/iflytek';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -1279,28 +1279,62 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         e.target.value = '';
     };
 
-    const MOCK_TRANSCRIPTIONS = [
-        'What is the current risk profile of NVIDIA for Q2 2026?',
-        'Compare Bitcoin and Ethereum momentum over the past 30 days',
-        'Which AI infrastructure companies have the strongest moat?',
-        'Show me the latest market sentiment analysis on Tesla',
-        'Build me a diversified portfolio for a 3-year horizon',
-    ];
+    const iflytekRef = useRef<IFlytekStreamer | null>(null);
+
+    useEffect(() => {
+        return () => {
+            if (iflytekRef.current) {
+                iflytekRef.current.stop();
+            }
+        };
+    }, []);
 
     const stopRecording = () => {
-        if (voiceTimerRef.current) clearTimeout(voiceTimerRef.current);
+        if (iflytekRef.current) {
+            iflytekRef.current.stop();
+            iflytekRef.current = null;
+        }
         setVoiceState('transcribing');
-        voiceTimerRef.current = setTimeout(() => {
-            const t = MOCK_TRANSCRIPTIONS[Math.floor(Math.random() * MOCK_TRANSCRIPTIONS.length)];
-            setInputText(t);
-            setVoiceState('idle');
-        }, 1800);
+        setTimeout(() => {
+            setVoiceState(prev => prev === 'transcribing' ? 'idle' : prev);
+        }, 1000);
     };
 
-    const handleVoiceClick = () => {
+    const handleVoiceClick = async () => {
         if (voiceState === 'idle') {
             setVoiceState('recording');
-            voiceTimerRef.current = setTimeout(stopRecording, 8000);
+
+            const streamer = new IFlytekStreamer();
+            iflytekRef.current = streamer;
+
+            streamer.onResult((res) => {
+                if (res.text) {
+                    setInputText(res.text);
+                }
+                if (res.isFinal) {
+                    setVoiceState('idle');
+                    iflytekRef.current = null;
+                }
+            });
+
+            streamer.onError((err) => {
+                console.error("iFlytek error:", err);
+                setVoiceState('idle');
+                iflytekRef.current = null;
+            });
+
+            streamer.onStop(() => {
+                setVoiceState('idle');
+                iflytekRef.current = null;
+            });
+
+            try {
+                await streamer.start();
+            } catch (err) {
+                console.error("Failed to start iFlytek", err);
+                setVoiceState('idle');
+                iflytekRef.current = null;
+            }
         } else if (voiceState === 'recording') {
             stopRecording();
         }
