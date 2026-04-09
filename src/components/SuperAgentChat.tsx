@@ -3,7 +3,6 @@
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
 import { renderMarkdownContent } from '../utils/markdown';
@@ -177,209 +176,321 @@ function extractPlanningMessage(steps: unknown[]): string | undefined {
 }
 
 
-// ─── Knowledge Graph Types ──────────────────────────────────
-interface KGNode {
-    id: string;
-    type: 'agent' | 'task' | 'stance';
-    label: string;
-    x: number;
-    y: number;
-    data?: Record<string, string>;
+// ─── Roundtable Consensus Types ──────────────────────────────────
+interface RoundtableAgentVote {
+    name: string;
+    initials: string;
+    vote: 'agree' | 'disagree';
+    reasoning: string;
+    confidence: number;
 }
 
-interface KGEdge {
-    id: string;
-    source: string;
-    target: string;
-    label: string;
+interface ConsensusRound {
+    round: number;
+    agents: RoundtableAgentVote[];
+    result: 'consensus' | 'disagreement';
+    summary: string;
 }
 
-interface KnowledgeGraphData {
-    nodes: KGNode[];
-    edges: KGEdge[];
+interface RoundtableData {
+    rounds: ConsensusRound[];
+    finalVerdict: { summary: string; confidence: number };
 }
 
-const STATIC_KG_DATA: KnowledgeGraphData = {
-    nodes: [
-        { id: 'agent_0', type: 'agent', label: 'agent_0', x: 0, y: 0 },
-        { id: 'agent_1', type: 'agent', label: 'agent_1', x: 0, y: 0 },
-        { id: 'agent_2', type: 'agent', label: 'agent_2', x: 0, y: 0 },
-        { id: 'agent_3', type: 'agent', label: 'agent_3', x: 0, y: 0 },
-        { id: 'round_1', type: 'task', label: 'Round 1', x: 0, y: 0 },
-        { id: 'round_2', type: 'task', label: 'Round 2', x: 0, y: 0 },
-        { id: 'round_3', type: 'task', label: 'Round 3', x: 0, y: 0 },
-        { id: 'round_4', type: 'task', label: 'Round 4', x: 0, y: 0 },
-        { id: 'node_A', type: 'stance', label: 'A', x: 0, y: 0 },
-        { id: 'node_B', type: 'stance', label: 'B', x: 0, y: 0 },
-    ],
-    edges: [
-        { id: 'e1', source: 'agent_1', target: 'round_2', label: 'participates_in' },
-        { id: 'e2', source: 'agent_1', target: 'round_3', label: 'participates_in' },
-        { id: 'e3', source: 'agent_1', target: 'round_4', label: 'participates_in' },
-        { id: 'e4', source: 'agent_1', target: 'node_B', label: 'supports' },
-
-        { id: 'e5', source: 'agent_3', target: 'round_2', label: 'participates_in' },
-        { id: 'e6', source: 'agent_3', target: 'round_3', label: 'participates_in' },
-        { id: 'e7', source: 'agent_3', target: 'round_4', label: 'participates_in' },
-        { id: 'e8', source: 'agent_3', target: 'node_B', label: 'supports' },
-
-        { id: 'e9', source: 'agent_2', target: 'round_1', label: 'participates_in' },
-        { id: 'e10', source: 'agent_2', target: 'round_2', label: 'participates_in' },
-        { id: 'e11', source: 'agent_2', target: 'round_3', label: 'participates_in' },
-        { id: 'e12', source: 'agent_2', target: 'round_4', label: 'participates_in' },
-        { id: 'e13', source: 'agent_2', target: 'node_A', label: 'supports' },
-        { id: 'e14', source: 'agent_2', target: 'node_B', label: 'supports' },
-
-        { id: 'e15', source: 'agent_0', target: 'round_1', label: 'participates_in' },
-        { id: 'e16', source: 'agent_0', target: 'round_2', label: 'participates_in' },
-        { id: 'e17', source: 'agent_0', target: 'round_3', label: 'participates_in' },
-        { id: 'e18', source: 'agent_0', target: 'round_4', label: 'participates_in' },
-        { id: 'e19', source: 'agent_0', target: 'node_B', label: 'supports' },
-    ]
+const AGENT_COLORS: Record<string, string> = {
+    TA: '#475569', MA: '#475569', NA: '#475569', TR: '#475569',
 };
 
-// Build a knowledge graph from thinking process data (static mock, per user request)
-const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
+// Unified robot icon for all agent avatars
+const ROBOT_ICON = <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    {/* antenna */}<line x1="12" y1="2" x2="12" y2="6" /><circle cx="12" cy="2" r="1" fill="currentColor" />
+    {/* head */}<rect x="4" y="6" width="16" height="12" rx="3" />
+    {/* eyes */}<circle cx="9" cy="12" r="1.5" fill="currentColor" /><circle cx="15" cy="12" r="1.5" fill="currentColor" />
+    {/* mouth */}<line x1="9" y1="16" x2="15" y2="16" />
+    {/* ears */}<line x1="2" y1="10" x2="4" y2="10" /><line x1="20" y1="10" x2="22" y2="10" />
+</svg>;
 
+const AGENT_ICON = (_initials: string) => ROBOT_ICON;
 
+const STATIC_ROUNDTABLE_DATA: RoundtableData = {
+    rounds: [
+        {
+            round: 1,
+            agents: [
+                { name: 'Technical Analyst', initials: 'TA', vote: 'agree', reasoning: 'RSI at 62, MACD bullish crossover confirmed. Volume profile supports breakout above key resistance at $920.', confidence: 72 },
+                { name: 'Market Analyst', initials: 'MA', vote: 'agree', reasoning: 'Sector rotation favoring AI/semiconductor. Institutional inflows accelerating, fund positioning at 3-year highs.', confidence: 78 },
+                { name: 'News Analyst', initials: 'NA', vote: 'disagree', reasoning: 'Upcoming antitrust hearing creates headline risk. Export control rumors to China could impact 15% of revenue.', confidence: 60 },
+                { name: 'Trading Researcher', initials: 'TR', vote: 'agree', reasoning: 'Options flow heavily skewed to calls. Dark pool prints above VWAP suggest accumulation. Risk/reward favorable at current levels.', confidence: 75 },
+            ],
+            result: 'disagreement',
+            summary: '3 Agree / 1 Disagree — News Analyst flags regulatory headline risk. No consensus yet.',
+        },
+        {
+            round: 2,
+            agents: [
+                { name: 'Technical Analyst', initials: 'TA', vote: 'agree', reasoning: 'Adding: Fibonacci extension targets $1,050. Stop-loss at $870 gives 2.8:1 reward-to-risk ratio.', confidence: 76 },
+                { name: 'Market Analyst', initials: 'MA', vote: 'agree', reasoning: 'Even accounting for regulatory overhang, forward P/E discount vs peers suggests 20%+ upside.', confidence: 80 },
+                { name: 'News Analyst', initials: 'NA', vote: 'agree', reasoning: 'Revised: historical precedent shows antitrust hearings rarely lead to material action. Risk is priced in at current implied vol.', confidence: 65 },
+                { name: 'Trading Researcher', initials: 'TR', vote: 'agree', reasoning: 'Confirmed: whale accumulation pattern intact. Suggested entry via scaled limit orders across $900-$920 zone.', confidence: 82 },
+            ],
+            result: 'consensus',
+            summary: '4/4 Agree — News Analyst revised stance after reviewing regulatory precedent. Consensus reached.',
+        },
+    ],
+    finalVerdict: {
+        confidence: 76,
+        summary: 'Strong Buy with scaled entry at $900-$920. Target $1,050 (12-month). Key risk: export control policy changes.',
+    },
+};
 
-// ─── KnowledgeGraphView Component ──────────────────────────
-const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) => {
-    const svgRef = useRef<SVGSVGElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
+const buildRoundtableData = (): RoundtableData => STATIC_ROUNDTABLE_DATA;
+
+// ─── RoundtableView Component ──────────────────────────
+const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
+    const [expandedRound, setExpandedRound] = useState<number | null>(data.rounds.length > 0 ? data.rounds[data.rounds.length - 1].round : null);
+    const agents = data.rounds[0]?.agents ?? [];
+    const totalRounds = data.rounds.length;
+
+    type PlayPhase = 'discussing' | 'voted' | 'consensus';
+    const [playPhase, setPlayPhase] = useState<PlayPhase>('discussing');
+    const [playRoundIdx, setPlayRoundIdx] = useState(0);
+    const [visibleVotes, setVisibleVotes] = useState(0);
 
     useEffect(() => {
-        if (!svgRef.current || !data.nodes.length) return;
+        const timers: ReturnType<typeof setTimeout>[] = [];
+        let t = 0;
+        for (let r = 0; r < totalRounds; r++) {
+            const rr = r;
+            timers.push(setTimeout(() => { setPlayRoundIdx(rr); setPlayPhase('discussing'); setVisibleVotes(0); }, t));
+            t += 2800;
+            timers.push(setTimeout(() => { setPlayPhase('voted'); setVisibleVotes(0); }, t));
+            const numAgents = data.rounds[r]?.agents.length ?? 4;
+            for (let a = 0; a < numAgents; a++) {
+                const aa = a;
+                timers.push(setTimeout(() => { setVisibleVotes(aa + 1); }, t + (aa + 1) * 300));
+            }
+            t += 300 * numAgents + 800;
+        }
+        timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(agents.length); }, t));
+        return () => timers.forEach(clearTimeout);
+    }, [totalRounds]);
 
-        const svg = d3.select(svgRef.current);
-        const width = containerRef.current?.clientWidth || 400;
-        const height = containerRef.current?.clientHeight || 600;
+    const isSpinning = playPhase === 'discussing';
+    const isConsensusReached = playPhase === 'consensus';
+    const currentRound = data.rounds[playRoundIdx];
 
-        svg.selectAll('*').remove();
-
-        const zoom = d3.zoom<SVGSVGElement, unknown>()
-            .scaleExtent([0.1, 4])
-            .on('zoom', (e) => {
-                g.attr('transform', e.transform);
-            });
-        
-        svg.call(zoom as any); // Cast to any to satisfy d3.zoom type
-
-        const g = svg.append('g');
-
-        // Dark theme arrow marker
-        svg.append('defs').append('marker')
-            .attr('id', 'arrow')
-            .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 22)
-            .attr('refY', 0)
-            .attr('markerWidth', 5)
-            .attr('markerHeight', 5)
-            .attr('orient', 'auto')
-            .append('path')
-            .attr('fill', '#9ca3af')
-            .attr('d', 'M0,-4L8,0L0,4');
-
-        // Clone data for d3 mutation
-        const nodes = data.nodes.map(d => ({ ...d }));
-        const edges = data.edges.map(d => ({ ...d }));
-
-        const simulation = d3.forceSimulation(nodes as any)
-            .force('link', d3.forceLink(edges).id((d: any) => d.id).distance(110))
-            .force('charge', d3.forceManyBody().strength(-400))
-            .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collide', d3.forceCollide().radius(40));
-
-        const link = g.append('g')
-            .attr('stroke', '#9ca3af')
-            .attr('stroke-opacity', 0.8)
-            .selectAll('line')
-            .data(edges)
-            .join('line')
-            .attr('stroke-width', 1.5)
-            .attr('marker-end', 'url(#arrow)');
-
-        const linkLabel = g.append('g')
-            .selectAll('text')
-            .data(edges)
-            .join('text')
-            .text((d: any) => d.label)
-            .attr('font-size', '8px')
-            .attr('fill', '#9ca3af')
-            .attr('text-anchor', 'middle');
-
-        const drag = d3.drag<SVGGElement, any>()
-            .on('start', (event, d) => {
-                if (!event.active) simulation.alphaTarget(0.3).restart();
-                d.fx = d.x;
-                d.fy = d.y;
-            })
-            .on('drag', (event, d) => {
-                d.fx = event.x;
-                d.fy = event.y;
-            })
-            .on('end', (event, d) => {
-                if (!event.active) simulation.alphaTarget(0);
-                d.fx = null;
-                d.fy = null;
-            });
-
-        const node = g.append('g')
-            .selectAll('g')
-            .data(nodes)
-            .join('g')
-            .call(drag as any) // Cast to any to satisfy d3.drag type
-            .style('cursor', 'grab');
-
-        node.append('circle')
-            .attr('r', (d: any) => d.type === 'agent' ? 18 : 14)
-            .attr('fill', (d: any) => d.type === 'agent' ? '#f3f4f6' : d.type === 'stance' ? '#f5f3ff' : '#eff6ff')
-            .attr('stroke', (d: any) => d.type === 'agent' ? '#6b7280' : d.type === 'stance' ? '#7c3aed' : '#3b82f6')
-            .attr('stroke-width', 1.5);
-
-        node.append('text')
-            .text((d: any) => {
-                const parts = d.label.split(' ');
-                return d.type === 'agent' ? parts[0] : (d.label.length > 15 ? d.label.slice(0, 13) + '…' : d.label);
-            })
-            .attr('y', 28)
-            .attr('font-size', '9px')
-            .attr('fill', (d: any) => d.type === 'agent' ? '#374151' : d.type === 'stance' ? '#5b21b6' : '#1d4ed8')
-            .attr('text-anchor', 'middle')
-            .attr('font-weight', '500');
-
-        simulation.on('tick', () => {
-            link
-                .attr('x1', (d: any) => d.source.x)
-                .attr('y1', (d: any) => d.source.y)
-                .attr('x2', (d: any) => d.target.x)
-                .attr('y2', (d: any) => d.target.y);
-
-            linkLabel
-                .attr('x', (d: any) => (d.source.x + d.target.x) / 2)
-                .attr('y', (d: any) => (d.source.y + d.target.y) / 2 - 4);
-
-            node
-                .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
-        });
-
-        return () => {
-            simulation.stop();
-        };
-    }, [data.nodes, data.edges]);
+    const SIZE = 220;
+    const CTR = SIZE / 2;
+    const R = 72;
+    const agentPositions = agents.map((_, i) => {
+        const a = (i / agents.length) * 2 * Math.PI - Math.PI / 2;
+        return { x: CTR + R * Math.cos(a), y: CTR + R * Math.sin(a) };
+    });
+    const AVATAR = 38;
+    const HALF = AVATAR / 2;
 
     return (
-        <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white" style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
-            <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
-            
-            {/* Legend overlay */}
-            <div className="absolute bottom-4 left-4 flex gap-4 z-10">
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f3f4f6] border border-[#6b7280]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Agent</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#eff6ff] border border-[#3b82f6]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Task</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f5f3ff] border border-[#7c3aed]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Stance</span></div>
+        <div className="flex flex-col h-full bg-white">
+            <div className="px-5 py-4 border-b border-gray-100">
+                <h2 className="text-[14px] font-bold text-gray-900">Roundtable Consensus</h2>
+                <p className="text-[11px] text-gray-400 mt-0.5">{data.rounds.length} round{data.rounds.length > 1 ? 's' : ''} of discussion</p>
             </div>
-            <div className="absolute top-4 right-4 text-[10px] text-gray-500 font-mono text-right pointer-events-none">
-                scroll to zoom<br/>drag to pan
+
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+                {/* Animated Roundtable Graphic */}
+                <div className="relative flex flex-col items-center pb-4 border-b border-gray-100">
+                    <style>{`
+                        @keyframes rt-ring-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                        @keyframes rt-orbit { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                        @keyframes rt-counter-orbit { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+                        @keyframes rt-pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+                        @keyframes rt-float-up { 0% { opacity: 1; transform: translateY(0) scale(1); } 60% { opacity: 1; transform: translateY(-16px) scale(1.15); } 100% { opacity: 0; transform: translateY(-24px) scale(0.8); } }
+                        .rt-ring-spin { animation: rt-ring-spin 5s linear infinite; }
+                        .rt-ring-spin.stopped { animation-play-state: paused; }
+                        .rt-orbit { animation: rt-orbit 12s linear infinite; }
+                        .rt-orbit.stopped { animation: none; }
+                        .rt-counter-orbit { animation: rt-counter-orbit 12s linear infinite; }
+                        .rt-counter-orbit.stopped { animation: none; }
+                        .rt-pulse-dot { animation: rt-pulse 1s ease-in-out infinite; }
+                        .rt-float-vote { animation: rt-float-up 1.2s ease-out both; }
+                    `}</style>
+
+                    <div className="relative" style={{ width: SIZE, height: SIZE + 24 }}>
+                        <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: SIZE, height: SIZE }} viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
+                            <circle cx={CTR} cy={CTR} r={R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
+                            <circle cx={CTR} cy={CTR} r={R} fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4 4" />
+                            {agentPositions.map((p, i) => (
+                                <line key={i} x1={CTR} y1={CTR} x2={p.x} y2={p.y}
+                                    stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
+                            ))}
+                        </svg>
+
+                        <div className={`absolute rt-ring-spin ${!isSpinning ? 'stopped' : ''}`}
+                            style={{ left: 0, top: 0, width: SIZE, height: SIZE, pointerEvents: 'none' }}>
+                            <svg style={{ width: SIZE, height: SIZE }} viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
+                                <circle cx={CTR} cy={CTR} r={R + 12} fill="none"
+                                    stroke="url(#rtArcGrad)" strokeWidth="2.5"
+                                    strokeDasharray={`${Math.PI * (R + 12) * 0.35} ${Math.PI * (R + 12) * 1.65}`}
+                                    strokeLinecap="round" opacity={isSpinning ? 1 : 0}
+                                    style={{ transition: 'opacity 0.3s' }}
+                                />
+                                <defs>
+                                    <linearGradient id="rtArcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.7" />
+                                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0" />
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                        </div>
+
+                        <div className="absolute flex items-center justify-center"
+                            style={{ left: CTR - 26, top: CTR - 26, width: 52, height: 52 }}>
+                            <div className={`w-[52px] h-[52px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${
+                                isSpinning
+                                    ? 'bg-blue-50/80 border-2 border-blue-200'
+                                    : 'bg-gray-50 border-2 border-gray-200'
+                            }`}>
+                                {isSpinning ? (
+                                    <>
+                                        <div className="flex gap-[3px] mb-1">
+                                            {[0, 1, 2].map(i => (
+                                                <div key={i} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${i * 0.2}s` }} />
+                                            ))}
+                                        </div>
+                                        <span className="text-[9px] text-blue-500 font-bold">R{playRoundIdx + 1}</span>
+                                    </>
+                                ) : (
+                                    <span className="text-[11px] text-gray-500 font-bold">R{playRoundIdx + 1}</span>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className={`absolute rt-orbit ${!isSpinning ? 'stopped' : ''}`}
+                            style={{ left: 0, top: 0, width: SIZE, height: SIZE + 24, transformOrigin: `${CTR}px ${CTR}px` }}>
+                        {agents.map((agent, i) => {
+                            const pos = agentPositions[i];
+                            const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                            const roundAgent = currentRound?.agents.find(a => a.initials === agent.initials);
+                            const vote = roundAgent?.vote;
+                            const showVote = vote && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
+                            const ringCls = isSpinning ? 'ring-2 ring-blue-200/60 ring-offset-1' : '';
+                            return (
+                                <div key={agent.initials} className={`absolute flex flex-col items-center rt-counter-orbit ${!isSpinning ? 'stopped' : ''}`}
+                                    style={{ left: pos.x - HALF, top: pos.y - HALF, width: AVATAR, transformOrigin: `${HALF}px ${HALF}px` }}>
+                                    <div className="relative flex justify-center">
+                                        <div className={`rounded-full flex items-center justify-center text-white shadow-sm transition-all duration-300 ${ringCls}`}
+                                            style={{ backgroundColor: color, width: AVATAR, height: AVATAR }}>
+                                            {AGENT_ICON(agent.initials)}
+                                        </div>
+                                        {showVote && (
+                                            <div key={`${playRoundIdx}-${agent.initials}`}
+                                                className="absolute -top-2 left-1/2 -translate-x-1/2 rt-float-vote pointer-events-none">
+                                                <span className="text-[16px]">{vote === 'agree' ? '👍' : '👎'}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                        {agent.name}
+                                    </span>
+                                </div>
+                            );
+                        })}
+                        </div>
+                    </div>
+
+                    <div className={`text-[12px] font-semibold transition-colors duration-300 ${
+                        isConsensusReached ? 'text-emerald-600' : isSpinning ? 'text-blue-500' : 'text-gray-500'
+                    }`}>
+                        {isConsensusReached
+                            ? '✓ Consensus Reached'
+                            : isSpinning
+                                ? `Round ${playRoundIdx + 1} — Discussing...`
+                                : `Round ${playRoundIdx + 1} — Votes In`}
+                    </div>
+                </div>
+
+                {/* Rounds */}
+                {data.rounds.map((round) => {
+                    const isExpanded = expandedRound === round.round;
+                    const isConsensus = round.result === 'consensus';
+                    return (
+                        <div key={round.round} className="relative">
+                            {round.round < data.rounds.length && (
+                                <div className="absolute left-[15px] top-[36px] bottom-[-16px] w-px bg-gray-200" />
+                            )}
+                            <button
+                                onClick={() => setExpandedRound(isExpanded ? null : round.round)}
+                                className="flex items-center gap-3 w-full text-left group"
+                            >
+                                <div className={`w-[30px] h-[30px] rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold ${
+                                    isConsensus ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
+                                }`}>
+                                    R{round.round}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[13px] font-semibold text-gray-800">Round {round.round}</span>
+                                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                                            isConsensus ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
+                                        }`}>
+                                            {isConsensus ? '✓ Consensus' : '⟳ Disagreement'}
+                                        </span>
+                                    </div>
+                                    <p className="text-[11px] text-gray-400 mt-0.5 truncate">{round.summary}</p>
+                                </div>
+                                <svg className={`w-4 h-4 text-gray-300 transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                </svg>
+                            </button>
+
+                            {isExpanded && (
+                                <div className="mt-3 ml-[42px] space-y-2.5">
+                                    {round.agents.map((agent) => {
+                                        const isAgree = agent.vote === 'agree';
+                                        const agentColor = AGENT_COLORS[agent.initials] || '#6b7280';
+                                        return (
+                                            <div key={agent.initials} className={`rounded-xl border px-3.5 py-3 ${isAgree ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'}`}>
+                                                <div className="flex items-center justify-between mb-1.5">
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="w-6 h-6 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: agentColor }}>
+                                                            <span className="[&>svg]:w-3 [&>svg]:h-3">{AGENT_ICON(agent.initials)}</span>
+                                                        </div>
+                                                        <span className="text-[12px] font-semibold text-gray-800">{agent.name}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span className="text-[14px]">{isAgree ? '👍' : '👎'}</span>
+                                                        <span className={`text-[11px] font-bold ${isAgree ? 'text-emerald-600' : 'text-red-600'}`}>{isAgree ? 'Agree' : 'Disagree'}</span>
+                                                    </div>
+                                                </div>
+                                                <p className="text-[11px] text-gray-600 leading-relaxed">{agent.reasoning}</p>
+                                            </div>
+                                        );
+                                    })}
+                                    <div className="flex items-start gap-2 py-2 px-1">
+                                        <svg className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                        </svg>
+                                        <p className="text-[11px] text-gray-500 leading-relaxed">{round.summary}</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+
+                {/* Final Verdict */}
+                <div className="mt-2 pt-4 border-t border-gray-100">
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl px-4 py-4 border border-blue-100">
+                        <div className="flex items-center gap-2 mb-2">
+                            <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <span className="text-[13px] font-bold text-gray-900">Final Verdict</span>
+                            <span className="text-[12px] text-gray-500 ml-auto">Confidence: <span className="font-semibold text-gray-700">{data.finalVerdict.confidence}%</span></span>
+                        </div>
+                        <p className="text-[12px] text-gray-600 leading-relaxed">{data.finalVerdict.summary}</p>
+                    </div>
+                </div>
             </div>
         </div>
     );
@@ -1049,7 +1160,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [inputText]);
 
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
-    const currentKgData = currentThinking ? buildKnowledgeGraph() : null;
+    const currentRoundtableData = currentThinking ? buildRoundtableData() : null;
 
     // Auto-scroll
     useEffect(() => {
@@ -1849,8 +1960,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </div>
                 )}
 
-                {/* Knowledge Graph Card */}
-                {showGraphPanel && !showThinkingPanel && currentKgData && (
+                {/* Roundtable Consensus Panel */}
+                {showGraphPanel && !showThinkingPanel && currentRoundtableData && (
                     <div className="w-[400px] shrink-0 border-l border-gray-100 overflow-hidden relative">
                         <button
                             onClick={() => setShowGraphPanel(false)}
@@ -1858,7 +1969,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
-                        <KnowledgeGraphView data={currentKgData} />
+                        <RoundtableView data={currentRoundtableData} />
                     </div>
                 )}
             </div>

@@ -14,6 +14,7 @@ interface Conversation {
   time: string;
   messageCount: number;
   agentId?: string;
+  pinned?: boolean;
 }
 
 /* ── User menu popup ── */
@@ -106,6 +107,11 @@ export const Sidebar: React.FC<{
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set());
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: string, title: string } | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const [moreMenuId, setMoreMenuId] = useState<string | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleStart = (e: any) => {
@@ -171,7 +177,11 @@ export const Sidebar: React.FC<{
         });
         if (res.ok) {
           const data = await res.json();
-          setConversations(data);
+          setConversations(prev => {
+            const localIds = new Set(prev.map(c => c.id));
+            const serverNew = data.filter((c: Conversation) => !localIds.has(c.id));
+            return [...prev, ...serverNew];
+          });
         }
       } catch (err) {
         console.error('Failed to fetch conversations:', err);
@@ -205,6 +215,38 @@ export const Sidebar: React.FC<{
       console.error('Failed to delete conversation', err);
     }
   };
+
+  const startRename = (c: Conversation) => {
+    setRenamingId(c.id);
+    setRenameValue(c.title);
+    setTimeout(() => renameInputRef.current?.focus(), 50);
+  };
+
+  const confirmRename = () => {
+    if (!renamingId || !renameValue.trim()) { setRenamingId(null); return; }
+    setConversations(prev => prev.map(c => c.id === renamingId ? { ...c, title: renameValue.trim() } : c));
+    setRenamingId(null);
+  };
+
+  const togglePin = (id: string) => {
+    setConversations(prev => prev.map(c => c.id === id ? { ...c, pinned: !c.pinned } : c));
+    setMoreMenuId(null);
+  };
+
+  // Close more menu on outside click
+  useEffect(() => {
+    if (!moreMenuId) return;
+    const h = (e: MouseEvent) => { if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) setMoreMenuId(null); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [moreMenuId]);
+
+  // Sort: pinned first, then by time
+  const sortedConversations = [...conversations].sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    return 0;
+  });
 
   /* theme classes */
   const bg = isDark ? 'bg-[#1a1a1a] border-[#2a2a2a]' : 'bg-white border-gray-100';
@@ -256,22 +298,53 @@ export const Sidebar: React.FC<{
           {isLoggedIn && (
             <>
               <p className="px-2 pb-2 text-[11px] font-medium text-gray-400 select-none">Recents</p>
-              {conversations.length > 0 ? (
-                conversations.map((c) => (
+              {sortedConversations.length > 0 ? (
+                sortedConversations.map((c) => (
                   <div key={c.id} className="relative group/recent">
-                    <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (onCloseMobileDrawer) onCloseMobileDrawer(); }} title={c.title} className="w-full text-left flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-all">
-                      <span className="truncate pr-2">{c.title}</span>
-                      {activeSessions.has(c.id) && (
-                        <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                      )}
-                    </button>
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ id: c.id, title: c.title }); }}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/recent:opacity-100 hover:bg-gray-100 text-gray-400 hover:text-red-500 transition-all bg-white"
-                      title="Delete chat"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                    </button>
+                    {renamingId === c.id ? (
+                      <div className="px-2 py-1">
+                        <input
+                          ref={renameInputRef}
+                          value={renameValue}
+                          onChange={e => setRenameValue(e.target.value)}
+                          onBlur={confirmRename}
+                          onKeyDown={e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') setRenamingId(null); }}
+                          className="w-full text-[13px] text-gray-700 bg-gray-50 border border-gray-200 rounded-md px-2 py-1 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (onCloseMobileDrawer) onCloseMobileDrawer(); }} title={c.title} className="w-full text-left flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[13px] text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-all">
+                          {c.pinned && <svg className="w-3 h-3 text-gray-400 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>}
+                          <span className="truncate flex-1">{c.title}</span>
+                          {activeSessions.has(c.id) && (
+                            <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                          )}
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setMoreMenuId(moreMenuId === c.id ? null : c.id); }}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/recent:opacity-100 hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-all bg-white"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" /></svg>
+                        </button>
+                        {moreMenuId === c.id && (
+                          <div ref={moreMenuRef} className="absolute right-0 top-full mt-1 z-50 w-36 bg-white border border-gray-200 rounded-lg shadow-lg py-1" style={{ animation: 'menu-pop 0.12s ease-out' }}>
+                            <button onClick={() => { togglePin(c.id); }} className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-gray-600 hover:bg-gray-50 transition-colors">
+                              <svg className="w-3.5 h-3.5" fill={c.pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
+                              {c.pinned ? 'Unpin' : 'Pin'}
+                            </button>
+                            <button onClick={() => { setMoreMenuId(null); startRename(c); }} className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-gray-600 hover:bg-gray-50 transition-colors">
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                              Rename
+                            </button>
+                            <button onClick={() => { setMoreMenuId(null); setDeleteConfirm({ id: c.id, title: c.title }); }} className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-red-500 hover:bg-red-50 transition-colors">
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 ))
               ) : (
@@ -360,22 +433,53 @@ export const Sidebar: React.FC<{
         {isLoggedIn && (
           <>
             <p className={`px-2 pb-2 text-[11px] font-medium ${textMuted} select-none`}>Recents</p>
-            {conversations.length > 0 ? (
-              conversations.map((c) => (
+            {sortedConversations.length > 0 ? (
+              sortedConversations.map((c) => (
                 <div key={c.id} className="relative group/recent">
-                  <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (window.innerWidth < 768) onToggle(); }} title={c.title} className={`w-full text-left flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] ${textSecondary} hover:${textPrimary} ${hoverBg} transition-all`}>
-                    <span className="truncate pr-2">{c.title}</span>
-                    {activeSessions.has(c.id) && (
-                      <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                    )}
-                  </button>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ id: c.id, title: c.title }); }}
-                    className={`absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/recent:opacity-100 ${hoverBg} ${textMuted} hover:text-red-500 transition-all bg-white dark:bg-[#1a1a1a]`}
-                    title="Delete chat"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                  </button>
+                  {renamingId === c.id ? (
+                    <div className="px-2 py-1">
+                      <input
+                        ref={renameInputRef}
+                        value={renameValue}
+                        onChange={e => setRenameValue(e.target.value)}
+                        onBlur={confirmRename}
+                        onKeyDown={e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') setRenamingId(null); }}
+                        className={`w-full text-[13px] ${isDark ? 'text-gray-200 bg-white/10 border-white/20 focus:border-blue-400' : 'text-gray-700 bg-gray-50 border-gray-200 focus:border-blue-400'} border rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-blue-100`}
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (window.innerWidth < 768) onToggle(); }} title={c.title} className={`w-full text-left flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[13px] ${textSecondary} hover:${textPrimary} ${hoverBg} transition-all`}>
+                        {c.pinned && <svg className={`w-3 h-3 ${textMuted} shrink-0`} fill="currentColor" viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>}
+                        <span className="truncate flex-1">{c.title}</span>
+                        {activeSessions.has(c.id) && (
+                          <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        )}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setMoreMenuId(moreMenuId === c.id ? null : c.id); }}
+                        className={`absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/recent:opacity-100 ${hoverBg} ${textMuted} hover:text-gray-600 transition-all ${isDark ? 'bg-[#1a1a1a]' : 'bg-white'}`}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" /></svg>
+                      </button>
+                      {moreMenuId === c.id && (
+                        <div ref={moreMenuRef} className={`absolute right-0 top-full mt-1 z-50 w-36 ${isDark ? 'bg-[#1e1e1e] border-white/10' : 'bg-white border-gray-200'} border rounded-lg shadow-lg py-1`} style={{ animation: 'menu-pop 0.12s ease-out' }}>
+                          <button onClick={() => { togglePin(c.id); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-gray-300 hover:bg-white/8' : 'text-gray-600 hover:bg-gray-50'} transition-colors`}>
+                            <svg className="w-3.5 h-3.5" fill={c.pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
+                            {c.pinned ? 'Unpin' : 'Pin'}
+                          </button>
+                          <button onClick={() => { setMoreMenuId(null); startRename(c); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-gray-300 hover:bg-white/8' : 'text-gray-600 hover:bg-gray-50'} transition-colors`}>
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                            Rename
+                          </button>
+                          <button onClick={() => { setMoreMenuId(null); setDeleteConfirm({ id: c.id, title: c.title }); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'} transition-colors`}>
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               ))
             ) : (
