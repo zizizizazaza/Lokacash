@@ -1160,7 +1160,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [inputText]);
 
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
-    const currentRoundtableData = currentThinking ? buildRoundtableData() : null;
+    const currentRoundtableData = buildRoundtableData();
 
     // Auto-scroll
     useEffect(() => {
@@ -1688,7 +1688,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
                 <button
-                    onClick={() => setShowGraphPanel(p => !p)}
+                    onClick={() => {
+                        setShowGraphPanel(p => {
+                            if (!p && activeGraphMsgIdx === null) {
+                                // Find latest msg with a thinking process
+                                for (let j = messages.length - 1; j >= 0; j--) {
+                                    if (thinkingProcesses[j]) { setActiveGraphMsgIdx(j); break; }
+                                }
+                            }
+                            return !p;
+                        });
+                    }}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
                         showGraphPanel ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
                     }`}
@@ -1697,7 +1707,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         <circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="5" r="2.5" /><circle cx="19" cy="19" r="2.5" />
                         <path d="M7.5 11L16.5 6M7.5 13L16.5 18" />
                     </svg>
-                    Multi-Agent Graph
+                    Roundtable Graph
                 </button>
             </div>
 
@@ -1961,7 +1971,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 )}
 
                 {/* Roundtable Consensus Panel */}
-                {showGraphPanel && !showThinkingPanel && currentRoundtableData && (
+                {showGraphPanel && !showThinkingPanel && (
                     <div className="w-[400px] shrink-0 border-l border-gray-100 overflow-hidden relative">
                         <button
                             onClick={() => setShowGraphPanel(false)}
