@@ -15,17 +15,17 @@ export interface ModeConfig {
 
 export const MODES: ModeConfig[] = [
   {
-    id: 'auto', label: 'Auto', desc: 'System picks the best mode for you',
+    id: 'auto', label: 'Auto', desc: 'Smart auto-routing to the optimal pipeline',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       React.createElement('path', { d: 'M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z' }))
   },
   {
-    id: 'fast', label: 'Fast', desc: 'Single agent, quick response',
+    id: 'fast', label: 'Fast', desc: 'Direct response, minimal orchestration',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       React.createElement('path', { d: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z' }))
   },
   {
-    id: 'roundtable', label: 'Roundtable', desc: 'Specialist run first, then consensus on the result',
+    id: 'roundtable', label: 'Roundtable', desc: 'Multi-agent debate with iterative consensus',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       React.createElement('circle', { cx: 12, cy: 5, r: 2 }),
       React.createElement('circle', { cx: 5, cy: 19, r: 2 }),

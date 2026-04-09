@@ -417,7 +417,13 @@ Text: "${query}"`;
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
 
-      const plan = await aiService.evaluateRouting(data.content);
+      let plan: any;
+      try {
+        plan = await aiService.evaluateRouting(data.content);
+      } catch (routingErr: any) {
+        console.error('evaluateRouting failed:', routingErr.message);
+        plan = { isSimpleChat: true, capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
+      }
       
       if (data.mode === 'roundtable') {
         plan.isSimpleChat = false; 
@@ -433,56 +439,66 @@ Text: "${query}"`;
       };
 
       if (plan.isSimpleChat && data.mode !== 'roundtable') {
-        emitter.emitModule('search', 'active', { variant: 'data_providers', description: 'Thinking...', providers: [] });
-        const context = await prisma.chatMessage.findMany({ where: { userId, sessionId }, orderBy: { createdAt: 'asc' }, take: 10 });
-        const mappedContext = context.map(m => ({ role: m.role, content: m.content, agentId: m.agentId }));
-        const stream = await aiService.chatStream(mappedContext, 'superagent');
-        emitter.emitModule('search', 'completed');
+        const simpleStart = Date.now();
+        emitter.emitModule('search', 'active', { variant: 'data_providers', providers: [] });
+        try {
+          const context = await prisma.chatMessage.findMany({ where: { userId, sessionId }, orderBy: { createdAt: 'asc' }, take: 10 });
+          const mappedContext = context.map(m => ({ role: m.role, content: m.content, agentId: m.agentId }));
+          const stream = await aiService.chatStream(mappedContext, 'superagent');
+          emitter.emitModule('search', 'completed');
         
-        const reader = stream.getReader();
-        const decoder = new TextDecoder();
-        let fullContent = '';
-        let streamBuffer = '';
+          const reader = stream.getReader();
+          const decoder = new TextDecoder();
+          let fullContent = '';
+          let streamBuffer = '';
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          streamBuffer += decoder.decode(value, { stream: true });
-          const lines = streamBuffer.split('\n');
-          streamBuffer = lines.pop() || ''; 
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('data: ')) {
-              const sseData = trimmed.slice(6).trim();
-              if (sseData === '[DONE]') continue;
-              try {
-                const parsed = JSON.parse(sseData);
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) {
-                  fullContent += delta;
-                  streamToChat(delta);
-                }
-              } catch (e) {}
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            streamBuffer += decoder.decode(value, { stream: true });
+            const lines = streamBuffer.split('\n');
+            streamBuffer = lines.pop() || ''; 
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                const sseData = trimmed.slice(6).trim();
+                if (sseData === '[DONE]') continue;
+                try {
+                  const parsed = JSON.parse(sseData);
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    fullContent += delta;
+                    streamToChat(delta);
+                  }
+                } catch (e) {}
+              }
             }
           }
-        }
         
-        const simpleFlow = {
-          modules: [
-            { type: 'search', status: 'completed', data: { variant: 'data_providers', providers: [] } },
-            { type: 'done', status: 'completed' }
-          ],
-          isActive: false,
-          route: 'Super Agent'
-        };
+          const simpleFlow = {
+            modules: [
+              { type: 'search', status: 'completed', data: { variant: 'data_providers', providers: [] } },
+              { type: 'done', status: 'completed' }
+            ],
+            isActive: false,
+            route: 'Super Agent'
+          };
 
-        try {
-          await prisma.chatMessage.create({
-            data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
-          });
-        } catch (e) {}
-        emitter.emitModule('done', 'completed', {});
-        emitter.emitStreamDone(fullContent);
+          const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
+          try {
+            await prisma.chatMessage.create({
+              data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
+            });
+          } catch (e) {}
+          emitter.emitModule('done', 'completed', { duration: simpleDur });
+          emitter.emitStreamDone(fullContent);
+        } catch (streamErr: any) {
+          console.error('[agent:chat] simple chat stream failed:', streamErr.message);
+          emitter.emitModule('search', 'completed');
+          emitter.emitModule('done', 'completed', {});
+          emitToUser(userId, 'agent:chat:error', { sessionId, error: 'Connection failed, please try again.' });
+          emitter.emitStreamDone('');
+        }
         activeChatSessions.delete(sessionId);
         return;
       }
@@ -497,7 +513,6 @@ Text: "${query}"`;
       if (plan.capabilities.search.needed) {
         emitter.emitModule('search', 'active', { 
           variant: 'social', 
-          description: 'Searching web & media for insights...', 
           sources: [],
           providers: [
             {name: 'Yahoo Finance'}, {name: 'Bloomberg API'}, {name: 'Alpha Vantage'}, 
@@ -520,7 +535,6 @@ Text: "${query}"`;
                   logHintSources = mergeSignalSources(logHintSources, fromLog);
                   emitter.emitModule('search', 'active', {
                     variant: 'social',
-                    description: 'Searching public web...',
                     sources: logHintSources,
                   });
                 }
@@ -536,7 +550,6 @@ Text: "${query}"`;
             finalSocialSources = socialSources;
             emitter.emitModule('search', 'completed', {
               variant: 'social',
-              description: 'Search completed',
               sources: socialSources,
               providers: [
                 {name: 'Yahoo Finance'}, {name: 'Bloomberg API'}, {name: 'Alpha Vantage'}, 
@@ -545,7 +558,7 @@ Text: "${query}"`;
             });
             return { type: 'SEARCH', data: res.summary };
           }).catch(e => {
-            emitter.emitModule('search', 'completed', { description: 'Search failed' });
+            emitter.emitModule('search', 'completed', {});
             return { type: 'SEARCH', data: 'Error: ' + e.message };
           })
         );
@@ -563,7 +576,7 @@ Text: "${query}"`;
         promises.push(
           new Promise(resolve => {
             stockAnalysisService.runStreamAnalysis(
-              "分析: " + (plan.capabilities.analysis.tickers?.join(', ') || data.content),
+              "Analyze: " + (plan.capabilities.analysis.tickers?.join(', ') || data.content),
               sessionId,
               userId,
               (step: any) => {
@@ -573,13 +586,58 @@ Text: "${query}"`;
                     const meta = JSON.parse(step.content);
                     if (meta.fundamental) {
                       analysisStages[0].status = 'done';
-                      analysisStages[0].result = [];
-                      if (meta.fundamental.PE) analysisStages[0].result.push({label: 'PE', value: typeof meta.fundamental.PE === 'number' ? meta.fundamental.PE.toFixed(1) + 'x' : meta.fundamental.PE, color: 'blue'});
+                      // Merge into existing result array (multiple tools may contribute)
+                      const fr = analysisStages[0].result || [];
+                      const set = (label: string, raw: any, fmt?: (v: any) => string, color?: string) => {
+                        if (raw == null) return;
+                        const idx = fr.findIndex((r: any) => r.label === label);
+                        const entry = { label, value: fmt ? fmt(raw) : String(raw), color: color || 'text-gray-600' };
+                        if (idx >= 0) fr[idx] = entry; else fr.push(entry);
+                      };
+                      set('PE', meta.fundamental.PE, v => typeof v === 'number' ? v.toFixed(1) + 'x' : v, 'text-blue-600');
+                      set('PB', meta.fundamental.PB, v => typeof v === 'number' ? v.toFixed(2) + 'x' : v, 'text-indigo-600');
+                      set('Turnover', meta.fundamental.Turnover, v => typeof v === 'number' ? v.toFixed(2) + '%' : v, 'text-amber-600');
+                      analysisStages[0].result = fr;
                     }
                     if (meta.technical) {
                       analysisStages[1].status = 'done';
-                      analysisStages[1].result = [];
-                      if (meta.technical.Trend) analysisStages[1].result.push({label: 'Trend', value: meta.technical.Trend, color: meta.technical.Trend.includes('Up') || meta.technical.Trend.includes('牛') ? 'green' : 'orange'});
+                      const tr = analysisStages[1].result || [];
+                      const set = (label: string, raw: any, color?: string) => {
+                        if (raw == null) return;
+                        const idx = tr.findIndex((r: any) => r.label === label);
+                        const entry = { label, value: String(raw), color: color || 'text-gray-600' };
+                        if (idx >= 0) tr[idx] = entry; else tr.push(entry);
+                      };
+                      // Translate known Chinese values to English
+                      const zhEn: Record<string, string> = {
+                        '牛市排列': 'Bullish', '多头排列': 'Bullish', '空头排列': 'Bearish', '熊市排列': 'Bearish',
+                        '多头': 'Bullish', '空头': 'Bearish', '震荡': 'Sideways', '盘整': 'Consolidating',
+                        '上升趋势': 'Uptrend', '下降趋势': 'Downtrend', '横盘': 'Sideways',
+                        '买入': 'Buy', '卖出': 'Sell', '持有': 'Hold', '观望': 'Wait',
+                        '强烈买入': 'Strong Buy', '强烈卖出': 'Strong Sell',
+                        '看涨': 'Bullish', '看跌': 'Bearish', '中性': 'Neutral',
+                      };
+                      const t = (v: string) => { if (!v) return v; for (const [zh, en] of Object.entries(zhEn)) { if (v.includes(zh)) return en; } return v; };
+                      const trend = meta.technical.Trend ? t(meta.technical.Trend) : meta.technical.Trend;
+                      const ma = meta.technical.MA_Alignment ? t(meta.technical.MA_Alignment) : meta.technical.MA_Alignment;
+                      const signal = meta.technical.Signal ? t(meta.technical.Signal) : meta.technical.Signal;
+                      const trendColor = (v: string) => v.includes('Up') || v.includes('Bull') ? 'text-emerald-600' : v.includes('Down') || v.includes('Bear') ? 'text-red-600' : 'text-amber-600';
+                      set('Trend', trend, trend ? trendColor(trend) : undefined);
+                      set('MA', ma, 'text-violet-600');
+                      set('Signal', signal, signal === 'Buy' || signal === 'Strong Buy' ? 'text-emerald-600' : signal === 'Sell' || signal === 'Strong Sell' ? 'text-red-600' : 'text-gray-600');
+                      analysisStages[1].result = tr;
+                    }
+                    if (meta.social) {
+                      analysisStages[2].status = 'done';
+                      const sr = analysisStages[2].result || [];
+                      if (meta.social.results && Array.isArray(meta.social.results)) {
+                        const count = meta.social.results.length;
+                        const prov = meta.social.provider || 'Web';
+                        const idx = sr.findIndex((r: any) => r.label === 'Sources');
+                        const entry = { label: 'Sources', value: `${count} from ${prov}`, color: 'text-cyan-600' };
+                        if (idx >= 0) sr[idx] = entry; else sr.push(entry);
+                      }
+                      (analysisStages[2] as any).result = sr;
                     }
                     emitter.emitModule('analysis', 'active', { stages: analysisStages });
                   } catch(e){}
