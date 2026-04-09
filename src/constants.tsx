@@ -131,6 +131,8 @@ export const QUICK_ACTIONS = [
   { id: 'stockanalysis', icon: ActionIcons.StockAnalysis, label: 'A/H/US Stock' },
   { id: 'forecast', icon: ActionIcons.Forecast, label: 'Forecast' },
   { id: 'scout', icon: ActionIcons.Scout, label: 'Project Scout' },
+  { id: 'guru-council', icon: ActionIcons.GuruCouncil, label: 'Guru Council' },
+  { id: 'daily-news', icon: ActionIcons.DailyNews, label: 'Daily News' },
   { id: 'sentiment', icon: ActionIcons.Sentiment, label: 'Check Sentiment' },
   { id: 'portfolio', icon: ActionIcons.Portfolio, label: 'Review Portfolio' },
 ];
@@ -154,8 +156,9 @@ export const FEATURED_AGENTS = [
         <path d="M3 17l4-4 4 4 4-6 4 2" /><path d="M21 21H3" />
       </svg>
     ),
-    prompt: 'Help me analyze NVIDIA\'s recent stock performance and whether it\'s worth investing now',
+    prompt: null as string | null,
     route: null as string | null,
+    agentId: 'invest',
   },
   {
     id: 'signal-reader',
@@ -171,33 +174,6 @@ export const FEATURED_AGENTS = [
     agentId: 'research',
   },
   {
-    id: 'forecast',
-    name: 'Forecast',
-    desc: 'Scenario simulations and price range prediction with macro stress testing.',
-    icon: () => (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
-      </svg>
-    ),
-    prompt: 'Simulate: What if Fed cuts rates by 50bps in Q3? Model the impact on tech stocks.',
-    route: null as string | null,
-    /** 指向全局意图分发器 (auto)，而不是写死的 hedgefund */
-    agentId: 'auto',
-  },
-  {
-    id: 'ai-trader',
-    name: 'AI Trader',
-    desc: 'Multi-agent swarm delivers structured trading recommendations with risk assessment.',
-    icon: () => (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-        <path d="M8 5v2" /><rect x="6" y="7" width="4" height="7" rx="0.5" /><path d="M8 14v2" />
-        <path d="M16 3v3" /><rect x="14" y="6" width="4" height="9" rx="0.5" fill="currentColor" stroke="none" /><path d="M16 15v3" />
-      </svg>
-    ),
-    prompt: 'Use multi-agent swarm intelligence to analyze current market conditions and provide structured trading recommendations with risk assessment.',
-    route: null as string | null,
-  },
-  {
     id: 'guru-council',
     name: 'Guru Council',
     desc: "Get Buffett, Lynch, and Dalio's perspective on any stock.",
@@ -209,8 +185,9 @@ export const FEATURED_AGENTS = [
         <path d="M21 21v-1.5a4.5 4.5 0 00-3-4.24" />
       </svg>
     ),
-    prompt: 'Analyze NVIDIA from the perspectives of Warren Buffett, Peter Lynch, and Ray Dalio. What would each of them say?',
+    prompt: null as string | null,
     route: null as string | null,
+    agentId: 'guru-council',
   },
   {
     id: 'daily-news',
@@ -221,8 +198,9 @@ export const FEATURED_AGENTS = [
         <path d="M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8a2 2 0 00-2 2v16a2 2 0 01-2 2zm0 0a2 2 0 01-2-2V9" /><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z" />
       </svg>
     ),
-    prompt: "Give me today's key market news and analysis for A-share, Hong Kong, and US stocks. Highlight the most important movements.",
+    prompt: null as string | null,
     route: null as string | null,
+    agentId: 'daily-news',
   },
   {
     id: 'project-scout',
@@ -253,10 +231,34 @@ export type AgentGuide = { desc: string; prompts?: string[]; scenarios?: { id: s
 export const AGENT_GUIDES: Record<string, AgentGuide> = {
   invest: {
     desc: 'Multi-dimensional analysis on any asset.',
-    prompts: [
-      'Is NVIDIA still a buy after Q4 earnings?',
-      'Compare Tesla vs BYD fundamentals for 2026',
-      'Analyze the risk-reward of buying SOL at current price',
+    scenarios: [
+      {
+        id: 'stock', label: 'Stock Analysis',
+        prompts: [
+          'Is NVIDIA still a buy after Q4 earnings?',
+          'Compare Tesla vs BYD fundamentals for 2026.',
+          'Deep dive into Apple\'s valuation — is it overpriced?',
+          'Analyze Amazon\'s AWS growth vs Azure and GCP.',
+        ],
+      },
+      {
+        id: 'crypto', label: 'Crypto & DeFi',
+        prompts: [
+          'Analyze the risk-reward of buying SOL at current price.',
+          'Is ETH undervalued relative to BTC right now?',
+          'Evaluate Sui vs Aptos — which L1 has better tokenomics?',
+          'Should I hold or sell my Bitcoin position above $100K?',
+        ],
+      },
+      {
+        id: 'compare', label: 'Head-to-Head',
+        prompts: [
+          'NVIDIA vs AMD: who wins the AI chip race in 2026?',
+          'Google vs Microsoft: which is the better AI play?',
+          'Compare Grab vs GoTo for Southeast Asia exposure.',
+          'Palantir vs Snowflake: which data platform is a better investment?',
+        ],
+      },
     ],
   },
   research: {
@@ -296,6 +298,70 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
       },
     ],
   },
+  'guru-council': {
+    desc: 'Ask legendary investors for their take on any stock or market topic.',
+    scenarios: [
+      {
+        id: 'single', label: 'Single Stock',
+        prompts: [
+          'Analyze NVIDIA from the perspectives of Warren Buffett, Peter Lynch, and Ray Dalio.',
+          'What would Buffett, Lynch, and Dalio say about Tesla at its current valuation?',
+          'Should I buy Apple stock? Get the Guru Council\'s verdict.',
+          'Evaluate Microsoft as a long-term hold — Buffett, Lynch, and Dalio perspectives.',
+        ],
+      },
+      {
+        id: 'sector', label: 'Sector & Macro',
+        prompts: [
+          'Is AI infrastructure overhyped? What would Buffett, Lynch, and Dalio say?',
+          'How would the Guru Council view the current semiconductor cycle?',
+          'Buffett vs Dalio: who\'s right about the current bond market?',
+          'What would Lynch say about small-cap opportunities in today\'s market?',
+        ],
+      },
+      {
+        id: 'strategy', label: 'Strategy & Timing',
+        prompts: [
+          'Is now a good time to be greedy or fearful? Guru Council debate.',
+          'How would each guru build a portfolio with $100K today?',
+          'Should I dollar-cost average into the S&P 500 right now? Guru Council opinion.',
+          'What\'s the Guru Council\'s take on holding cash vs being fully invested?',
+        ],
+      },
+    ],
+  },
+  'daily-news': {
+    desc: 'Get today\'s market briefing across regions and sectors.',
+    scenarios: [
+      {
+        id: 'region', label: 'By Region',
+        prompts: [
+          'Give me today\'s key market news for A-share, Hong Kong, and US stocks.',
+          'What moved in the US market overnight? Key earnings and macro events.',
+          'Hong Kong and A-share market wrap — top movers and catalysts today.',
+          'European market highlights: what\'s driving DAX and FTSE today?',
+        ],
+      },
+      {
+        id: 'sector', label: 'By Sector',
+        prompts: [
+          'AI and semiconductor sector news — what happened today?',
+          'EV and clean energy sector briefing for today.',
+          'Financials and banking sector: any rate-sensitive moves today?',
+          'Biotech and pharma — FDA decisions, trial results, and stock reactions.',
+        ],
+      },
+      {
+        id: 'macro', label: 'Macro & Events',
+        prompts: [
+          'What macro events are moving markets today? Fed, CPI, jobs data.',
+          'Earnings calendar: who reported today and how did the market react?',
+          'Geopolitical risk update — tariffs, sanctions, and trade tensions.',
+          'Crypto market daily — Bitcoin, Ethereum, and key altcoin moves.',
+        ],
+      },
+    ],
+  },
   forecast: {
     desc: 'Run scenario simulations using MirrorFace engine.',
     prompts: [
@@ -305,11 +371,35 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
     ],
   },
   scout: {
-    desc: 'Deep-dive on any company, startup, or project.',
-    prompts: [
-      'Run due diligence on Perplexity AI 鈥?team, traction, and funding',
-      'Investigate this startup: analyze business model and red flags',
-      'Compare founders\' track records across three competing startups',
+    desc: 'Deep-dive due diligence on any company, startup, or project.',
+    scenarios: [
+      {
+        id: 'startup', label: 'Startup DD',
+        prompts: [
+          'Run due diligence on Perplexity AI — team, traction, and funding.',
+          'Investigate Anthropic: business model, moat, and competitive position.',
+          'Evaluate Midjourney as an investment — team, revenue, and growth.',
+          'Deep dive into Cursor — product-market fit, traction, and risks.',
+        ],
+      },
+      {
+        id: 'public', label: 'Public Company',
+        prompts: [
+          'Full scout report on Palantir — government vs commercial revenue mix.',
+          'Is CrowdStrike still a category leader? Deep competitive analysis.',
+          'Investigate Snowflake\'s growth slowdown — red flags or transition phase?',
+          'Scout Datadog — can they maintain pricing power in observability?',
+        ],
+      },
+      {
+        id: 'project', label: 'Crypto & Web3',
+        prompts: [
+          'Due diligence on Solana ecosystem — developer activity and adoption.',
+          'Evaluate Eigenlayer — restaking narrative, risks, and token economics.',
+          'Scout report: is Base (Coinbase L2) gaining real traction?',
+          'Deep dive into Celestia — modular blockchain thesis and valuation.',
+        ],
+      },
     ],
   },
   sentiment: {

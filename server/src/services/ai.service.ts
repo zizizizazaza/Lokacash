@@ -277,18 +277,18 @@ JSON SCHEMA:
 {
   "isSimpleChat": boolean, // True ONLY if the query is a greeting, basic platform Q&A, or simple chat (e.g., "hi", "how are you", "what can you do"). If it requires real world data, searching, or analysis, set false.
   "capabilities": {
-    "analysis": { "needed": boolean, "tickers": ["..."] }, // SET TRUE if the user asks for deep fundamentals, technicals, or buy/sell advice on specific stocks/assets. Extract tickers.
-    "search": { "needed": boolean, "query": "..." }, // SET TRUE if the user asks for market sentiment, current news, public opinion, or macro context (e.g. "What are people saying about X", "impact of Fed rate cut"). Provide a concise English search query.
-    "simulate": { "needed": boolean, "tickers": ["..."] } // SET TRUE if the user explicitly asks for a simulation, prediction, multi-investor debate, or "what if" scenarios (e.g., "Simulate Fed cuts on tech stocks", "What would Buffett do"). Extract tickers, or ["QQQ", "SPY"] if it's a broad market macro simulation.
+    "analysis": { "needed": boolean, "tickers": ["..."] }, // Stock/asset PRICE analysis tool. SET TRUE ONLY when the user wants quantitative financial data: stock price movements, technical indicators (K-line, MA, RSI), fundamental metrics (PE, PB, revenue), or explicit buy/sell/hold advice on a tradeable ticker. Requires valid tickers. Do NOT use for: market research, competitive landscape, industry analysis, business strategy questions, or general "what do people think" questions — those are search tasks.
+    "search": { "needed": boolean, "query": "..." }, // Deep Web/Social Search tool. SET TRUE for: market sentiment, news, public opinion, competitive analysis, industry research, market landscape questions, business strategy, macro context, or any question requiring recent real-world information. Provide a concise English search query.
+    "simulate": { "needed": boolean, "tickers": ["..."] } // AI Hedge Fund Simulation. SET TRUE ONLY when the user explicitly asks for a simulation, prediction, multi-investor debate, or "what if" scenarios (e.g., "Simulate Fed cuts on tech stocks", "What would Buffett do"). Extract tickers, or ["QQQ", "SPY"] if it's a broad market macro simulation.
   }
 }
 
 RULES:
 1. "isSimpleChat": When true, ALL capabilities must be false. Use for trivial fast talk.
-2. "analysis": Corresponds to the Stock Analysis tool. Needs tickers. Do NOT use for broad abstract theories.
-3. "search": Corresponds to Deep Web/Social Search. Great for sentiment and recent events.
-4. "simulate": Corresponds to AI Hedge Fund Simulation. Triggers multi-persona debates and heavy computations. Use only when forecasting or simulating.
-TIP: A user can trigger multiple! "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
+2. "analysis": Stock Analysis tool — for PRICE and FINANCIAL DATA queries only. Needs tradeable tickers. Questions about companies as businesses (competitive position, strategy, market share) are NOT analysis — they are search.
+3. "search": Deep Web/Social Search — for ANY question needing real-world information: sentiment, news, market research, competitive landscape, industry trends, business analysis.
+4. "simulate": AI Hedge Fund Simulation — only when user asks for forecasting or simulating scenarios.
+5. A user can trigger multiple! "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
 
 Examples:
 Query: "大家对特斯拉怎么看" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Tesla TSLA market sentiment opinion"},"simulate":{"needed":false}}}
@@ -296,6 +296,9 @@ Query: "今天英伟达怎么走的" -> {"isSimpleChat":false,"capabilities":{"a
 Query: "深度分析一下阿里和腾讯的投资价值" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["BABA", "TCEHY"]},"search":{"needed":false},"simulate":{"needed":false}}}
 Query: "模拟：如果第三季度降息50个基点对科技股有什么影响" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["QQQ"]},"search":{"needed":true,"query":"Fed 50bps rate cut impact on tech sector"},"simulate":{"needed":true,"tickers":["QQQ"]}}}
 Query: "hi, 你能干啥" -> {"isSimpleChat":true,"capabilities":{"analysis":{"needed":false},"search":{"needed":false},"simulate":{"needed":false}}}
+Query: "调研东南亚的外卖市场" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Southeast Asian food delivery market competitive landscape"},"simulate":{"needed":false}}}
+Query: "Can GoTo's subsidies hold against Grab's war chest?" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"GoTo vs Grab Indonesia competition subsidies war chest"},"simulate":{"needed":false}}}
+Query: "GRAB的股价走势如何，值得买入吗" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["GRAB"]},"search":{"needed":true,"query":"Grab stock GRAB buy sell analysis"},"simulate":{"needed":false}}}
 
 Query: "${query}"`;
 

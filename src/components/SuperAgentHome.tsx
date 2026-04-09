@@ -357,32 +357,8 @@ const SuperAgentHome: React.FC = () => {
         {/* Agent pills — outside max-w-640, full width row */}
         {!selectedAgent && (
           <div className="hero-actions pt-6 pb-5 px-4 flex flex-col items-center gap-3">
-            {/* Row 1: first 5 pills */}
-            <div className="flex items-center gap-2">
-              {FEATURED_AGENTS.slice(0, 5).map(a => {
-                const Ic = a.icon;
-                return (
-                  <button key={a.id}
-                    onClick={() => {
-                      if ((a as any).agentId) {
-                        setSelectedAgent((a as any).agentId);
-                        setSelectedScenario(null);
-                        if (a.prompt) setChatMessage(a.prompt);
-                      } else if (a.route) {
-                        navigate(a.route);
-                      } else if (a.prompt) {
-                        setChatMessage(a.prompt);
-                      }
-                    }}
-                    className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:border-gray-300 hover:text-gray-900 hover:shadow-sm whitespace-nowrap">
-                    <Ic /> {a.name}
-                  </button>
-                );
-              })}
-            </div>
-            {/* Row 2: remaining pills */}
-            <div className="flex items-center gap-2">
-              {FEATURED_AGENTS.slice(5).map(a => {
+            <div className="flex items-center gap-2 flex-wrap justify-center">
+              {FEATURED_AGENTS.map(a => {
                 const Ic = a.icon;
                 return (
                   <button key={a.id}
