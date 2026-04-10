@@ -6,7 +6,8 @@ import prisma from '../db.js';
 import { researchService } from '../services/research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
-import { LokaAIService } from '../services/ai.service.js';
+import { runInvestmentAnalysis, fetchMarketData, formatForAegean, callAegeanInvestment, transformAegeanResponse } from '../services/investment.service.js';
+import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
 import {
   formatConsensusAgentLabel,
   runConsensusEngine,
@@ -314,39 +315,57 @@ Text: "${query}"`;
         console.error('Failed to save stockanalysis user message:', dbErr);
       }
 
-      // Use the new stream-based analysis (structured JSONL events)
-      stockAnalysisService.runStreamAnalysis(
-        rawQuery,
-        sessionId,
-        userId,
-        // onStep: forward structured step events
-        (step) => {
-          emitToUser(userId, 'agent:stockanalysis:step', { sessionId, ...step });
-        },
-        // onDone: save report + notify
-        async (report: string) => {
-          try {
-            await prisma.chatMessage.create({
-              data: {
-                userId,
-                sessionId,
-                role: 'assistant',
-                content: report,
-                agentId: 'stockanalysis'
-              }
+      // ── Aegean Investment Pipeline ──
+      // Extract stock code from tickers or raw query
+      const stockCode = (data.tickers?.[0] || rawQuery).trim();
+
+      try {
+        const result = await runInvestmentAnalysis(
+          stockCode,
+          userId,
+          (data as any).mode || 'auto',
+          (stage, detail) => {
+            emitToUser(userId, 'agent:stockanalysis:step', {
+              sessionId,
+              type: 'tool_start',
+              tool: stage,
+              displayName: stage.replace(/_/g, ' '),
+              ...detail,
+              ts: Date.now(),
             });
-          } catch (dbErr) {
-            console.error('Failed to save stockanalysis assistant message:', dbErr);
-          }
-          emitToUser(userId, 'agent:stockanalysis:done', { sessionId, report });
-          activeStockAnalysisSessions.delete(sessionId);
-        },
-        // onError
-        (error: string) => {
-          emitToUser(userId, 'agent:stockanalysis:error', { sessionId, error });
-          activeStockAnalysisSessions.delete(sessionId);
+          },
+        );
+
+        const report = result.reportMarkdown || result.summary.thesis || 'Analysis completed.';
+
+        try {
+          await prisma.chatMessage.create({
+            data: {
+              userId,
+              sessionId,
+              role: 'assistant',
+              content: report,
+              agentId: 'stockanalysis',
+              metadata: JSON.stringify({
+                aegean: {
+                  requestId: result.requestId,
+                  action: result.recommendation.action,
+                  confidence: result.recommendation.confidence,
+                  riskGate: result.riskGate,
+                  consensus: result.consensus,
+                },
+              }),
+            }
+          });
+        } catch (dbErr) {
+          console.error('Failed to save stockanalysis assistant message:', dbErr);
         }
-      );
+        emitToUser(userId, 'agent:stockanalysis:done', { sessionId, report });
+      } catch (err: any) {
+        console.error('[agent:stockanalysis] Aegean pipeline error:', err.message);
+        emitToUser(userId, 'agent:stockanalysis:error', { sessionId, error: err.message });
+      }
+      activeStockAnalysisSessions.delete(sessionId);
     });
 
     // ── SuperAgent Chat (Streaming & Consensus) ──
@@ -437,13 +456,42 @@ Text: "${query}"`;
         } catch (dbErr) {}
       }
 
+      // ── Query session history for multi-turn context ──
+      const MAX_HISTORY_FOR_ROUTING = 6;
+      const MAX_HISTORY_FOR_SYNTHESIS = 8;
+      const ASSISTANT_CONTENT_CAP = 300;
+
+      const sessionHistory = await prisma.chatMessage.findMany({
+        where: { userId, sessionId },
+        orderBy: { createdAt: 'asc' },
+        take: MAX_HISTORY_FOR_SYNTHESIS,
+        select: { role: true, content: true },
+      });
+
+      const formatHistory = (messages: { role: string; content: string }[], limit: number): string => {
+        return messages
+          .slice(-limit)
+          .map(m => {
+            const label = m.role === 'user' ? 'User' : 'Assistant';
+            const text = m.role === 'assistant' && m.content.length > ASSISTANT_CONTENT_CAP
+              ? m.content.slice(0, ASSISTANT_CONTENT_CAP) + '...(truncated)'
+              : m.content;
+            return `[${label}]: ${text}`;
+          })
+          .join('\n');
+      };
+
       activeChatSessions.set(sessionId, 'running');
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
 
       let plan: any;
       try {
-        plan = await aiService.evaluateRouting(data.content);
+        const routingHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_ROUTING);
+        const routingQuery = routingHistory
+          ? `【Conversation Context】\n${routingHistory}\n\n【Latest User Message】\n${data.content}`
+          : data.content;
+        plan = await aiService.evaluateRouting(routingQuery);
       } catch (routingErr: any) {
         console.error('evaluateRouting failed:', routingErr.message);
         plan = { isSimpleChat: true, capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
@@ -596,7 +644,6 @@ Text: "${query}"`;
       }
 
       if (plan.capabilities.analysis.needed) {
-        let activeSections = [{ id: 'data_providers', label: 'Fetching market data', status: 'pending', providers: [] }];
         let analysisStages = [
           {id: 'fundamental', label: 'Fundamental analysis', status: 'pending', result: [] as any[]},
           {id: 'technical', label: 'Technical analysis', status: 'pending', result: [] as any[]},
@@ -604,90 +651,73 @@ Text: "${query}"`;
         ];
         emitter.emitModule('analysis', 'active', { stages: analysisStages });
 
+        const analysisStockCode = (plan.capabilities.analysis.tickers?.[0] || data.content).trim();
+
         promises.push(
-          new Promise(resolve => {
-            stockAnalysisService.runStreamAnalysis(
-              "Analyze: " + (plan.capabilities.analysis.tickers?.join(', ') || data.content),
-              sessionId,
-              userId,
-              (step: any) => {
-                emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step });
-                if (step.type === 'generating' && step.message === '[UI_METADATA]' && step.content) {
-                  try {
-                    const meta = JSON.parse(step.content);
-                    if (meta.fundamental) {
-                      analysisStages[0].status = 'done';
-                      // Merge into existing result array (multiple tools may contribute)
-                      const fr = analysisStages[0].result || [];
-                      const set = (label: string, raw: any, fmt?: (v: any) => string, color?: string) => {
-                        if (raw == null) return;
-                        const idx = fr.findIndex((r: any) => r.label === label);
-                        const entry = { label, value: fmt ? fmt(raw) : String(raw), color: color || 'text-gray-600' };
-                        if (idx >= 0) fr[idx] = entry; else fr.push(entry);
-                      };
-                      set('PE', meta.fundamental.PE, v => typeof v === 'number' ? v.toFixed(1) + 'x' : v, 'text-blue-600');
-                      set('PB', meta.fundamental.PB, v => typeof v === 'number' ? v.toFixed(2) + 'x' : v, 'text-indigo-600');
-                      set('Turnover', meta.fundamental.Turnover, v => typeof v === 'number' ? v.toFixed(2) + '%' : v, 'text-amber-600');
-                      analysisStages[0].result = fr;
-                    }
-                    if (meta.technical) {
-                      analysisStages[1].status = 'done';
-                      const tr = analysisStages[1].result || [];
-                      const set = (label: string, raw: any, color?: string) => {
-                        if (raw == null) return;
-                        const idx = tr.findIndex((r: any) => r.label === label);
-                        const entry = { label, value: String(raw), color: color || 'text-gray-600' };
-                        if (idx >= 0) tr[idx] = entry; else tr.push(entry);
-                      };
-                      // Translate known Chinese values to English
-                      const zhEn: Record<string, string> = {
-                        '牛市排列': 'Bullish', '多头排列': 'Bullish', '空头排列': 'Bearish', '熊市排列': 'Bearish',
-                        '多头': 'Bullish', '空头': 'Bearish', '震荡': 'Sideways', '盘整': 'Consolidating',
-                        '上升趋势': 'Uptrend', '下降趋势': 'Downtrend', '横盘': 'Sideways',
-                        '买入': 'Buy', '卖出': 'Sell', '持有': 'Hold', '观望': 'Wait',
-                        '强烈买入': 'Strong Buy', '强烈卖出': 'Strong Sell',
-                        '看涨': 'Bullish', '看跌': 'Bearish', '中性': 'Neutral',
-                      };
-                      const t = (v: string) => { if (!v) return v; for (const [zh, en] of Object.entries(zhEn)) { if (v.includes(zh)) return en; } return v; };
-                      const trend = meta.technical.Trend ? t(meta.technical.Trend) : meta.technical.Trend;
-                      const ma = meta.technical.MA_Alignment ? t(meta.technical.MA_Alignment) : meta.technical.MA_Alignment;
-                      const signal = meta.technical.Signal ? t(meta.technical.Signal) : meta.technical.Signal;
-                      const trendColor = (v: string) => v.includes('Up') || v.includes('Bull') ? 'text-emerald-600' : v.includes('Down') || v.includes('Bear') ? 'text-red-600' : 'text-amber-600';
-                      set('Trend', trend, trend ? trendColor(trend) : undefined);
-                      set('MA', ma, 'text-violet-600');
-                      set('Signal', signal, signal === 'Buy' || signal === 'Strong Buy' ? 'text-emerald-600' : signal === 'Sell' || signal === 'Strong Sell' ? 'text-red-600' : 'text-gray-600');
-                      analysisStages[1].result = tr;
-                    }
-                    if (meta.social) {
-                      analysisStages[2].status = 'done';
-                      const sr = analysisStages[2].result || [];
-                      if (meta.social.results && Array.isArray(meta.social.results)) {
-                        const count = meta.social.results.length;
-                        const prov = meta.social.provider || 'Web';
-                        const idx = sr.findIndex((r: any) => r.label === 'Sources');
-                        const entry = { label: 'Sources', value: `${count} from ${prov}`, color: 'text-cyan-600' };
-                        if (idx >= 0) sr[idx] = entry; else sr.push(entry);
-                      }
-                      (analysisStages[2] as any).result = sr;
-                    }
-                    emitter.emitModule('analysis', 'active', { stages: analysisStages });
-                  } catch(e){}
-                }
-              },
-              (report) => {
-                analysisStages.forEach(s => { s.status = 'done'; });
-                finalAnalysisStages = analysisStages;
-                emitter.emitModule('analysis', 'completed', { stages: analysisStages });
-                resolve({ type: 'ANALYSIS', data: report });
-              },
-              (error) => {
-                analysisStages.forEach(s => { s.status = 'done'; });
-                finalAnalysisStages = analysisStages;
-                emitter.emitModule('analysis', 'completed', { stages: analysisStages });
-                resolve({ type: 'ANALYSIS', data: 'Error: ' + error });
+          (async () => {
+            try {
+              // Step 1: Fetch raw market data
+              emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step: { type: 'tool_start', tool: 'fetch_market_data', displayName: 'Fetching market data', ts: Date.now() } });
+              const marketData = await fetchMarketData(analysisStockCode);
+              emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step: { type: 'tool_done', tool: 'fetch_market_data', displayName: 'Fetching market data', success: true, ts: Date.now() } });
+
+              // Populate analysis stages from fetched data
+              if (marketData.realtime_quote) {
+                const q = marketData.realtime_quote;
+                analysisStages[0].status = 'done';
+                analysisStages[0].result = [
+                  q.pe_ratio != null ? { label: 'PE', value: typeof q.pe_ratio === 'number' ? q.pe_ratio.toFixed(1) + 'x' : String(q.pe_ratio), color: 'text-blue-600' } : null,
+                  q.pb_ratio != null ? { label: 'PB', value: typeof q.pb_ratio === 'number' ? q.pb_ratio.toFixed(2) + 'x' : String(q.pb_ratio), color: 'text-indigo-600' } : null,
+                  q.turnover_rate != null ? { label: 'Turnover', value: typeof q.turnover_rate === 'number' ? q.turnover_rate.toFixed(2) + '%' : String(q.turnover_rate), color: 'text-amber-600' } : null,
+                ].filter(Boolean);
               }
-            );
-          })
+              if (marketData.trend_analysis) {
+                const t = marketData.trend_analysis;
+                const zhEn: Record<string, string> = {
+                  '牛市排列': 'Bullish', '多头排列': 'Bullish', '空头排列': 'Bearish', '熊市排列': 'Bearish',
+                  '多头': 'Bullish', '空头': 'Bearish', '震荡': 'Sideways', '盘整': 'Consolidating',
+                  '上升趋势': 'Uptrend', '下降趋势': 'Downtrend', '横盘': 'Sideways',
+                  '买入': 'Buy', '卖出': 'Sell', '持有': 'Hold', '观望': 'Wait',
+                  '强烈买入': 'Strong Buy', '强烈卖出': 'Strong Sell',
+                  '看涨': 'Bullish', '看跌': 'Bearish', '中性': 'Neutral',
+                };
+                const tr = (v: string) => { if (!v) return v; for (const [zh, en] of Object.entries(zhEn)) { if (v.includes(zh)) return en; } return v; };
+                analysisStages[1].status = 'done';
+                analysisStages[1].result = [
+                  t.trend_status ? { label: 'Trend', value: tr(t.trend_status), color: tr(t.trend_status)?.includes('Bull') || tr(t.trend_status)?.includes('Up') ? 'text-emerald-600' : 'text-amber-600' } : null,
+                  t.ma_alignment ? { label: 'MA', value: tr(t.ma_alignment), color: 'text-violet-600' } : null,
+                  t.buy_signal ? { label: 'Signal', value: tr(t.buy_signal), color: tr(t.buy_signal) === 'Buy' ? 'text-emerald-600' : 'text-gray-600' } : null,
+                ].filter(Boolean);
+              }
+              if (marketData.news?.results) {
+                analysisStages[2].status = 'done';
+                const newsCount = Array.isArray(marketData.news.results) ? marketData.news.results.length : 0;
+                (analysisStages[2] as any).result = [{ label: 'Sources', value: `${newsCount} from Web`, color: 'text-cyan-600' }];
+              }
+              emitter.emitModule('analysis', 'active', { stages: analysisStages });
+
+              // Step 2: Send to Aegean
+              emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step: { type: 'tool_start', tool: 'aegean_consensus', displayName: 'Aegean Expert Council analysis', ts: Date.now() } });
+              const aegeanMode = data.mode || 'auto';
+              const payload = formatForAegean(marketData, userId, aegeanMode);
+              const aegeanResult = await callAegeanInvestment(payload);
+              emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step: { type: 'tool_done', tool: 'aegean_consensus', displayName: 'Aegean Expert Council analysis', success: true, ts: Date.now() } });
+
+              const result = transformAegeanResponse(aegeanResult);
+              const report = result.reportMarkdown || result.summary.thesis || 'Analysis completed.';
+
+              analysisStages.forEach(s => { s.status = 'done'; });
+              finalAnalysisStages = analysisStages;
+              emitter.emitModule('analysis', 'completed', { stages: analysisStages });
+              return { type: 'ANALYSIS' as const, data: report };
+            } catch (err: any) {
+              console.error('[agent:chat] Aegean analysis pipeline error:', err.message);
+              analysisStages.forEach(s => { s.status = 'done'; });
+              finalAnalysisStages = analysisStages;
+              emitter.emitModule('analysis', 'completed', { stages: analysisStages });
+              return { type: 'ANALYSIS' as const, data: 'Error: ' + err.message };
+            }
+          })()
         );
       }
 
@@ -726,7 +756,12 @@ Text: "${query}"`;
         return;
       }
       console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
-      let contextString = "【User Original Request】\n" + data.content + "\n\n";
+      const synthHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_SYNTHESIS);
+      let contextString = "";
+      if (synthHistory) {
+        contextString += "【CONVERSATION HISTORY — for continuity, do NOT repeat old findings】\n" + synthHistory + "\n\n";
+      }
+      contextString += "【User Original Request】\n" + data.content + "\n\n";
       results.forEach(r => {
         if (r.status === 'fulfilled') {
           contextString += `【${r.value.type} REPORT】\n${r.value.data}\n\n`;
@@ -735,7 +770,7 @@ Text: "${query}"`;
 
       streamToChat('*Orchestrator synthesizing raw reports...*\n\n');
 
-      const synthesizePrompt = `You are the Final Investment Synthesizer — a senior analyst who writes sharp, opinionated research reports that people actually want to read.
+      const synthesizePrompt = getGlobalTimeContext() + `You are the Final Investment Synthesizer — a senior analyst who writes sharp, opinionated research reports that people actually want to read.
 
 Your job: take raw outputs from multiple specialist agents and synthesize them into ONE cohesive, insightful analysis. Write like a top-tier analyst blogger — authoritative, direct, with clear opinions backed by evidence.
 
@@ -795,6 +830,7 @@ Significance: [High / Medium / Low] · Categories: [2-3 relevant tags, e.g., "Ma
 6. Mirror the user's language. If the user wrote in Chinese, respond in Chinese. If English, respond in English.
 7. Length: 600-1200 words. Depth over brevity, but no padding.
 8. End with "Questions to watch" — 3-4 forward-looking questions that would change the investment thesis.
+9. If conversation history is present, write as a CONTINUATION. Do NOT repeat facts already covered in previous turns. Reference prior analysis naturally (e.g., "Following up on the Shenzhen analysis, Hong Kong shows...").
 
 Begin directly with the headline. No meta-commentary.
 
@@ -888,7 +924,7 @@ Write the final synthesis report now:
 
           try {
             streamToChat('\n\n*Sending report to Expert Council for consensus evaluation...*\n');
-            const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${cleanedSynthesis}`;
+            const consensusTask = getGlobalTimeContext() + `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${cleanedSynthesis}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';

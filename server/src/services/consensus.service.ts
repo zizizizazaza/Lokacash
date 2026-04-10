@@ -125,9 +125,6 @@ export async function runConsensusEngine(userId: string, mode: string, message: 
   try {
     const raw = JSON.stringify(consensusResult, null, 2);
     const max = 200_000;
-    console.log(
-      `[Consensus] FULL API response (${raw.length} chars, log truncated to ${max}):\n${raw.length > max ? raw.slice(0, max) + '\n…[truncated]' : raw}`,
-    );
   } catch (e) {
     console.warn('[Consensus] Failed to stringify full response:', e);
   }

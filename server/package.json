@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "concurrently -c \"cyan,magenta\" -n \"NODE,AEGEAN\" \"tsx watch src/index.ts\" \"npm run dev:aegean\"",
+    "dev:node": "tsx watch src/index.ts",
+    "dev:aegean": "node -e \"const{execSync}=require('child_process');const isWin=process.platform==='win32';const py=isWin?'.venv\\\\Scripts\\\\python':'.venv/bin/python';execSync(py+' -m uvicorn main:app --host 0.0.0.0 --port 8100 --reload',{cwd:'tools/aegean-consensus',env:{...process.env,PYTHONPATH:'src'},stdio:'inherit'})\"",
     "build": "tsc",
     "start": "node dist/index.js",
     "db:generate": "prisma generate",
@@ -13,7 +15,9 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "setup:ai:win": "cd tools/ai-hedge-fund && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt && cd ../stock-analysis && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt",
-    "setup:ai:linux": "cd tools/ai-hedge-fund && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ../stock-analysis && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    "setup:ai:linux": "cd tools/ai-hedge-fund && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ../stock-analysis && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+    "setup:aegean:win": "cd tools/aegean-consensus && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt",
+    "setup:aegean:linux": "cd tools/aegean-consensus && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1017.0",
@@ -44,6 +48,7 @@
     "@types/multer-s3": "^3.0.3",
     "@types/node": "^22.14.0",
     "@types/uuid": "^10.0.0",
+    "concurrently": "^9.2.1",
     "prisma": "^6.4.1",
     "tsx": "^4.19.3",
     "typescript": "~5.8.2"
