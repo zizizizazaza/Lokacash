@@ -308,6 +308,24 @@ function findNextSpecial(s: string): number {
 /**
  * Renders multiple lines of text with structural markdown-like syntax (headers, lists, blockquotes)
  */
+function headingSlug(text: string): string {
+  return text.replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'h';
+}
+
+export function extractHeadings(text: string): { level: number; text: string; id: string }[] {
+  if (!text) return [];
+  const headings: { level: number; text: string; id: string }[] = [];
+  for (const line of text.split('\n')) {
+    const m3 = line.match(/^###\s+(.+)/);
+    if (m3) { headings.push({ level: 3, text: m3[1].replace(/\*\*/g, ''), id: headingSlug(m3[1].replace(/\*\*/g, '')) }); continue; }
+    const m2 = line.match(/^##\s+(.+)/);
+    if (m2) { headings.push({ level: 2, text: m2[1].replace(/\*\*/g, ''), id: headingSlug(m2[1].replace(/\*\*/g, '')) }); continue; }
+    const m1 = line.match(/^#\s+(.+)/);
+    if (m1 && !line.startsWith('##')) { headings.push({ level: 1, text: m1[1].replace(/\*\*/g, ''), id: headingSlug(m1[1].replace(/\*\*/g, '')) }); continue; }
+  }
+  return headings;
+}
+
 export function renderMarkdownContent(text: string): React.ReactNode {
   if (!text) return null;
   const lines = text.split('\n');
@@ -322,27 +340,30 @@ export function renderMarkdownContent(text: string): React.ReactNode {
       continue;
     }
     if (/^#{3}\s/.test(line)) {
+      const hText = line.replace(/^#{3}\s/, '');
       elements.push(
-        <h3 key={i} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
-          {parseLine(line.replace(/^#{3}\s/, ''))}
+        <h3 key={i} id={headingSlug(hText.replace(/\*\*/g, ''))} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
+          {parseLine(hText)}
         </h3>,
       );
       i++;
       continue;
     }
     if (/^#{2}\s/.test(line)) {
+      const hText = line.replace(/^#{2}\s/, '');
       elements.push(
-        <h2 key={i} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
-          {parseLine(line.replace(/^#{2}\s/, ''))}
+        <h2 key={i} id={headingSlug(hText.replace(/\*\*/g, ''))} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
+          {parseLine(hText)}
         </h2>,
       );
       i++;
       continue;
     }
     if (/^#\s/.test(line) && !line.startsWith('##')) {
+      const hText = line.replace(/^#\s/, '');
       elements.push(
-        <h1 key={i} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
-          {parseLine(line.replace(/^#\s/, ''))}
+        <h1 key={i} id={headingSlug(hText.replace(/\*\*/g, ''))} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
+          {parseLine(hText)}
         </h1>,
       );
       i++;

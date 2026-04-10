@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 
 
@@ -1333,10 +1333,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
-        // Single flexible regex: optional ---, then a bold/heading title containing
-        // question/watch/关注/问题 keywords, then a bullet list, anchored at end of content.
-        // Covers: **Questions to watch:**, ## Follow-up Questions, **关注问题：**, etc.
-        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
+        // Match a bold/heading title containing question/watch/关注/问题 keywords,
+        // then a bullet list. Allow optional trailing tags/text after the bullet list.
+        // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,2}\s*)[^\n]*?(?:question|watch|关注|问题|考虑)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)/i;
         const match = content.match(pattern);
         if (match) {
             const questions = match[1].split('\n')
@@ -1345,6 +1345,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
                 .filter(Boolean);
             if (questions.length > 0) {
+                // Strip everything from the questions heading onwards
                 return { body: content.slice(0, match.index).trimEnd(), questions };
             }
         }
@@ -1385,10 +1386,86 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
     // Show real roundtable data from consensus_done event, otherwise empty
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
+    // Stock quote cards keyed by message index
+    const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; price?: string; change?: string; volume?: string; high?: string; low?: string; marketCap?: string }>>({});
     const currentConsensus = activeGraphMsgIdx !== null ? consensusResults[activeGraphMsgIdx] : null;
     const currentRoundtableData: RoundtableData = currentConsensus
         ? buildRoundtableFromConsensus(currentConsensus)
         : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
+
+
+    // TOC: precompute headings for every completed assistant message
+    const allTocHeadings = useMemo(() => {
+        const map: Record<number, { level: number; text: string; id: string }[]> = {};
+        for (let j = 0; j < messages.length; j++) {
+            const m = messages[j];
+            if (m.role === 'assistant' && m.content && !m.isStreaming && m.content !== '__cancelled__') {
+                const cleaned = stripInternalResearchCitations(m.content);
+                const h = extractHeadings(cleaned);
+                if (h.length >= 2) map[j] = h;
+            }
+        }
+        return map;
+    }, [messages]);
+    const [visibleTocIdx, setVisibleTocIdx] = useState<number>(-1);
+    const tocHeadings = visibleTocIdx >= 0 ? (allTocHeadings[visibleTocIdx] || []) : (() => {
+        // Default to last assistant message with headings
+        const keys = Object.keys(allTocHeadings).map(Number);
+        return keys.length > 0 ? allTocHeadings[keys[keys.length - 1]] : [];
+    })();
+    const [activeTocId, setActiveTocId] = useState<string>('');
+
+    // Scroll-spy: track which heading is currently in view + TOC position + which message's TOC to show
+    const [tocTopPx, setTocTopPx] = useState(0);
+    useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        const tocIndices = Object.keys(allTocHeadings).map(Number);
+        if (tocIndices.length === 0) return;
+
+        const onScroll = () => {
+            const containerRect = container.getBoundingClientRect();
+
+            // Determine which assistant message's TOC to show:
+            // Use the LAST message whose first heading has scrolled into or above the viewport top.
+            // This way, a message's TOC only appears once you've scrolled to its title.
+            let bestIdx = tocIndices[0];
+            for (const idx of tocIndices) {
+                const heads = allTocHeadings[idx];
+                if (!heads || heads.length === 0) continue;
+                const firstEl = document.getElementById(heads[0].id);
+                if (firstEl) {
+                    const top = firstEl.getBoundingClientRect().top - containerRect.top;
+                    if (top <= 80) bestIdx = idx;
+                }
+            }
+            setVisibleTocIdx(bestIdx);
+
+            const heads = allTocHeadings[bestIdx] || [];
+            const ids = heads.map(h => h.id);
+
+            // Active heading within the visible message
+            let current = ids[0] || '';
+            for (const id of ids) {
+                const el = document.getElementById(id);
+                if (el) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top - containerRect.top <= 80) current = id;
+                }
+            }
+            setActiveTocId(current);
+
+            // Float position
+            const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
+            if (firstEl) {
+                const offset = firstEl.offsetTop - container.scrollTop;
+                setTocTopPx(Math.max(8, Math.min(offset, 200)));
+            }
+        };
+        container.addEventListener('scroll', onScroll, { passive: true });
+        onScroll();
+        return () => container.removeEventListener('scroll', onScroll);
+    }, [allTocHeadings]);
 
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
@@ -1618,6 +1695,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setConsensusResults(prev => ({ ...prev, [msgIdx]: data.result }));
         };
 
+        const onQuote = (data: { sessionId: string; quote: any }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
+        };
+
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
         socket.on('agent:chat:started', onStarted);
@@ -1629,6 +1713,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:tool_trace', onToolTrace);
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
+        socket.on('agent:chat:quote', onQuote);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -1642,6 +1727,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:tool_trace', onToolTrace);
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
+            socket.off('agent:chat:quote', onQuote);
         };
     }, [sessionId]);
 
@@ -1686,6 +1772,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             setMessages(prev => {
                                 const c = [...prev];
                                 if (c[msgIdx]) {
+                                    // Don't overwrite substantial existing content (e.g. synthesis)
+                                    // with a replay report (e.g. raw analysis sub-report)
+                                    const existing = (c[msgIdx].content || '').trim();
+                                    if (existing.length > 200) return prev;
                                     c[msgIdx] = {
                                         ...c[msgIdx],
                                         content: res.report,
@@ -1705,6 +1795,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         setMessages(prev => {
                             const c = [...prev];
                             if (c[msgIdx]) {
+                                // Don't overwrite substantial existing content with replay report
+                                const existing = (c[msgIdx].content || '').trim();
+                                if (existing.length > 200) return prev;
                                 c[msgIdx] = {
                                     ...c[msgIdx],
                                     content: res.report!,
@@ -1990,7 +2083,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Header: chat title + graph toggle ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <button
+                <div className="flex items-center gap-1.5">
+                    <button
                     onClick={() => {
                         setShowGraphPanel(p => {
                             if (!p && activeGraphMsgIdx === null) {
@@ -2012,14 +2106,61 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </svg>
                     Roundtable Graph
                 </button>
+                </div>
             </div>
 
             {/* ══ Content Row ══ */}
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
+                    {/* TOC floating panel */}
+                    {tocHeadings.length > 0 && (
+                        <nav
+                            className="absolute left-3 z-30 hidden md:block transition-all duration-150"
+                            style={{ top: tocTopPx }}
+                        >
+                            <div className="w-[220px] bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
+                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide">Sections</p>
+                                <ul className="space-y-0.5">
+                                    {tocHeadings.filter(h => h.level >= 2).map((h, idx) => {
+                                        const isActive = activeTocId === h.id;
+                                        const sectionNum = h.level === 2
+                                            ? tocHeadings.filter(x => x.level === 2).indexOf(h) + 1
+                                            : null;
+                                        return (
+                                            <li key={idx}>
+                                                <button
+                                                    onClick={() => {
+                                                        const el = document.getElementById(h.id);
+                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                    }}
+                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
+                                                        isActive
+                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
+                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
+                                                >
+                                                    {sectionNum !== null && (
+                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
+                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
+                                                        }`}>
+                                                            {sectionNum}
+                                                        </span>
+                                                    )}
+                                                    {h.level >= 3 && (
+                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
+                                                    )}
+                                                    <span className="break-words whitespace-normal">{h.text}</span>
+                                                </button>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            </div>
+                        </nav>
+                    )}
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
-                        <div className="max-w-4xl mx-auto space-y-8">
+                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${tocHeadings.length > 0 ? 'md:ml-[228px]' : ''}`}>
                             {messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -2055,9 +2196,39 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     const { quote, body } = msg.role === 'assistant' && !msg.isStreaming
                                                         ? extractQuoteSnapshot(bodyNoQuestions)
                                                         : { quote: null, body: bodyNoQuestions };
+                                                    const liveQuote = quoteCards[i];
                                                     return (
                                                         <>
-                                                            {quote && <QuoteCard quote={quote} />}
+                                                            {/* Live stock quote card from real-time data */}
+                                                            {liveQuote && (
+                                                                <div className="flex items-center gap-4 px-4 py-3 mb-4 rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white shadow-sm">
+                                                                    <div className="min-w-0">
+                                                                        <div className="flex items-baseline gap-2">
+                                                                            <span className="text-[15px] font-bold text-gray-900 tracking-tight">{liveQuote.symbol}</span>
+                                                                        </div>
+                                                                        {liveQuote.name && <p className="text-[11px] text-gray-400 mt-0.5">{liveQuote.name}</p>}
+                                                                    </div>
+                                                                    {liveQuote.price && (
+                                                                        <div className="ml-auto text-right shrink-0">
+                                                                            <p className="text-[17px] font-semibold text-gray-900 tabular-nums">{liveQuote.price}</p>
+                                                                            {liveQuote.change && (
+                                                                                <span className={`inline-block text-[11px] font-medium px-1.5 py-0.5 rounded tabular-nums ${
+                                                                                    liveQuote.change.startsWith('+') ? 'bg-emerald-50 text-emerald-600'
+                                                                                        : liveQuote.change.startsWith('-') ? 'bg-red-50 text-red-500'
+                                                                                        : 'bg-gray-50 text-gray-500'
+                                                                                }`}>{liveQuote.change}</span>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                    <div className="shrink-0 text-right border-l border-gray-200 pl-4 hidden sm:block space-y-0.5">
+                                                                        {liveQuote.volume && <p className="text-[11px] text-gray-400"><span className="text-gray-500 font-medium">{liveQuote.volume}</span> vol</p>}
+                                                                        {liveQuote.marketCap && <p className="text-[11px] text-gray-400"><span className="text-gray-500 font-medium">{liveQuote.marketCap}</span> cap</p>}
+                                                                        {liveQuote.high && liveQuote.low && <p className="text-[10px] text-gray-300">{liveQuote.low} – {liveQuote.high}</p>}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            {/* Fallback: markdown-parsed quote card */}
+                                                            {!liveQuote && quote && <QuoteCard quote={quote} />}
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
                                                                 {renderMarkdownContent(body)}
                                                             </div>
@@ -2131,7 +2302,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     if (questions.length === 0) return null;
                                                     return (
                                                         <div className="mt-3 flex flex-col gap-1.5">
-                                                            <span className="text-[10.5px] font-medium text-gray-300 tracking-wide">Related questions</span>
+                                                            <span className="text-[10.5px] font-medium text-gray-300 tracking-wide">{/[\u4e00-\u9fff]/.test(msg.content) ? '相关问题' : 'Related questions'}</span>
                                                             <div className="flex flex-col gap-1">
                                                                 {questions.map((q, qi) => (
                                                                     <button

@@ -210,7 +210,7 @@ export class LokaAIService {
   }
 
   /** Streaming chat — returns a ReadableStream for SSE */
-  async chatStream(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext): Promise<ReadableStream<Uint8Array>> {
+  async chatStream(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext, maxTokens?: number): Promise<ReadableStream<Uint8Array>> {
     if (!this.isConfigured) {
       const encoder = new TextEncoder();
       return new ReadableStream({
@@ -240,7 +240,7 @@ export class LokaAIService {
       body: JSON.stringify({
         model: this.model,
         messages: apiMessages,
-        max_tokens: 2048,
+        max_tokens: maxTokens || 2048,
         temperature: 0.5,
         stream: true,
       }),

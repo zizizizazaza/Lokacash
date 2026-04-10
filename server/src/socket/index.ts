@@ -469,7 +469,7 @@ Text: "${query}"`;
         try {
           const context = await prisma.chatMessage.findMany({ where: { userId, sessionId }, orderBy: { createdAt: 'asc' }, take: 10 });
           const mappedContext = context.map(m => ({ role: m.role, content: m.content, agentId: m.agentId }));
-          const stream = await aiService.chatStream(mappedContext, 'superagent');
+          const stream = await aiService.chatStream(mappedContext, 'superagent', undefined, 2560);
           emitter.emitModule('search', 'completed');
         
           const reader = stream.getReader();
@@ -606,9 +606,12 @@ Text: "${query}"`;
 
         promises.push(
           new Promise(resolve => {
+            // Use a derived sub-session ID to avoid replay handler returning
+            // the raw analysis buffer instead of the final synthesized content
+            const analysisSubSessionId = `${sessionId}:analysis`;
             stockAnalysisService.runStreamAnalysis(
               "Analyze: " + (plan.capabilities.analysis.tickers?.join(', ') || data.content),
-              sessionId,
+              analysisSubSessionId,
               userId,
               (step: any) => {
                 emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step });
@@ -671,6 +674,38 @@ Text: "${query}"`;
                       (analysisStages[2] as any).result = sr;
                     }
                     emitter.emitModule('analysis', 'active', { stages: analysisStages });
+                    // Forward stock quote card data to frontend
+                    console.log('[UI_METADATA] meta.quote:', JSON.stringify(meta.quote));
+                    if (meta.quote && meta.quote.symbol && meta.quote.price != null) {
+                      const q = meta.quote;
+                      const fmtVol = (v: number | null) => {
+                        if (v == null) return undefined;
+                        if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+                        if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        return String(v);
+                      };
+                      const fmtMv = (v: number | null) => {
+                        if (v == null) return undefined;
+                        if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿';
+                        if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        return String(v);
+                      };
+                      emitToUser(userId, 'agent:chat:quote', {
+                        sessionId,
+                        quote: {
+                          symbol: q.symbol,
+                          name: q.name || undefined,
+                          price: typeof q.price === 'number' ? q.price.toFixed(2) : String(q.price),
+                          change: q.change_pct != null
+                            ? (q.change_pct >= 0 ? '+' : '') + Number(q.change_pct).toFixed(2) + '%'
+                            : undefined,
+                          volume: fmtVol(q.volume),
+                          high: q.high != null ? String(q.high) : undefined,
+                          low: q.low != null ? String(q.low) : undefined,
+                          marketCap: fmtMv(q.total_mv || q.circ_mv),
+                        },
+                      });
+                    }
                   } catch(e){}
                 }
               },
@@ -733,81 +768,124 @@ Text: "${query}"`;
         }
       });
 
-      streamToChat('*Orchestrator synthesizing raw reports...*\n\n');
+      const synthesizePrompt = `You are a top-tier macro + equity research analyst with strong opinions.
 
-      const synthesizePrompt = `You are the Final Investment Synthesizer — a senior analyst who writes sharp, opinionated research reports that people actually want to read.
+Your job is NOT to summarize information.
+Your job is to form a clear, tradeable view and guide decision-making.
 
-Your job: take raw outputs from multiple specialist agents and synthesize them into ONE cohesive, insightful analysis. Write like a top-tier analyst blogger — authoritative, direct, with clear opinions backed by evidence.
+Write like a sharp internal memo or trader note — not a formal report.
 
-**Internal Analysis (do NOT output, think through first):**
-- What is the core narrative here?
-- Where do agents agree? Where do they contradict?
-- What is the real alpha signal?
-- What claim sounds right but might be wrong?
+=== INPUT ===
+Topic: ${data.content}
+Context:
+${contextString}
 
-**Writing Style:**
-- Write in an analyst blog tone — confident, clear, opinionated. Use "My take:" to give direct assessments.
-- Use narrative paragraphs, NOT bullet-point dumps. Mix in tables when comparing claims/evidence.
-- Every section title must be UNIQUE and topic-specific — never generic labels like "Key Findings" or "Deep Analysis".
-- Use **bold text** for subsections. NEVER use ### or #### headings.
+=== OUTPUT STRUCTURE ===
 
-**Report Structure (adapt section count and titles to the topic):**
+0. Title (OPTIONAL, HIGH-SIGNAL)
+- Only include a title if it helps someone decide what to do.
+- Format: use # (single hash) for the title — visually larger than ## section headings. Do NOT use ##, ###, or ####.
 
-# [A sharp, specific headline that captures the core insight — like a news article title]
+If you include a title, it MUST:
+- Reflect the core trade or decision
+- Anchor on ONE key variable (not abstract themes)
+- Be consistent with the TL;DR Bias and Action
 
-## Key Takeaways
-- 4-6 bullet points. Each one a standalone insight. No fluff.
+Good titles: highlight one key driver, challenge a specific market assumption, or define a conditional trade (e.g. "TSLA: Short Until $280 Breaks")
+Avoid: abstract phrases ("paradox", "battle", "era"), generic contrasts ("growth vs valuation"), patterns like "not X, but Y"
 
-## [Topic-Specific Section Title — e.g., "The Liquidity Squeeze Nobody's Talking About"]
-Narrative analysis. Mix data points with interpretation. Use "My take:" for your direct opinion.
-If search reports contain URLs, cite them as clickable Markdown links inline, e.g. ([Bloomberg](https://...)).
-For analysis/simulation findings, cite as [Analysis] or [Simulation].
-
-## [Another Topic-Specific Section Title — e.g., "Why the Bears Are Wrong This Time"]
-Continue the analysis. Challenge assumptions. Surface contradictions between agents.
-
-If simulation reports include multiple analyst panelists, present them in a table:
-
-| Claim | Evidence | Market Reaction | My Take |
-|-------|----------|-----------------|---------|
-| ... | ... | ... | ... |
-
-## [Risk Section with Topic-Specific Title — e.g., "Three Things That Could Blow This Up"]
-Top risks as narrative bullets with severity context. Be specific, not generic.
-
-**Bottom line:** [One paragraph — the clearest, most actionable conclusion. State Buy/Hold/Sell/Watch if applicable, with entry/exit signals.]
-
-Significance: [High / Medium / Low] · Categories: [2-3 relevant tags, e.g., "Market Structure, Macro, Sentiment"]
+If not included: start directly with TL;DR.
 
 ---
 
-**Questions to watch:**
-- [Forward-looking question that would change the thesis]
-- [Question about a data point that needs monitoring]
-- [Question about a risk that could materialize]
+1. TL;DR + Executive Snapshot (MANDATORY, no heading)
+- Do NOT output a heading. Start directly.
+- First, a compact snapshot:
+  Bias / Action / Confidence / Key Trigger (one line each)
+- Then 2-3 sentences maximum:
+  What's happening now? What is the market getting wrong? What's my unique edge?
+- If writing in Chinese, translate ALL labels to Chinese. No English mixed in.
+
+---
+
+2–7. Analysis Sections
+Write each with your OWN unique, topic-specific ## heading. These are INTERNAL guidelines only — do NOT use them as titles:
+
+a) **The Consensus & Its Flaw** — What is the market currently pricing in? Why does it sound reasonable? Then identify THE KEY INFLECTION POINT: the specific expectation where the market has a cognitive bias. Don't just say "market is wrong" — pinpoint WHERE the mispricing is and WHY.
+
+b) **The Divergent Edge** — What variable is being ignored or underweighted? This is the alpha. Be specific — not "AI demand is strong" but "Blackwell thermal supply chain bottleneck limits Q2 shipments to 450K units, not the 600K Street expects."
+
+c) **Hard Data Thresholds** — For each key driver, provide quantitative red lines in a table:
+
+| Indicator | Bull Threshold | Bear Threshold | Current | Source |
+|-----------|---------------|----------------|---------|--------|
+| Gross Margin | >75% | <72% | 73.5% | Q1 ER |
+| ... | ... | ... | ... | ... |
+
+If data is available from the raw reports, use exact numbers. If not, state the metric and why it matters without fabricating numbers.
+
+d) **Signal vs Noise** — Table format:
+
+| Noise (over-weighted) | Signal (under-weighted) |
+|----------------------|----------------------|
+| [thing + why it's noise] | [thing + why it matters] |
+
+e) **Positioning** — Concrete: entry level, stop loss, target, position sizing logic. What to do NOW vs what to wait for. If no clear trade, say "wait for [specific catalyst]."
+
+f) **Stress Test** — NOT a disclaimer. Model 2-3 scenarios with probability and price impact:
+
+| Scenario | Probability | Price Impact | Key Assumption |
+|----------|------------|-------------|----------------|
+| Bull | ~% | $X → $Y | [assumption] |
+| Base | ~% | $X → $Y | [assumption] |
+| Bear | ~% | $X → $Y | [assumption] |
+
+Identify the floor price under panic conditions. What's the worst-case downside?
+
+Within sections, use narrative paragraphs with tables where data supports it. NOT bullet-point dumps.
+
+---
+
+8. Tags (translate to user's language)
+- Importance: High / Medium / Low · Categories: 2-3 tags
+
+9. Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
+- Translate heading to user's language (e.g. "值得关注的问题：")
+- Format as **bold heading** followed by 3-5 bullet points
+- Each bullet: forward-looking question tied to a specific data point or event with a time horizon
+- CRITICAL: No text, tags, or sections may appear after this list
 
 ═══ ABSOLUTE RULES ═══
-1. DO NOT use '### ' or '#### ' heading levels — they break the frontend. Use **bold text** for subsections.
-2. Section titles MUST be unique and specific to the topic. NEVER use generic titles like "Key Findings", "Deep Analysis", "Risk & Uncertainty", "Scenario Forecast", or "Action Recommendation".
-3. Synthesize, do not concatenate. Connect findings across agents. Surface agreements, contradictions, and emergent insights.
-4. Never fabricate. Only use information present in the raw reports below.
-5. INLINE CITATIONS: Retain URLs from search reports as clickable Markdown links next to relevant facts.
-6. Mirror the user's language. If the user wrote in Chinese, respond in Chinese. If English, respond in English.
-7. Length: 600-1200 words. Depth over brevity, but no padding.
-8. End with "Questions to watch" — 3-4 forward-looking questions that would change the investment thesis.
+1. HEADING LEVELS: # for report title only. ## for all section headings. No ### or ####. Use **bold** for subsections.
+2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Key Findings", "Deep Analysis", "Risk & Uncertainty", "The Consensus & Its Flaw", "Hard Data Thresholds" etc. — these are internal labels, not output headings.
+3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
+4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
+5. INLINE CITATIONS: Retain URLs from search reports as clickable Markdown links, e.g. ([Bloomberg](https://...)).
+6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
+7. Length: 800-2000 words. Depth over brevity, but no padding. Every sentence must earn its place.
+8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
+9. REDUCE qualitative statements, INCREASE quantitative red lines. "Margins are important" is worthless. "Margin below 72% = thesis broken" is actionable.
 
-Begin directly with the headline. No meta-commentary.
+═══ STYLE RULES ═══
+- Be opinionated, not neutral. Use "My take:" for direct assessments.
+- No fluff, no textbook tone. Write like a trader thinking out loud.
+- Short, punchy paragraphs. Each section adds NEW insight (no repetition).
+- Do NOT just summarize news. Do NOT hedge excessively. Do NOT default to "it depends".
+- MUST produce clear Bias + Action. MUST include Signal vs Noise table. MUST include Positioning with levels. MUST include Stress Test scenarios.
 
-═══ RAW AGENT REPORTS ═══
-${contextString}
-═══ END OF REPORTS ═══
+═══ INTERNAL (DO NOT OUTPUT) ═══
+Before writing, internally decide:
+- A clear stance (bullish / bearish / neutral)
+- The specific variable the market is mispricing
+- Whether a title is necessary
+- The quantitative thresholds that would flip your thesis
 
-Write the final synthesis report now:
+Do NOT reveal this reasoning. Begin writing directly.
 `;
 
       try {
         console.log('[agent:chat] Starting synthesis stream, prompt length:', synthesizePrompt.length);
-        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent');
+        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, 6144);
         console.log('[agent:chat] Synthesis stream obtained, reading...');
         const synReader = synthesisStream.getReader();
         const synDecoder = new TextDecoder();
@@ -870,9 +948,8 @@ Write the final synthesis report now:
           emitter.emitModule('consensus', 'active', { status: 'building', round: 1, maxRounds: 3 });
           emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
 
-          // Strip trailing "Questions to watch" section from synthesis before sending to consensus
-          // (it will be extracted by the frontend and shown outside the answer)
-          const questionsPattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题)[^\n]*?\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
+          // Strip trailing "Questions to watch" section (must be the last section per prompt)
+          const questionsPattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,2}\s*)[^\n]*?(?:question|watch|watchlist|关注|问题)[^\n]*?\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
           const questionsMatch = synFullContent.match(questionsPattern);
           const cleanedSynthesis = questionsMatch
             ? synFullContent.slice(0, questionsMatch.index).trimEnd()
@@ -887,7 +964,7 @@ Write the final synthesis report now:
           }
 
           try {
-            streamToChat('\n\n*Sending report to Expert Council for consensus evaluation...*\n');
+            streamToChat('\n\n');
             const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${cleanedSynthesis}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
             
