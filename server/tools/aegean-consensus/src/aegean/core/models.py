@@ -325,12 +325,31 @@ class KnowledgeGraphRelation(BaseModel):
 
 class KnowledgeGraph(BaseModel):
     graph_id: str
-    consensus_id: str
-    group_id: str
+    consensus_id: Optional[str] = None
+    group_id: Optional[str] = None
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
     entities: List[KnowledgeGraphEntity] = Field(default_factory=list)
     relations: List[KnowledgeGraphRelation] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
 
+
+class AgentRelationship(BaseModel):
+    """Relationship between two agents based on discussion dynamics."""
+    source_agent_id: str = Field(..., description="Source agent ID")
+    target_agent_id: str = Field(..., description="Target agent ID")
+    influence_weight: float = Field(0.0, ge=0.0, le=1.0, description="How much source influenced target")
+    trust_score: float = Field(0.5, ge=0.0, le=1.0, description="Trust level between agents")
+    disagreement_count: int = Field(0, ge=0, description="Number of rounds they disagreed")
+    agreement_count: int = Field(0, ge=0, description="Number of rounds they agreed")
+
+class GroupGraph(BaseModel):
+    """Graph representation of agent relationships within a group."""
+    group_id: str = Field(..., description="Group identifier")
+    nodes: List[str] = Field(default_factory=list, description="Agent IDs as graph nodes")
+    edges: List[AgentRelationship] = Field(default_factory=list, description="Relationships as edges")
+    created_at: datetime = Field(default_factory=datetime.now)
 
 class GroupConsensusResult(BaseModel):
     """Extended result for group consensus/collaboration execution."""
@@ -354,4 +373,5 @@ class GroupConsensusResult(BaseModel):
     usage: TokenUsage = Field(default_factory=TokenUsage)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     knowledge_graph: Optional[KnowledgeGraph] = None
-    agent_graph: Optional[Dict[str, Any]] = None
+    agent_graph: Optional[GroupGraph] = None
+

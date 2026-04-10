@@ -19,6 +19,7 @@ from aegean.core.models import (
     GroupConsensusResult,
     CollaborationMode,
 )
+from aegean.core.agent import AgentRegistry
 from aegean.services.group_chat_service import GroupChatService
 
 

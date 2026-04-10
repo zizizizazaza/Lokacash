@@ -4,6 +4,7 @@ pydantic-settings>=2.0.0
 
 # AutoGen Framework
 pyautogen>=0.2.0
+openai>=1.0.0
 
 # Web Framework
 fastapi>=0.104.0

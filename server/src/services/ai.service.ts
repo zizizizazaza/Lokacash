@@ -1,5 +1,17 @@
 import { config } from '../config.js';
 
+export function getGlobalTimeContext(): string {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+    weekday: 'long',
+    hour: '2-digit', minute: '2-digit',
+    timeZoneName: 'short'
+  });
+  const formattedTime = formatter.format(now);
+  return `\n\n<SYSTEM_OVERRIDE_REALITY_ANCHOR>\n[VERIFIED_SYSTEM_CLOCK]: ${formattedTime}\n\nATTENTION: The above is the absolute, system-injected true present time. You are strictly prohibited from adopting any historical timeline (e.g., 2024 or 2025) as the current context.\nWhen analyzing predictions, odds, or market data for future events (e.g., the 2028 US Election, future interest rate cuts), you MUST evaluate them from the vantage point of the specific [VERIFIED_SYSTEM_CLOCK] above. Treat anything prior to this exact timestamp as immutable history. Do not use past years in titles or summaries as if they are the present.\n</SYSTEM_OVERRIDE_REALITY_ANCHOR>\n\n`;
+}
+
 export interface ChatMessage {
   role: string;
   content: string;
@@ -128,11 +140,13 @@ export interface AssetContext {
 }
 
 function buildSystemPrompt(assetContext?: AssetContext): string {
+  const basePrompt = getGlobalTimeContext() + LOKA_SYSTEM_PROMPT;
+  
   if (!assetContext) {
-    return LOKA_SYSTEM_PROMPT + `\n\n## Current Context\nNo specific asset is selected. Give a general welcome that covers ALL platform capabilities — cash flow investments (primary focus, mention 2-3 top projects with APY) and AIUSD stablecoin. Lead with cash flow assets as the highlight, then briefly mention AIUSD. Also let the user know they can select any cash flow asset (using the @ button) for in-depth analysis — you can provide detailed risk/return profiles, yield comparisons, and investment guidance for any specific project. Keep it concise and natural.`;
+    return basePrompt + `\n\n## Current Context\nNo specific asset is selected. Give a general welcome that covers ALL platform capabilities — cash flow investments (primary focus, mention 2-3 top projects with APY) and AIUSD stablecoin. Lead with cash flow assets as the highlight, then briefly mention AIUSD. Also let the user know they can select any cash flow asset (using the @ button) for in-depth analysis — you can provide detailed risk/return profiles, yield comparisons, and investment guidance for any specific project. Keep it concise and natural.`;
   }
 
-  return LOKA_SYSTEM_PROMPT + `\n\n## Current Context - SELECTED ASSET\nThe user is currently viewing: "${assetContext.name}"\n- Category: ${assetContext.category || 'N/A'}\n- APY: ${assetContext.apy || 'N/A'}\n- Term: ${assetContext.term || 'N/A'}\n- Funding Progress: ${assetContext.progress ?? 'N/A'}%\n- Backers: ${assetContext.backers ?? 'N/A'}\n- Description: ${assetContext.description || 'N/A'}\n\nFocus ENTIRELY on THIS specific asset. Do NOT mention other platform features (AIUSD minting, other projects). Only discuss this asset's risk/return profile, investment potential, and how to invest in it. If the user asks about other things, answer briefly then guide back to this asset.`;
+  return basePrompt + `\n\n## Current Context - SELECTED ASSET\nThe user is currently viewing: "${assetContext.name}"\n- Category: ${assetContext.category || 'N/A'}\n- APY: ${assetContext.apy || 'N/A'}\n- Term: ${assetContext.term || 'N/A'}\n- Funding Progress: ${assetContext.progress ?? 'N/A'}%\n- Backers: ${assetContext.backers ?? 'N/A'}\n- Description: ${assetContext.description || 'N/A'}\n\nFocus ENTIRELY on THIS specific asset. Do NOT mention other platform features (AIUSD minting, other projects). Only discuss this asset's risk/return profile, investment potential, and how to invest in it. If the user asks about other things, answer briefly then guide back to this asset.`;
 }
 
 
@@ -270,7 +284,7 @@ export class LokaAIService {
       };
     }
 
-    const routerPrompt = `You are the Coordinator for a Super Agent. Your job is to analyze the user's query and decide which underlying specialist agents must be triggered in parallel. 
+    const routerPrompt = getGlobalTimeContext() + `You are the Coordinator for a Super Agent. Your job is to analyze the user's query and decide which underlying specialist agents must be triggered in parallel. 
 Output JSON only, no markdown.
 
 JSON SCHEMA:
