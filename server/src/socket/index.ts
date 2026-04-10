@@ -456,13 +456,42 @@ Text: "${query}"`;
         } catch (dbErr) {}
       }
 
+      // ── Query session history for multi-turn context ──
+      const MAX_HISTORY_FOR_ROUTING = 6;
+      const MAX_HISTORY_FOR_SYNTHESIS = 8;
+      const ASSISTANT_CONTENT_CAP = 300;
+
+      const sessionHistory = await prisma.chatMessage.findMany({
+        where: { userId, sessionId },
+        orderBy: { createdAt: 'asc' },
+        take: MAX_HISTORY_FOR_SYNTHESIS,
+        select: { role: true, content: true },
+      });
+
+      const formatHistory = (messages: { role: string; content: string }[], limit: number): string => {
+        return messages
+          .slice(-limit)
+          .map(m => {
+            const label = m.role === 'user' ? 'User' : 'Assistant';
+            const text = m.role === 'assistant' && m.content.length > ASSISTANT_CONTENT_CAP
+              ? m.content.slice(0, ASSISTANT_CONTENT_CAP) + '...(truncated)'
+              : m.content;
+            return `[${label}]: ${text}`;
+          })
+          .join('\n');
+      };
+
       activeChatSessions.set(sessionId, 'running');
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
 
       let plan: any;
       try {
-        plan = await aiService.evaluateRouting(data.content);
+        const routingHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_ROUTING);
+        const routingQuery = routingHistory
+          ? `【Conversation Context】\n${routingHistory}\n\n【Latest User Message】\n${data.content}`
+          : data.content;
+        plan = await aiService.evaluateRouting(routingQuery);
       } catch (routingErr: any) {
         console.error('evaluateRouting failed:', routingErr.message);
         plan = { isSimpleChat: true, capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
@@ -727,7 +756,12 @@ Text: "${query}"`;
         return;
       }
       console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
-      let contextString = "【User Original Request】\n" + data.content + "\n\n";
+      const synthHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_SYNTHESIS);
+      let contextString = "";
+      if (synthHistory) {
+        contextString += "【CONVERSATION HISTORY — for continuity, do NOT repeat old findings】\n" + synthHistory + "\n\n";
+      }
+      contextString += "【User Original Request】\n" + data.content + "\n\n";
       results.forEach(r => {
         if (r.status === 'fulfilled') {
           contextString += `【${r.value.type} REPORT】\n${r.value.data}\n\n`;
@@ -796,6 +830,7 @@ Significance: [High / Medium / Low] · Categories: [2-3 relevant tags, e.g., "Ma
 6. Mirror the user's language. If the user wrote in Chinese, respond in Chinese. If English, respond in English.
 7. Length: 600-1200 words. Depth over brevity, but no padding.
 8. End with "Questions to watch" — 3-4 forward-looking questions that would change the investment thesis.
+9. If conversation history is present, write as a CONTINUATION. Do NOT repeat facts already covered in previous turns. Reference prior analysis naturally (e.g., "Following up on the Shenzhen analysis, Hong Kong shows...").
 
 Begin directly with the headline. No meta-commentary.
 

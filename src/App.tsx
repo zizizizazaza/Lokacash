@@ -131,6 +131,13 @@ const App: React.FC = () => {
     return () => window.removeEventListener('loka-profile-updated', handler);
   }, []);
 
+  // Listen for global auth modal triggers
+  useEffect(() => {
+    const handler = () => setShowAuthModal(true);
+    window.addEventListener('show-auth-modal', handler);
+    return () => window.removeEventListener('show-auth-modal', handler);
+  }, []);
+
   const userName = profileData?.name || user?.google?.name || user?.twitter?.username || user?.email?.address?.split('@')[0] || 'User';
   const userInitial = userName.charAt(0).toUpperCase();
   const userAvatar = profileData?.avatar || null;
