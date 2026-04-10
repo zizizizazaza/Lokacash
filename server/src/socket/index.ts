@@ -33,6 +33,8 @@ const activeStockAnalysisSessions = new Set<string>();
 const activeChatSessions = new Map<string, string>();
 /** Abort controllers keyed by sessionId — used to cancel a previous agent:chat run when a new one arrives */
 const chatAbortControllers = new Map<string, AbortController>();
+/** Dedup map keyed by sessionId::content — prevents duplicate messages from queue flush + direct emit race */
+const chatDedupMap = new Map<string, number>();
 
 export function setupSocket(server: HttpServer) {
   io = new Server(server, {
@@ -430,6 +432,22 @@ Text: "${query}"`;
       if (!data?.content) return;
 
       const sessionId = data.sessionId || crypto.randomUUID();
+
+      // ── Dedup guard: skip identical content for the same session within 3s ──
+      const dedupKey = `${sessionId}::${data.content}`;
+      const now = Date.now();
+      const lastSeen = (chatDedupMap as Map<string, number>).get(dedupKey);
+      if (lastSeen && now - lastSeen < 3000) {
+        console.log(`[agent:chat] Dedup: skipping duplicate message for session ${sessionId}`);
+        return;
+      }
+      (chatDedupMap as Map<string, number>).set(dedupKey, now);
+      // Prune old entries periodically
+      if ((chatDedupMap as Map<string, number>).size > 100) {
+        for (const [k, v] of (chatDedupMap as Map<string, number>)) {
+          if (now - v > 10000) (chatDedupMap as Map<string, number>).delete(k);
+        }
+      }
 
       // ── Cancel any previous in-flight run for the same session ──
       const prevAbort = chatAbortControllers.get(sessionId);
