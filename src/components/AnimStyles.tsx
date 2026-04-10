@@ -138,6 +138,14 @@ const AnimStyles = () => (
     .usecase-card { border-left: 2px solid transparent; }
     .usecase-card:hover { border-left-color: var(--accent); }
 
+    /* ── Roundtable orbit animations (shared by waiting + active states) ── */
+    @keyframes rt-orbit { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes rt-counter-orbit { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+    @keyframes rt-pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+    .rt-orbit { animation: rt-orbit 12s linear infinite; }
+    .rt-counter-orbit { animation: rt-counter-orbit 12s linear infinite; }
+    .rt-pulse-dot { animation: rt-pulse 1s ease-in-out infinite; }
+
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {

@@ -151,7 +151,24 @@ def progress_callback(event: dict):
                         "PE": parsed.get("pe_ratio"),
                         "Turnover": parsed.get("turnover_rate"),
                         "PB": parsed.get("pb_ratio")
-                    }, "source": parsed.get("source")}
+                    }, "source": parsed.get("source"),
+                    "quote": {
+                        "symbol": parsed.get("code"),
+                        "name": parsed.get("name"),
+                        "price": parsed.get("price"),
+                        "change_pct": parsed.get("change_pct"),
+                        "volume": parsed.get("volume"),
+                        "amount": parsed.get("amount"),
+                        "high": parsed.get("high"),
+                        "low": parsed.get("low"),
+                        "open": parsed.get("open"),
+                        "prev_close": parsed.get("prev_close"),
+                        "total_mv": parsed.get("total_mv"),
+                        "circ_mv": parsed.get("circ_mv"),
+                        "pe": parsed.get("pe_ratio"),
+                        "pb": parsed.get("pb_ratio"),
+                        "turnover": parsed.get("turnover_rate"),
+                    }}
                 elif tool_name == "get_daily_history":
                     metadata = {"source": parsed.get("source")}
                 elif tool_name == "analyze_trend":

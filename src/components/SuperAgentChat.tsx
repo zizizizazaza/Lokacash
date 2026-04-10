@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 
@@ -250,6 +250,7 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
     const rounds: ConsensusRound[] = [];
 
     if (discussionRounds.length > 0) {
+        let prevFingerprint = '';
         for (const dr of discussionRounds) {
             const roundNum: number = dr.round_number ?? (rounds.length + 1);
             const agentMap: Record<string, any> = dr.agent_responses || {};
@@ -270,17 +271,34 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
                 }
             }
 
-            const status: string = dr.consensus_status || 'forming';
+            // Deduplicate: skip rounds whose agent content is identical to previous
+            const fingerprint = agents.map(a => a.reasoning).join('|||');
+            if (fingerprint === prevFingerprint && rounds.length > 0) {
+                rounds[rounds.length - 1].status = 'reached';
+                rounds[rounds.length - 1].summary = `${agents.length} experts reached consensus.`;
+                continue;
+            }
+            prevFingerprint = fingerprint;
+
+            // Infer status: API rarely includes consensus_status per round,
+            // so derive it from the top-level consensusReached + round position.
+            // Non-last rounds didn't reach consensus (otherwise there'd be no next round).
+            // Last round inherits the top-level result.
+            const isLastRound = dr === discussionRounds[discussionRounds.length - 1];
+            const status: 'forming' | 'reached' | 'diverging' =
+                dr.consensus_status === 'reached' || dr.consensus_status === 'diverging'
+                    ? dr.consensus_status
+                    : isLastRound
+                        ? (consensusReached ? 'reached' : 'diverging')
+                        : 'diverging'; // earlier rounds: no consensus → proceeded to next round
 
             rounds.push({
                 round: roundNum,
                 agents,
-                status: status as 'forming' | 'reached' | 'diverging',
+                status,
                 summary: status === 'reached'
                     ? `${agents.length} experts reached consensus.`
-                    : status === 'diverging'
-                        ? `Experts’ opinions are diverging.`
-                        : `${agents.length} experts forming consensus...`,
+                    : `No consensus — proceeded to next round.`,
             });
         }
     } else {
@@ -322,8 +340,8 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
 };
 
 // ─── RoundtableView Component ──────────────────────────
-const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
-    // Empty state: show the roundtable graphic with agents but no rounds
+const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean }> = ({ data, isWaiting, isLive }) => {
+    // Empty / waiting state: show the roundtable graphic with agents but no rounds
     if (data.rounds.length === 0) {
         const emptyAgents = ROUNDTABLE_AGENTS;
         const E_SIZE = 220, E_CTR = E_SIZE / 2, E_R = 72, E_AV = 38, E_HALF = E_AV / 2;
@@ -338,7 +356,6 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                     <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
                 </div>
                 <div className="flex-1 flex flex-col items-center justify-center px-5">
-                    {/* Static roundtable graphic */}
                     <div className="relative" style={{ width: E_SIZE, height: E_SIZE + 24 }}>
                         <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE }} viewBox={`0 0 ${E_SIZE} ${E_SIZE}`}>
                             <circle cx={E_CTR} cy={E_CTR} r={E_R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
@@ -347,31 +364,67 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                                 <line key={i} x1={E_CTR} y1={E_CTR} x2={p.x} y2={p.y} stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
                             ))}
                         </svg>
-                        {/* Center idle indicator */}
+                        {/* Center indicator */}
                         <div className="absolute flex items-center justify-center" style={{ left: E_CTR - 26, top: E_CTR - 26, width: 52, height: 52 }}>
-                            <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
-                                <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
-                            </div>
-                        </div>
-                        {/* Agent avatars */}
-                        {emptyAgents.map((agent, i) => {
-                            const pos = emptyPositions[i];
-                            const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                            return (
-                                <div key={agent.initials} className="absolute flex flex-col items-center"
-                                    style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
-                                    <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
-                                        style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
-                                        {AGENT_ICON(agent.initials)}
+                            {isWaiting ? (
+                                <div className="w-[52px] h-[52px] rounded-full bg-blue-50/80 border-2 border-blue-200 flex flex-col items-center justify-center">
+                                    <div className="flex gap-[3px] mb-1">
+                                        {[0, 1, 2].map(d => (
+                                            <div key={d} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${d * 0.2}s` }} />
+                                        ))}
                                     </div>
-                                    <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                        {agent.name}
-                                    </span>
+                                    <span className="text-[8px] text-blue-400 font-bold">PREP</span>
                                 </div>
-                            );
-                        })}
+                            ) : (
+                                <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
+                                    <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
+                                </div>
+                            )}
+                        </div>
+                        {/* Agent avatars — orbit when waiting */}
+                        {isWaiting ? (
+                            <div className="absolute rt-orbit" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE + 24, transformOrigin: `${E_CTR}px ${E_CTR}px` }}>
+                                {emptyAgents.map((agent, i) => {
+                                    const pos = emptyPositions[i];
+                                    const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                                    return (
+                                        <div key={agent.initials} className="absolute flex flex-col items-center rt-counter-orbit"
+                                            style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV, transformOrigin: `${E_HALF}px ${E_HALF}px` }}>
+                                            <div className="rounded-full flex items-center justify-center text-white shadow-sm ring-2 ring-blue-200/40 ring-offset-1"
+                                                style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.8 }}>
+                                                {AGENT_ICON(agent.initials)}
+                                            </div>
+                                            <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                                {agent.name}
+                                            </span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            emptyAgents.map((agent, i) => {
+                                const pos = emptyPositions[i];
+                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                                return (
+                                    <div key={agent.initials} className="absolute flex flex-col items-center"
+                                        style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
+                                        <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
+                                            style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
+                                            {AGENT_ICON(agent.initials)}
+                                        </div>
+                                        <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                            {agent.name}
+                                        </span>
+                                    </div>
+                                );
+                            })
+                        )}
                     </div>
-                    <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
+                    {isWaiting ? (
+                        <p className="text-[12px] font-medium text-blue-500 mt-4">Analyzing & gathering data...</p>
+                    ) : (
+                        <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
+                    )}
                 </div>
             </div>
         );
@@ -388,6 +441,13 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
     const [visibleVotes, setVisibleVotes] = useState(0);
 
     useEffect(() => {
+        // If not live (viewing past result), jump straight to final state — no animation
+        if (!isLive && totalRounds > 0) {
+            setPlayRoundIdx(totalRounds - 1);
+            setPlayPhase('consensus');
+            setVisibleVotes(graphAgents.length);
+            return;
+        }
         const timers: ReturnType<typeof setTimeout>[] = [];
         let t = 0;
         for (let r = 0; r < totalRounds; r++) {
@@ -404,7 +464,7 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
         }
         timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(graphAgents.length); }, t));
         return () => timers.forEach(clearTimeout);
-    }, [totalRounds]);
+    }, [totalRounds, isLive]);
 
     const isSpinning = playPhase === 'discussing';
     const isConsensusReached = playPhase === 'consensus';
@@ -543,8 +603,8 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                 {data.rounds.map((round) => {
                     const isExpanded = expandedRound === round.round;
                     const isReached = round.status === 'reached';
-                    const statusLabel = isReached ? '✓ Consensus' : round.status === 'diverging' ? '✗ Diverging' : '⟳ Forming';
-                    const statusCls = isReached ? 'bg-emerald-50 text-emerald-600' : round.status === 'diverging' ? 'bg-red-50 text-red-500' : 'bg-amber-50 text-amber-600';
+                    const statusLabel = isReached ? '✓ Consensus' : '→ Next Round';
+                    const statusCls = isReached ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500';
                     return (
                         <div key={round.round} className="relative">
                             {round.round < data.rounds.length && (
@@ -1222,6 +1282,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
+    const tocNavRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
     const restoredFromPendingRef = useRef(
@@ -1355,10 +1416,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
-        // Single flexible regex: optional ---, then a bold/heading title containing
-        // question/watch/关注/问题 keywords, then a bullet list, anchored at end of content.
-        // Covers: **Questions to watch:**, ## Follow-up Questions, **关注问题：**, etc.
-        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
+        // Match a bold/heading title containing question/watch/关注/问题 keywords,
+        // then a bullet list. Allow optional trailing tags/text after the bullet list.
+        // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑|思考)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)/i;
         const match = content.match(pattern);
         if (match) {
             const questions = match[1].split('\n')
@@ -1367,6 +1428,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
                 .filter(Boolean);
             if (questions.length > 0) {
+                // Strip everything from the questions heading onwards
                 return { body: content.slice(0, match.index).trimEnd(), questions };
             }
         }
@@ -1407,10 +1469,104 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const currentThinking = activeGraphMsgIdx !== null ? thinkingProcesses[activeGraphMsgIdx] : null;
     // Show real roundtable data from consensus_done event, otherwise empty
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
-    const currentConsensus = activeGraphMsgIdx !== null ? consensusResults[activeGraphMsgIdx] : null;
+    // Stock quote cards keyed by message index
+    const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
+    const currentConsensus = (() => {
+        // First try the active message's consensus
+        if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
+            return consensusResults[activeGraphMsgIdx];
+        }
+        // Fallback: show the most recent consensus so the graph isn't empty
+        const keys = Object.keys(consensusResults).map(Number).sort((a, b) => b - a);
+        return keys.length > 0 ? consensusResults[keys[0]] : null;
+    })();
     const currentRoundtableData: RoundtableData = currentConsensus
         ? buildRoundtableFromConsensus(currentConsensus)
         : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
+
+
+    // TOC: precompute headings for every completed assistant message
+    const allTocHeadings = useMemo(() => {
+        const map: Record<number, { level: number; text: string; id: string }[]> = {};
+        for (let j = 0; j < messages.length; j++) {
+            const m = messages[j];
+            if (m.role === 'assistant' && m.content && !m.isStreaming && m.content !== '__cancelled__') {
+                const cleaned = stripInternalResearchCitations(m.content);
+                const { body: noQuote } = extractQuoteSnapshot(cleaned);
+                const h = extractHeadings(noQuote, j);
+                if (h.length >= 2) map[j] = h;
+            }
+        }
+        return map;
+    }, [messages]);
+    const [visibleTocIdx, setVisibleTocIdx] = useState<number>(-1);
+    const tocHeadings = visibleTocIdx >= 0 ? (allTocHeadings[visibleTocIdx] || []) : (() => {
+        // Default to last assistant message with headings
+        const keys = Object.keys(allTocHeadings).map(Number);
+        return keys.length > 0 ? allTocHeadings[keys[keys.length - 1]] : [];
+    })();
+    const [activeTocId, setActiveTocId] = useState<string>('');
+
+    // Scroll-spy: track which heading is currently in view + TOC position + which message's TOC to show
+    const [tocTopPx, setTocTopPx] = useState(0);
+    useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        const tocIndices = Object.keys(allTocHeadings).map(Number);
+        if (tocIndices.length === 0) return;
+
+        const onScroll = () => {
+            const containerRect = container.getBoundingClientRect();
+
+            // Determine which assistant message's TOC to show:
+            // Use the LAST message whose first heading has scrolled into or above the viewport top.
+            // This way, a message's TOC only appears once you've scrolled to its title.
+            let bestIdx = tocIndices[0];
+            for (const idx of tocIndices) {
+                const heads = allTocHeadings[idx];
+                if (!heads || heads.length === 0) continue;
+                const firstEl = document.getElementById(heads[0].id);
+                if (firstEl) {
+                    const top = firstEl.getBoundingClientRect().top - containerRect.top;
+                    if (top <= 80) bestIdx = idx;
+                }
+            }
+            setVisibleTocIdx(bestIdx);
+
+            const heads = allTocHeadings[bestIdx] || [];
+            const ids = heads.map(h => h.id);
+
+            // Active heading within the visible message
+            let current = ids[0] || '';
+            for (const id of ids) {
+                const el = document.getElementById(id);
+                if (el) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top - containerRect.top <= 80) current = id;
+                }
+            }
+            setActiveTocId(current);
+
+            // Float position – clamp between the answer's h1 title and its action-bar
+            const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
+            if (firstEl) {
+                const floatTop = Math.max(8, firstEl.offsetTop - container.scrollTop);
+
+                // Bottom boundary: when TOC would overlap the action bar, let it scroll away with content
+                const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
+                const tocH = tocNavRef.current?.offsetHeight || 0;
+                if (actionsEl && tocH > 0) {
+                    const pinnedTop = actionsEl.offsetTop - container.scrollTop - tocH - 16;
+                    setTocTopPx(Math.min(floatTop, pinnedTop));
+                } else {
+                    setTocTopPx(floatTop);
+                }
+            }
+        };
+        container.addEventListener('scroll', onScroll, { passive: true });
+        onScroll();
+        return () => container.removeEventListener('scroll', onScroll);
+    }, [allTocHeadings]);
 
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
@@ -1640,6 +1796,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setConsensusResults(prev => ({ ...prev, [msgIdx]: data.result }));
         };
 
+        const onQuote = (data: { sessionId: string; quote: any }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
+        };
+
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
         socket.on('agent:chat:started', onStarted);
@@ -1651,6 +1814,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:tool_trace', onToolTrace);
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
+        socket.on('agent:chat:quote', onQuote);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -1664,6 +1828,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:tool_trace', onToolTrace);
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
+            socket.off('agent:chat:quote', onQuote);
         };
     }, [sessionId]);
 
@@ -1708,6 +1873,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             setMessages(prev => {
                                 const c = [...prev];
                                 if (c[msgIdx]) {
+                                    // Don't overwrite substantial existing content (e.g. synthesis)
+                                    // with a replay report (e.g. raw analysis sub-report)
+                                    const existing = (c[msgIdx].content || '').trim();
+                                    if (existing.length > 200) return prev;
                                     c[msgIdx] = {
                                         ...c[msgIdx],
                                         content: res.report,
@@ -1727,6 +1896,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         setMessages(prev => {
                             const c = [...prev];
                             if (c[msgIdx]) {
+                                // Don't overwrite substantial existing content with replay report
+                                const existing = (c[msgIdx].content || '').trim();
+                                if (existing.length > 200) return prev;
                                 c[msgIdx] = {
                                     ...c[msgIdx],
                                     content: res.report!,
@@ -1853,7 +2025,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
 
         setActiveGraphMsgIdx(msgIdx);
-        setShowGraphPanel(false);
+        // Keep graph panel open in roundtable mode so user sees the waiting state
+        if (chatMode !== 'roundtable') setShowGraphPanel(false);
 
         setThinkingProcesses(prev => ({
             ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
@@ -2012,7 +2185,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Header: chat title + graph toggle ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <button
+                <div className="flex items-center gap-1.5">
+                    <button
                     onClick={() => {
                         setShowGraphPanel(p => {
                             if (!p && activeGraphMsgIdx === null) {
@@ -2033,14 +2207,62 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </svg>
                     Roundtable Graph
                 </button>
+                </div>
             </div>
 
             {/* ══ Content Row ══ */}
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
+                    {/* TOC floating panel */}
+                    {tocHeadings.length > 0 && (
+                        <nav
+                            ref={tocNavRef}
+                            className="absolute left-3 z-30 hidden md:block transition-all duration-150"
+                            style={{ top: tocTopPx }}
+                        >
+                            <div className="w-[220px] bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
+                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide">Sections</p>
+                                <ul className="space-y-0.5">
+                                    {tocHeadings.filter(h => h.level >= 2).map((h, idx) => {
+                                        const isActive = activeTocId === h.id;
+                                        const sectionNum = h.level === 2
+                                            ? tocHeadings.filter(x => x.level === 2).indexOf(h) + 1
+                                            : null;
+                                        return (
+                                            <li key={idx}>
+                                                <button
+                                                    onClick={() => {
+                                                        const el = document.getElementById(h.id);
+                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                    }}
+                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
+                                                        isActive
+                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
+                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
+                                                >
+                                                    {sectionNum !== null && (
+                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
+                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
+                                                        }`}>
+                                                            {sectionNum}
+                                                        </span>
+                                                    )}
+                                                    {h.level >= 3 && (
+                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
+                                                    )}
+                                                    <span className="break-words whitespace-normal">{h.text}</span>
+                                                </button>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            </div>
+                        </nav>
+                    )}
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
-                        <div className="max-w-4xl mx-auto space-y-8">
+                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${tocHeadings.length > 0 ? 'md:ml-[228px]' : ''}`}>
                             {messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -2064,6 +2286,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         }}
                                                     />
                                                 )}
+                                                {/* Clickable badge to view past roundtable consensus */}
+                                                {consensusResults[i] && !msg.isStreaming && (
+                                                    <button
+                                                        onClick={() => { setActiveGraphMsgIdx(i); setShowGraphPanel(true); setShowThinkingPanel(false); }}
+                                                        className="inline-flex items-center gap-1.5 mb-2 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
+                                                    >
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                                                        Roundtable
+                                                    </button>
+                                                )}
                                                 {msg.content === '__cancelled__' ? (() => {
                                                     const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
                                                     const isChinese = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
@@ -2076,17 +2308,99 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     const { quote, body } = msg.role === 'assistant' && !msg.isStreaming
                                                         ? extractQuoteSnapshot(bodyNoQuestions)
                                                         : { quote: null, body: bodyNoQuestions };
+                                                    const liveQuote = quoteCards[i];
                                                     return (
                                                         <>
-                                                            {quote && <QuoteCard quote={quote} />}
+                                                            {/* Live stock quote card from real-time data */}
+                                                            {liveQuote && (() => {
+                                                                const isUp = liveQuote.change?.startsWith('+');
+                                                                const isDown = liveQuote.change?.startsWith('-');
+                                                                const chgColor = isUp ? 'text-emerald-600' : isDown ? 'text-red-500' : 'text-gray-500';
+                                                                const chgBg = isUp
+                                                                    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20'
+                                                                    : isDown
+                                                                    ? 'bg-red-500/8 ring-1 ring-red-500/20'
+                                                                    : 'bg-gray-100 ring-1 ring-gray-200/60';
+                                                                const cardBg = isUp
+                                                                    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
+                                                                    : isDown
+                                                                    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
+                                                                    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
+                                                                const mktStyles: Record<string, string> = {
+                                                                    '美股': 'bg-blue-500/10 text-blue-600', '港股': 'bg-amber-500/10 text-amber-600', 'A股': 'bg-red-500/10 text-red-600',
+                                                                    'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
+                                                                };
+                                                                const mktCls = liveQuote.market ? (mktStyles[liveQuote.market] || 'bg-gray-100 text-gray-500') : '';
+                                                                const lang = liveQuote.lang || 'zh';
+                                                                const L = lang === 'en'
+                                                                    ? { open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low', volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap', pe: 'PE', pb: 'PB', turnover: 'Turnover' }
+                                                                    : { open: '开盘', prevClose: '昨收', high: '最高', low: '最低', volume: '成交量', amount: '成交额', marketCap: '市值', pe: 'PE', pb: 'PB', turnover: '换手率' };
+                                                                const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
+                                                                const stats: { label: string; value: string }[] = [];
+                                                                if (ok(liveQuote.open)) stats.push({ label: L.open, value: liveQuote.open! });
+                                                                if (ok(liveQuote.prevClose)) stats.push({ label: L.prevClose, value: liveQuote.prevClose! });
+                                                                if (ok(liveQuote.high)) stats.push({ label: L.high, value: liveQuote.high! });
+                                                                if (ok(liveQuote.low)) stats.push({ label: L.low, value: liveQuote.low! });
+                                                                if (ok(liveQuote.volume)) stats.push({ label: L.volume, value: liveQuote.volume! });
+                                                                if (ok(liveQuote.amount)) stats.push({ label: L.amount, value: liveQuote.amount! });
+                                                                if (ok(liveQuote.marketCap)) stats.push({ label: L.marketCap, value: liveQuote.marketCap! });
+                                                                if (ok(liveQuote.pe)) stats.push({ label: L.pe, value: liveQuote.pe! });
+                                                                if (ok(liveQuote.pb)) stats.push({ label: L.pb, value: liveQuote.pb! });
+                                                                if (ok(liveQuote.turnover)) stats.push({ label: L.turnover, value: liveQuote.turnover! });
+                                                                return (
+                                                                    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
+                                                                        {/* Header */}
+                                                                        <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
+                                                                            <div className="min-w-0">
+                                                                                <div className="flex items-center gap-2.5">
+                                                                                    <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{liveQuote.symbol}</span>
+                                                                                    {liveQuote.market && <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase`}>{liveQuote.market}</span>}
+                                                                                </div>
+                                                                                {liveQuote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide">{liveQuote.name}</p>}
+                                                                            </div>
+                                                                            {liveQuote.price && (
+                                                                                <div className="text-right shrink-0 flex flex-col items-end">
+                                                                                    <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{liveQuote.price}</p>
+                                                                                    {liveQuote.change && (
+                                                                                        <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${chgBg} ${chgColor} tabular-nums`}>
+                                                                                            {isUp && <span className="mr-0.5">▲</span>}
+                                                                                            {isDown && <span className="mr-0.5">▼</span>}
+                                                                                            {liveQuote.change}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                        {/* Divider */}
+                                                                        {stats.length > 0 && (
+                                                                            <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
+                                                                        )}
+                                                                        {/* Stats grid */}
+                                                                        {stats.length > 0 && (
+                                                                            <div className="px-5 py-3.5">
+                                                                                <div className="grid grid-cols-5 gap-x-4 gap-y-3">
+                                                                                    {stats.map((s) => (
+                                                                                        <div key={s.label} className="min-w-0">
+                                                                                            <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
+                                                                                            <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })()}
+                                                            {/* Fallback: markdown-parsed quote card */}
+                                                            {!liveQuote && quote && <QuoteCard quote={quote} />}
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                                {renderMarkdownContent(body)}
+                                                                {renderMarkdownContent(body, i)}
                                                             </div>
                                                         </>
                                                     );
                                                 })() : null}
                                                 {!msg.isStreaming && msg.content && (
-                                                    <div className="flex items-center gap-0.5 mt-3">
+                                                    <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
                                                         {msg.content !== '__cancelled__' && (
                                                             <button
@@ -2150,7 +2464,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     if (questions.length === 0) return null;
                                                     return (
                                                         <div className="mt-3 flex flex-col gap-1.5">
-                                                            <span className="text-[10.5px] font-medium text-gray-300 tracking-wide">Related questions</span>
+                                                            <span className="text-[10.5px] font-medium text-gray-300 tracking-wide">{/[\u4e00-\u9fff]/.test(msg.content) ? '相关问题' : 'Related questions'}</span>
                                                             <div className="flex flex-col gap-1">
                                                                 {questions.map((q, qi) => (
                                                                     <button
@@ -2364,7 +2678,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
-                        <RoundtableView data={currentRoundtableData} />
+                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && chatMode === 'roundtable'} />
                     </div>
                 )}
             </div>
