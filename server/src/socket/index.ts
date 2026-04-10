@@ -6,7 +6,6 @@ import prisma from '../db.js';
 import { researchService } from '../services/research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
-import { runInvestmentAnalysis, fetchMarketData, formatForAegean, callAegeanInvestment, transformAegeanResponse } from '../services/investment.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
 import {
   formatConsensusAgentLabel,
@@ -317,57 +316,39 @@ Text: "${query}"`;
         console.error('Failed to save stockanalysis user message:', dbErr);
       }
 
-      // ── Aegean Investment Pipeline ──
-      // Extract stock code from tickers or raw query
-      const stockCode = (data.tickers?.[0] || rawQuery).trim();
-
-      try {
-        const result = await runInvestmentAnalysis(
-          stockCode,
-          userId,
-          (data as any).mode || 'auto',
-          (stage, detail) => {
-            emitToUser(userId, 'agent:stockanalysis:step', {
-              sessionId,
-              type: 'tool_start',
-              tool: stage,
-              displayName: stage.replace(/_/g, ' '),
-              ...detail,
-              ts: Date.now(),
+      // Use the new stream-based analysis (structured JSONL events)
+      stockAnalysisService.runStreamAnalysis(
+        rawQuery,
+        sessionId,
+        userId,
+        // onStep: forward structured step events
+        (step) => {
+          emitToUser(userId, 'agent:stockanalysis:step', { sessionId, ...step });
+        },
+        // onDone: save report + notify
+        async (report: string) => {
+          try {
+            await prisma.chatMessage.create({
+              data: {
+                userId,
+                sessionId,
+                role: 'assistant',
+                content: report,
+                agentId: 'stockanalysis'
+              }
             });
-          },
-        );
-
-        const report = result.reportMarkdown || result.summary.thesis || 'Analysis completed.';
-
-        try {
-          await prisma.chatMessage.create({
-            data: {
-              userId,
-              sessionId,
-              role: 'assistant',
-              content: report,
-              agentId: 'stockanalysis',
-              metadata: JSON.stringify({
-                aegean: {
-                  requestId: result.requestId,
-                  action: result.recommendation.action,
-                  confidence: result.recommendation.confidence,
-                  riskGate: result.riskGate,
-                  consensus: result.consensus,
-                },
-              }),
-            }
-          });
-        } catch (dbErr) {
-          console.error('Failed to save stockanalysis assistant message:', dbErr);
+          } catch (dbErr) {
+            console.error('Failed to save stockanalysis assistant message:', dbErr);
+          }
+          emitToUser(userId, 'agent:stockanalysis:done', { sessionId, report });
+          activeStockAnalysisSessions.delete(sessionId);
+        },
+        // onError
+        (error: string) => {
+          emitToUser(userId, 'agent:stockanalysis:error', { sessionId, error });
+          activeStockAnalysisSessions.delete(sessionId);
         }
-        emitToUser(userId, 'agent:stockanalysis:done', { sessionId, report });
-      } catch (err: any) {
-        console.error('[agent:stockanalysis] Aegean pipeline error:', err.message);
-        emitToUser(userId, 'agent:stockanalysis:error', { sessionId, error: err.message });
-      }
-      activeStockAnalysisSessions.delete(sessionId);
+      );
     });
 
     // ── SuperAgent Chat (Streaming & Consensus) ──
@@ -436,16 +417,16 @@ Text: "${query}"`;
       // ── Dedup guard: skip identical content for the same session within 3s ──
       const dedupKey = `${sessionId}::${data.content}`;
       const now = Date.now();
-      const lastSeen = (chatDedupMap as Map<string, number>).get(dedupKey);
+      const lastSeen = chatDedupMap.get(dedupKey);
       if (lastSeen && now - lastSeen < 3000) {
         console.log(`[agent:chat] Dedup: skipping duplicate message for session ${sessionId}`);
         return;
       }
-      (chatDedupMap as Map<string, number>).set(dedupKey, now);
+      chatDedupMap.set(dedupKey, now);
       // Prune old entries periodically
-      if ((chatDedupMap as Map<string, number>).size > 100) {
-        for (const [k, v] of (chatDedupMap as Map<string, number>)) {
-          if (now - v > 10000) (chatDedupMap as Map<string, number>).delete(k);
+      if (chatDedupMap.size > 100) {
+        for (const [k, v] of chatDedupMap) {
+          if (now - v > 10000) chatDedupMap.delete(k);
         }
       }
 
@@ -662,14 +643,13 @@ Text: "${query}"`;
       }
 
       if (plan.capabilities.analysis.needed) {
+        let activeSections = [{ id: 'data_providers', label: 'Fetching market data', status: 'pending', providers: [] }];
         let analysisStages = [
           { id: 'fundamental', label: 'Fundamental analysis', status: 'pending', result: [] as any[] },
           { id: 'technical', label: 'Technical analysis', status: 'pending', result: [] as any[] },
           { id: 'sentiment', label: 'Sentiment analysis', status: 'pending' }
         ];
         emitter.emitModule('analysis', 'active', { stages: analysisStages });
-
-        const analysisStockCode = (plan.capabilities.analysis.tickers?.[0] || data.content).trim();
 
         promises.push(
           new Promise(resolve => {
@@ -823,106 +803,63 @@ Text: "${query}"`;
                 emitter.emitModule('analysis', 'completed', { stages: analysisStages });
                 resolve({ type: 'ANALYSIS', data: 'Error: ' + error });
               }
-              if (marketData.trend_analysis) {
-              const t = marketData.trend_analysis;
-              const zhEn: Record<string, string> = {
-                '牛市排列': 'Bullish', '多头排列': 'Bullish', '空头排列': 'Bearish', '熊市排列': 'Bearish',
-                '多头': 'Bullish', '空头': 'Bearish', '震荡': 'Sideways', '盘整': 'Consolidating',
-                '上升趋势': 'Uptrend', '下降趋势': 'Downtrend', '横盘': 'Sideways',
-                '买入': 'Buy', '卖出': 'Sell', '持有': 'Hold', '观望': 'Wait',
-                '强烈买入': 'Strong Buy', '强烈卖出': 'Strong Sell',
-                '看涨': 'Bullish', '看跌': 'Bearish', '中性': 'Neutral',
-              };
-              const tr = (v: string) => { if (!v) return v; for (const [zh, en] of Object.entries(zhEn)) { if (v.includes(zh)) return en; } return v; };
-              analysisStages[1].status = 'done';
-              analysisStages[1].result = [
-                t.trend_status ? { label: 'Trend', value: tr(t.trend_status), color: tr(t.trend_status)?.includes('Bull') || tr(t.trend_status)?.includes('Up') ? 'text-emerald-600' : 'text-amber-600' } : null,
-                t.ma_alignment ? { label: 'MA', value: tr(t.ma_alignment), color: 'text-violet-600' } : null,
-                t.buy_signal ? { label: 'Signal', value: tr(t.buy_signal), color: tr(t.buy_signal) === 'Buy' ? 'text-emerald-600' : 'text-gray-600' } : null,
-              ].filter(Boolean);
-            }
-            if (marketData.news?.results) {
-              analysisStages[2].status = 'done';
-              const newsCount = Array.isArray(marketData.news.results) ? marketData.news.results.length : 0;
-              (analysisStages[2] as any).result = [{ label: 'Sources', value: `${newsCount} from Web`, color: 'text-cyan-600' }];
-            }
-            emitter.emitModule('analysis', 'active', { stages: analysisStages });
-
-            // Step 2: Send to Aegean
-            emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step: { type: 'tool_start', tool: 'aegean_consensus', displayName: 'Aegean Expert Council analysis', ts: Date.now() } });
-            const aegeanMode = data.mode || 'auto';
-            const payload = formatForAegean(marketData, userId, aegeanMode);
-            const aegeanResult = await callAegeanInvestment(payload);
-            emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step: { type: 'tool_done', tool: 'aegean_consensus', displayName: 'Aegean Expert Council analysis', success: true, ts: Date.now() } });
-
-            const result = transformAegeanResponse(aegeanResult);
-            const report = result.reportMarkdown || result.summary.thesis || 'Analysis completed.';
-
-            analysisStages.forEach(s => { s.status = 'done'; });
-            finalAnalysisStages = analysisStages;
-            emitter.emitModule('analysis', 'completed', { stages: analysisStages });
-            return { type: 'ANALYSIS' as const, data: report };
-          } catch (err: any) {
-            console.error('[agent:chat] Aegean analysis pipeline error:', err.message);
-            analysisStages.forEach(s => { s.status = 'done'; });
-            finalAnalysisStages = analysisStages;
-            emitter.emitModule('analysis', 'completed', { stages: analysisStages });
-            return { type: 'ANALYSIS' as const, data: 'Error: ' + err.message };
-          }
-      })()
+            );
+          })
         );
-}
+      }
 
-if (plan.capabilities.simulate.needed) {
-  emitter.emitModule('simulation', 'active', { panelists: [{ name: 'Simulating...', status: 'active', verdict: 'Pending' }] });
-  let tickers = plan.capabilities.simulate.tickers || [];
-  if (!tickers.length) tickers = ['SPY', 'QQQ'];
+      if (plan.capabilities.simulate.needed) {
+        emitter.emitModule('simulation', 'active', { panelists: [{ name: 'Simulating...', status: 'active', verdict: 'Pending' }] });
+        let tickers = plan.capabilities.simulate.tickers || [];
+        if (!tickers.length) tickers = ['SPY', 'QQQ'];
 
-  promises.push(
-    hedgefundService.runAnalysis({ tickers, showReasoning: true }, () => { })
-      .then(hfResult => {
-        const panelists = Object.keys(hfResult.analyst_signals || {}).map(p => ({
-          name: p,
-          avatar: 'L',
-          status: 'done',
-          verdict: Object.values(hfResult.analyst_signals[p] || {})[0]?.signal || 'Hold',
-          confidence: Object.values(hfResult.analyst_signals[p] || {})[0]?.confidence || 0
-        }));
-        finalPanelists = panelists;
-        emitter.emitModule('simulation', 'completed', { panelists });
-        const rep = hedgefundService.formatReport(hfResult);
-        return { type: 'SIMULATION', data: rep };
-      })
-      .catch(e => {
-        emitter.emitModule('simulation', 'completed', { panelists: [] });
-        return { type: 'SIMULATION', data: 'Error: ' + e.message };
-      })
-  );
-}
+        promises.push(
+          hedgefundService.runAnalysis({ tickers, showReasoning: true }, () => { })
+            .then(hfResult => {
+              const panelists = Object.keys(hfResult.analyst_signals || {}).map(p => ({
+                name: p,
+                avatar: 'L',
+                status: 'done',
+                verdict: Object.values(hfResult.analyst_signals[p] || {})[0]?.signal || 'Hold',
+                confidence: Object.values(hfResult.analyst_signals[p] || {})[0]?.confidence || 0
+              }));
+              finalPanelists = panelists;
+              emitter.emitModule('simulation', 'completed', { panelists });
+              const rep = hedgefundService.formatReport(hfResult);
+              return { type: 'SIMULATION', data: rep };
+            })
+            .catch(e => {
+              emitter.emitModule('simulation', 'completed', { panelists: [] });
+              return { type: 'SIMULATION', data: 'Error: ' + e.message };
+            })
+        );
+      }
 
-const results = await Promise.allSettled(promises);
-if (isAborted()) {
-  console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
-  activeChatSessions.delete(sessionId);
-  chatAbortControllers.delete(sessionId);
-  return;
-}
-console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
-const synthHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_SYNTHESIS);
-let contextString = "";
-if (synthHistory) {
-  contextString += "【CONVERSATION HISTORY — for continuity, do NOT repeat old findings】\n" + synthHistory + "\n\n";
-}
-contextString += "【User Original Request】\n" + data.content + "\n\n";
-results.forEach(r => {
-  if (r.status === 'fulfilled') {
-    contextString += `【${r.value.type} REPORT】\n${r.value.data}\n\n`;
-  }
-});
+      const results = await Promise.allSettled(promises);
+      if (isAborted()) {
+        console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
+        activeChatSessions.delete(sessionId);
+        chatAbortControllers.delete(sessionId);
+        return;
+      }
+      console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
+      
+      const synthHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_SYNTHESIS);
+      let contextString = "";
+      if (synthHistory) {
+        contextString += "【CONVERSATION HISTORY — for continuity, do NOT repeat old findings】\n" + synthHistory + "\n\n";
+      }
+      contextString += "【User Original Request】\n" + data.content + "\n\n";
+      
+      results.forEach(r => {
+        if (r.status === 'fulfilled') {
+          contextString += `【${r.value.type} REPORT】\n${r.value.data}\n\n`;
+        }
+      });
 
-const isDeepResearch = data.mode === 'roundtable';
+      const isDeepResearch = data.mode === 'roundtable';
 
-const buildDeepResearchPrompt = (inputContext: string) => `You are a senior research director at a top-tier investment research firm.
+      const buildDeepResearchPrompt = (inputContext: string) => getGlobalTimeContext() + `You are a senior research director at a top-tier investment research firm.
 
 Your task is to produce a professional-grade DEEP RESEARCH REPORT — the kind that institutional investors, fund managers, and sophisticated traders actually pay for and act on.
 
@@ -1115,7 +1052,7 @@ Before writing, build your internal thesis:
 Do NOT output this reasoning. Begin the report directly.
 `;
 
-const traderMemoPrompt = `You are a top-tier macro + equity research analyst with strong opinions.
+      const traderMemoPrompt = getGlobalTimeContext() + `You are a top-tier macro + equity research analyst with strong opinions.
 
 Your job is NOT to summarize information.
 Your job is to form a clear, tradeable view and guide decision-making — grounded in rigorous fundamental, valuation, financial, and technical analysis.
@@ -1248,85 +1185,85 @@ Before writing, internally decide:
 Do NOT reveal this reasoning. Begin writing directly.
 `;
 
-// Round 1 always uses the trader memo prompt (quick initial draft)
-// For roundtable: after consensus debate, a second Deep Research pass integrates everything
-const synthesizePrompt = traderMemoPrompt;
-const synthesisMaxTokens = 8192;
+      // Round 1 always uses the trader memo prompt (quick initial draft)
+      // For roundtable: after consensus debate, a second Deep Research pass integrates everything
+      const synthesizePrompt = traderMemoPrompt;
+      const synthesisMaxTokens = 8192;
 
-try {
-  console.log('[agent:chat] Starting synthesis stream (%s mode), prompt length:', isDeepResearch ? 'deep-research' : 'trader-memo', synthesizePrompt.length);
-  const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
-  console.log('[agent:chat] Synthesis stream obtained, reading...');
-  const synReader = synthesisStream.getReader();
-  const synDecoder = new TextDecoder();
-  let synFullContent = '';
-  let synBuffer = '';
+      try {
+        console.log('[agent:chat] Starting synthesis stream (%s mode), prompt length:', isDeepResearch ? 'deep-research' : 'trader-memo', synthesizePrompt.length);
+        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
+        console.log('[agent:chat] Synthesis stream obtained, reading...');
+        const synReader = synthesisStream.getReader();
+        const synDecoder = new TextDecoder();
+        let synFullContent = '';
+        let synBuffer = '';
 
-  while (true) {
-    const { done, value } = await synReader.read();
-    if (done || isAborted()) {
-      if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
-        try {
-          const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
-          const delta = parsed.choices?.[0]?.delta?.content || '';
-          if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
-        } catch (e) { }
-      }
-      break;
-    }
-    synBuffer += synDecoder.decode(value, { stream: true });
-    const lines = synBuffer.split('\n');
-    synBuffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('data: ')) {
-        const sseData = trimmed.slice(6).trim();
-        if (sseData === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(sseData);
-          const delta = parsed.choices?.[0]?.delta?.content || '';
-          if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
-        } catch (e) { }
-      }
-    }
-  }
+        while (true) {
+          const { done, value } = await synReader.read();
+          if (done || isAborted()) {
+            if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
+              try {
+                const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
+                const delta = parsed.choices?.[0]?.delta?.content || '';
+                if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
+              } catch (e) { }
+            }
+            break;
+          }
+          synBuffer += synDecoder.decode(value, { stream: true });
+          const lines = synBuffer.split('\n');
+          synBuffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('data: ')) {
+              const sseData = trimmed.slice(6).trim();
+              if (sseData === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(sseData);
+                const delta = parsed.choices?.[0]?.delta?.content || '';
+                if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
+              } catch (e) { }
+            }
+          }
+        }
 
-  if (isAborted()) {
-    console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
-    activeChatSessions.delete(sessionId);
-    chatAbortControllers.delete(sessionId);
-    return;
-  }
+        if (isAborted()) {
+          console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
+          activeChatSessions.delete(sessionId);
+          chatAbortControllers.delete(sessionId);
+          return;
+        }
 
-  const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
+        const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
 
-  const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
-  if (plan.capabilities.search.needed) flowModules.push({ type: 'search', status: 'completed', data: { variant: 'social', sources: finalSocialSources } });
-  if (plan.capabilities.analysis.needed) flowModules.push({ type: 'analysis', status: 'completed', data: { stages: finalAnalysisStages } });
-  if (plan.capabilities.simulate.needed) flowModules.push({ type: 'simulation', status: 'completed', data: { panelists: finalPanelists } });
+        const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
+        if (plan.capabilities.search.needed) flowModules.push({ type: 'search', status: 'completed', data: { variant: 'social', sources: finalSocialSources } });
+        if (plan.capabilities.analysis.needed) flowModules.push({ type: 'analysis', status: 'completed', data: { stages: finalAnalysisStages } });
+        if (plan.capabilities.simulate.needed) flowModules.push({ type: 'simulation', status: 'completed', data: { panelists: finalPanelists } });
 
-  let finalDbContent = synFullContent;
-  /** Matches frontend ConsensusModuleData for Thinking Process + DB replay */
-  let consensusFlowData: {
-    status: 'concluded';
-    round: number;
-    maxRounds: number;
-    conclusion: { verdict: string; confidence: number };
-  } | null = null;
+        let finalDbContent = synFullContent;
+        /** Matches frontend ConsensusModuleData for Thinking Process + DB replay */
+        let consensusFlowData: {
+          status: 'concluded';
+          round: number;
+          maxRounds: number;
+          conclusion: { verdict: string; confidence: number };
+        } | null = null;
 
-  if (data.mode === 'roundtable') {
-    // Phase 1: Initial draft is already generated silently (not streamed)
-    emitter.emitModule('consensus', 'active', { status: 'building', round: 1, maxRounds: 3 });
+        if (data.mode === 'roundtable') {
+          // Phase 1: Initial draft is already generated silently (not streamed)
+          emitter.emitModule('consensus', 'active', { status: 'building', round: 1, maxRounds: 3 });
 
-    try {
-      // Phase 2: Expert debate — send initial draft to consensus engine
-      emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
-      // Detect language so experts respond consistently
-      const isZhTask = /[\u4e00-\u9fff]/.test(data.content);
-      const langInstruction = isZhTask
-        ? '\n\n重要：你的所有分析和结论必须全部使用中文。不要评价报告本身的质量，而是对分析主题给出你自己的独立分析和判断。'
-        : '\n\nIMPORTANT: Provide your own independent analysis of the topic, NOT a review of the report quality. Respond entirely in English.';
-      const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${data.content}"
+          try {
+            // Phase 2: Expert debate — send initial draft to consensus engine
+            emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
+            // Detect language so experts respond consistently
+            const isZhTask = /[\u4e00-\u9fff]/.test(data.content);
+            const langInstruction = isZhTask
+              ? '\n\n重要：你的所有分析和结论必须全部使用中文。不要评价报告本身的质量，而是对分析主题给出你自己的独立分析和判断。'
+              : '\n\nIMPORTANT: Provide your own independent analysis of the topic, NOT a review of the report quality. Respond entirely in English.';
+            const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${data.content}"
 
 Focus on:
 1. Your directional view (bullish/bearish/neutral) with conviction level
@@ -1335,176 +1272,176 @@ Focus on:
 4. Specific price levels or targets if applicable
 
 Research context:\n${synFullContent}${langInstruction}`;
-      const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
+            const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
 
-      const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
+            const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
 
-      // Collect individual expert perspectives with structured debate context
-      let expertDebateContext = '';
-      const agentResponses = consensusResult.consensus?.agentResponses || [];
-      const nameMap: Record<string, string> = {
-        agent_0: 'Fundamental Analyst',
-        agent_1: 'Macro Strategist',
-        agent_2: 'Sentiment Engine',
-        agent_3: 'Quant Tracker',
-      };
-      const roundsUsed = Number(consensusResult.consensus?.roundsUsed ?? 1) || 1;
-      const consensusReached = consensusResult.consensus?.consensusReached !== false;
+            // Collect individual expert perspectives with structured debate context
+            let expertDebateContext = '';
+            const agentResponses = consensusResult.consensus?.agentResponses || [];
+            const nameMap: Record<string, string> = {
+              agent_0: 'Fundamental Analyst',
+              agent_1: 'Macro Strategist',
+              agent_2: 'Sentiment Engine',
+              agent_3: 'Quant Tracker',
+            };
+            const roundsUsed = Number(consensusResult.consensus?.roundsUsed ?? 1) || 1;
+            const consensusReached = consensusResult.consensus?.consensusReached !== false;
 
-      // Emit round-by-round progress so the frontend graph updates progressively
-      for (let r = 1; r <= roundsUsed; r++) {
-        emitter.emitModule('consensus', 'active', { status: 'discussing', round: r, maxRounds: 3 });
-      }
-
-      if (agentResponses.length > 0) {
-        expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
-        expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
-        expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
-        expertDebateContext += `Consensus confidence: ${Math.round(Number(consensusResult.consensus?.confidence ?? 0) * 100)}%\n\n`;
-        expertDebateContext += `Final Consensus Verdict:\n${finalAnswerText}\n\n`;
-        expertDebateContext += `Individual Expert Positions:\n`;
-        agentResponses.forEach((resp: any, idx: number) => {
-          const name = nameMap[resp.agentId] || `Expert ${idx + 1}`;
-          const conf = Math.round((resp.confidence || 0) * 100);
-          expertDebateContext += `--- ${name} (${conf}% confidence) ---\n${resp.answer}\n\n`;
-        });
-      }
-
-      // ── Immediately send consensus_done so frontend shows full RoundTable graph ──
-      // This happens BEFORE Phase 3 (deep research), so the graph appears while the report streams.
-      const conf = Number(consensusResult.consensus?.confidence ?? 0);
-      const reached = consensusResult.consensus?.consensusReached !== false;
-      const verdictMatch = finalAnswerText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
-      const verdictLabel = verdictMatch
-        ? verdictMatch[1].trim().slice(0, 120)
-        : reached
-          ? 'Consensus reached'
-          : 'No consensus';
-
-      consensusFlowData = {
-        status: 'concluded',
-        round: Math.min(3, roundsUsed || 3),
-        maxRounds: 3,
-        conclusion: { verdict: verdictLabel, confidence: conf },
-      };
-      emitter.emitModule('consensus', 'completed', consensusFlowData);
-      socket.emit('agent:chat:consensus_done', {
-        sessionId,
-        result: consensusResult
-      });
-
-      // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate
-      emitter.emitModule('consensus', 'active', { status: 'synthesizing', round: roundsUsed + 1, maxRounds: 3 });
-      const deepResearchInput = `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`;
-      const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
-
-      console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
-
-      const deepStream = await aiService.chatStream([{ role: 'user', content: deepResearchFinalPrompt }], 'superagent', undefined, 16384);
-      const deepReader = deepStream.getReader();
-      const deepDecoder = new TextDecoder();
-      let deepFullContent = '';
-      let deepBuffer = '';
-
-      while (true) {
-        const { done, value } = await deepReader.read();
-        if (done || isAborted()) {
-          if (!isAborted() && deepBuffer.trim().startsWith('data: ') && deepBuffer.trim() !== 'data: [DONE]') {
-            try {
-              const parsed = JSON.parse(deepBuffer.trim().slice(6).trim());
-              const delta = parsed.choices?.[0]?.delta?.content || '';
-              if (delta) { deepFullContent += delta; }
-            } catch (e) { }
-          }
-          break;
-        }
-        deepBuffer += deepDecoder.decode(value, { stream: true });
-        const lines = deepBuffer.split('\n');
-        deepBuffer = lines.pop() || '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed === 'data: [DONE]') continue;
-          if (!trimmed.startsWith('data: ')) continue;
-          try {
-            const parsed = JSON.parse(trimmed.slice(6).trim());
-            const delta = parsed.choices?.[0]?.delta?.content || '';
-            if (delta) {
-              deepFullContent += delta;
-              // Stream directly — initial draft was never shown to user
-              streamToChat(delta);
+            // Emit round-by-round progress so the frontend graph updates progressively
+            for (let r = 1; r <= roundsUsed; r++) {
+              emitter.emitModule('consensus', 'active', { status: 'discussing', round: r, maxRounds: 3 });
             }
-          } catch (e) { }
+
+            if (agentResponses.length > 0) {
+              expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
+              expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
+              expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
+              expertDebateContext += `Consensus confidence: ${Math.round(Number(consensusResult.consensus?.confidence ?? 0) * 100)}%\n\n`;
+              expertDebateContext += `Final Consensus Verdict:\n${finalAnswerText}\n\n`;
+              expertDebateContext += `Individual Expert Positions:\n`;
+              agentResponses.forEach((resp: any, idx: number) => {
+                const name = nameMap[resp.agentId] || `Expert ${idx + 1}`;
+                const conf = Math.round((resp.confidence || 0) * 100);
+                expertDebateContext += `--- ${name} (${conf}% confidence) ---\n${resp.answer}\n\n`;
+              });
+            }
+
+            // ── Immediately send consensus_done so frontend shows full RoundTable graph ──
+            // This happens BEFORE Phase 3 (deep research), so the graph appears while the report streams.
+            const conf = Number(consensusResult.consensus?.confidence ?? 0);
+            const reached = consensusResult.consensus?.consensusReached !== false;
+            const verdictMatch = finalAnswerText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
+            const verdictLabel = verdictMatch
+              ? verdictMatch[1].trim().slice(0, 120)
+              : reached
+                ? 'Consensus reached'
+                : 'No consensus';
+
+            consensusFlowData = {
+              status: 'concluded',
+              round: Math.min(3, roundsUsed || 3),
+              maxRounds: 3,
+              conclusion: { verdict: verdictLabel, confidence: conf },
+            };
+            emitter.emitModule('consensus', 'completed', consensusFlowData);
+            socket.emit('agent:chat:consensus_done', {
+              sessionId,
+              result: consensusResult
+            });
+
+            // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate
+            emitter.emitModule('consensus', 'active', { status: 'synthesizing', round: roundsUsed + 1, maxRounds: 3 });
+            const deepResearchInput = `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`;
+            const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
+
+            console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
+
+            const deepStream = await aiService.chatStream([{ role: 'user', content: deepResearchFinalPrompt }], 'superagent', undefined, 16384);
+            const deepReader = deepStream.getReader();
+            const deepDecoder = new TextDecoder();
+            let deepFullContent = '';
+            let deepBuffer = '';
+
+            while (true) {
+              const { done, value } = await deepReader.read();
+              if (done || isAborted()) {
+                if (!isAborted() && deepBuffer.trim().startsWith('data: ') && deepBuffer.trim() !== 'data: [DONE]') {
+                  try {
+                    const parsed = JSON.parse(deepBuffer.trim().slice(6).trim());
+                    const delta = parsed.choices?.[0]?.delta?.content || '';
+                    if (delta) { deepFullContent += delta; }
+                  } catch (e) { }
+                }
+                break;
+              }
+              deepBuffer += deepDecoder.decode(value, { stream: true });
+              const lines = deepBuffer.split('\n');
+              deepBuffer = lines.pop() || '';
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed === 'data: [DONE]') continue;
+                if (!trimmed.startsWith('data: ')) continue;
+                try {
+                  const parsed = JSON.parse(trimmed.slice(6).trim());
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    deepFullContent += delta;
+                    // Stream directly — initial draft was never shown to user
+                    streamToChat(delta);
+                  }
+                } catch (e) { }
+              }
+            }
+
+            // Use the deep research output as final content
+            finalDbContent = deepFullContent;
+
+            if (consensusResult.consensus) {
+              consensusResult.consensus.finalAnswer = finalDbContent;
+            }
+          } catch (e: any) {
+            finalDbContent = synFullContent + `\n\n---\n\n## ⚠️ Consensus Error\n${e.message}`;
+            streamToChat(`\n\n---\n\n## ⚠️ Consensus Error\n${e.message}`);
+            consensusFlowData = {
+              status: 'concluded',
+              round: 1,
+              maxRounds: 3,
+              conclusion: { verdict: 'Consensus failed', confidence: 0 },
+            };
+            emitter.emitModule('consensus', 'completed', consensusFlowData);
+            socket.emit('agent:chat:consensus_done', {
+              sessionId,
+              result: { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } }
+            });
+          }
         }
-      }
 
-      // Use the deep research output as final content
-      finalDbContent = deepFullContent;
-
-      if (consensusResult.consensus) {
-        consensusResult.consensus.finalAnswer = finalDbContent;
-      }
-    } catch (e: any) {
-      finalDbContent = synFullContent + `\n\n---\n\n## ⚠️ Consensus Error\n${e.message}`;
-      streamToChat(`\n\n---\n\n## ⚠️ Consensus Error\n${e.message}`);
-      consensusFlowData = {
-        status: 'concluded',
-        round: 1,
-        maxRounds: 3,
-        conclusion: { verdict: 'Consensus failed', confidence: 0 },
-      };
-      emitter.emitModule('consensus', 'completed', consensusFlowData);
-      socket.emit('agent:chat:consensus_done', {
-        sessionId,
-        result: { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } }
-      });
-    }
-  }
-
-  if (consensusFlowData) {
-    flowModules.push({ type: 'consensus', status: 'completed', data: consensusFlowData as unknown as Record<string, unknown> });
-  }
-  flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
-
-  await prisma.chatMessage.create({
-    data: {
-      userId,
-      sessionId,
-      role: 'assistant',
-      content: finalDbContent,
-      agentId: 'superagent',
-      metadata: JSON.stringify({
-        thinkingFlow: {
-          modules: flowModules,
-          isActive: false,
-          route: 'Super Agent Orchestrator'
+        if (consensusFlowData) {
+          flowModules.push({ type: 'consensus', status: 'completed', data: consensusFlowData as unknown as Record<string, unknown> });
         }
-      })
-    }
-  });
+        flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
 
-  emitter.emitModule('done', 'completed', { duration: dur });
-  emitter.emitStreamDone(finalDbContent);
-} catch (err: any) {
-  console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
-  emitToUser(userId, 'agent:chat:error', { sessionId, error: err.message });
-  emitter.emitModule('done', 'completed', { duration: 0 });
-}
-activeChatSessions.delete(sessionId);
-chatAbortControllers.delete(sessionId);
+        await prisma.chatMessage.create({
+          data: {
+            userId,
+            sessionId,
+            role: 'assistant',
+            content: finalDbContent,
+            agentId: 'superagent',
+            metadata: JSON.stringify({
+              thinkingFlow: {
+                modules: flowModules,
+                isActive: false,
+                route: 'Super Agent Orchestrator'
+              }
+            })
+          }
+        });
+
+        emitter.emitModule('done', 'completed', { duration: dur });
+        emitter.emitStreamDone(finalDbContent);
+      } catch (err: any) {
+        console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
+        emitToUser(userId, 'agent:chat:error', { sessionId, error: err.message });
+        emitter.emitModule('done', 'completed', { duration: 0 });
+      }
+      activeChatSessions.delete(sessionId);
+      chatAbortControllers.delete(sessionId);
     });
-socket.on('disconnect', () => {
-  console.log(`🔌 Client disconnected: ${socket.id}`);
+    socket.on('disconnect', () => {
+      console.log(`🔌 Client disconnected: ${socket.id}`);
 
-  // Check if user has other active sockets before marking offline
-  const rooms = io.sockets.adapter.rooms.get(`user:${userId}`);
-  if (!rooms || rooms.size === 0) {
-    onlineUsers.delete(userId);
-    socket.broadcast.emit('user:offline', { userId });
-  }
-});
+      // Check if user has other active sockets before marking offline
+      const rooms = io.sockets.adapter.rooms.get(`user:${userId}`);
+      if (!rooms || rooms.size === 0) {
+        onlineUsers.delete(userId);
+        socket.broadcast.emit('user:offline', { userId });
+      }
+    });
   });
 
-return io;
+  return io;
 }
 
 export function getIO(): Server {
@@ -1543,4 +1480,3 @@ export function joinSocketRoom(userId: string, room: string) {
 export function getOnlineUserIds(): string[] {
   return Array.from(onlineUsers);
 }
-
