@@ -675,36 +675,71 @@ Text: "${query}"`;
                     }
                     emitter.emitModule('analysis', 'active', { stages: analysisStages });
                     // Forward stock quote card data to frontend
-                    console.log('[UI_METADATA] meta.quote:', JSON.stringify(meta.quote));
                     if (meta.quote && meta.quote.symbol && meta.quote.price != null) {
                       const q = meta.quote;
+                      // Only show card if price is a real number (not "365 (analyst target)" etc.)
+                      const numPrice = typeof q.price === 'number' ? q.price : parseFloat(String(q.price));
+                      if (!isNaN(numPrice)) {
+                      // Detect language from user's original message
+                      const isZh = /[\u4e00-\u9fff]/.test(data.content);
                       const fmtVol = (v: number | null) => {
                         if (v == null) return undefined;
-                        if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
-                        if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        if (isZh) {
+                          if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+                          if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        } else {
+                          if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+                          if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+                          if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+                        }
                         return String(v);
                       };
                       const fmtMv = (v: number | null) => {
                         if (v == null) return undefined;
-                        if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿';
-                        if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        if (isZh) {
+                          if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿';
+                          if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        } else {
+                          if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+                          if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+                        }
                         return String(v);
+                      };
+                      // Detect market from symbol code
+                      const detectMarket = (sym: string) => {
+                        if (!sym) return undefined;
+                        if (/^\d{6}\.(SH|SS)$/.test(sym) || /^(sh|sz)\d{6}$/i.test(sym) || /^[036]\d{5}$/.test(sym))
+                          return isZh ? 'A股' : 'A-Share';
+                        if (/\.HK$/i.test(sym) || /^0[0-9]{4}\.?$/i.test(sym))
+                          return isZh ? '港股' : 'HK';
+                        if (/^[A-Z]{1,5}$/.test(sym) || /\.(US|NASDAQ|NYSE)$/i.test(sym))
+                          return isZh ? '美股' : 'US';
+                        return undefined;
                       };
                       emitToUser(userId, 'agent:chat:quote', {
                         sessionId,
                         quote: {
                           symbol: q.symbol,
                           name: q.name || undefined,
-                          price: typeof q.price === 'number' ? q.price.toFixed(2) : String(q.price),
+                          market: detectMarket(q.symbol),
+                          lang: isZh ? 'zh' : 'en',
+                          price: numPrice.toFixed(2),
                           change: q.change_pct != null
                             ? (q.change_pct >= 0 ? '+' : '') + Number(q.change_pct).toFixed(2) + '%'
                             : undefined,
                           volume: fmtVol(q.volume),
-                          high: q.high != null ? String(q.high) : undefined,
-                          low: q.low != null ? String(q.low) : undefined,
+                          amount: fmtVol(q.amount),
+                          high: q.high != null ? Number(q.high).toFixed(2) : undefined,
+                          low: q.low != null ? Number(q.low).toFixed(2) : undefined,
+                          open: q.open != null ? Number(q.open).toFixed(2) : undefined,
+                          prevClose: q.prev_close != null ? Number(q.prev_close).toFixed(2) : undefined,
                           marketCap: fmtMv(q.total_mv || q.circ_mv),
+                          pe: q.pe != null ? Number(q.pe).toFixed(2) : undefined,
+                          pb: q.pb != null ? Number(q.pb).toFixed(2) : undefined,
+                          turnover: q.turnover != null ? Number(q.turnover).toFixed(2) + '%' : undefined,
                         },
                       });
+                      } // end !isNaN(numPrice)
                     }
                   } catch(e){}
                 }
@@ -768,10 +803,205 @@ Text: "${query}"`;
         }
       });
 
-      const synthesizePrompt = `You are a top-tier macro + equity research analyst with strong opinions.
+      const isDeepResearch = data.mode === 'roundtable';
+
+      const buildDeepResearchPrompt = (inputContext: string) => `You are a senior research director at a top-tier investment research firm.
+
+Your task is to produce a professional-grade DEEP RESEARCH REPORT — the kind that institutional investors, fund managers, and sophisticated traders actually pay for and act on.
+
+This is NOT a quick take or trader memo. This is a thorough, multi-dimensional research product that synthesizes all available evidence into a coherent investment thesis with rigorous supporting analysis.
+
+=== INPUT ===
+Topic: ${data.content}
+${inputContext}
+
+=== REPORT STRUCTURE ===
+
+0. Report Title (MANDATORY)
+- Format: # (single hash) for clear, professional framing
+- Must convey the core thesis and asset/topic in one line
+- Example: "# NVDA: AI Capex Cycle Peaks — Re-rating Risk Rising"
+- Example: "# 英伟达深度研究：AI资本开支周期见顶，估值重评风险上升"
+
+---
+
+1. Research Overview (MANDATORY — NO HEADING, start directly)
+A compact, high-density executive brief:
+- **Verdict**: Bullish / Bearish / Neutral + Conviction Level (High/Medium/Low)
+- **Core Thesis**: 2-3 sentences — What is the key insight the market is missing?
+- **Key Catalysts**: Next 3-6 month triggers (with approximate dates if known)
+- **Risk/Reward**: Quantified upside vs downside ratio
+
+---
+
+2. Methodology & Data Scope (MANDATORY) — Use ## heading
+Brief statement of:
+- What data sources were analyzed (news, social sentiment, on-chain/financial data, technical indicators)
+- Time horizon of the analysis
+- Any limitations or data gaps
+- This builds credibility and helps the reader calibrate confidence
+
+---
+
+3–7. Core Analysis Modules (3-5 sections, DEEP)
+Choose the most relevant modules from:
+
+**A. Fundamental & Business Analysis**
+- Revenue structure, growth drivers, segment-level breakdown
+- Competitive positioning, moat analysis, TAM/SAM
+- Management quality, capital allocation track record
+- Key operating metrics and trends (not just latest quarter)
+
+**B. Financial Deep-Dive**
+- Multi-quarter/year financial trend analysis (margins, FCF, leverage)
+- Balance sheet health, cash runway, debt maturity profile
+- ROE/ROIC decomposition, working capital efficiency
+- Quality of earnings assessment
+
+**C. Valuation Framework**
+- Multiple valuation approaches (relative + absolute if possible)
+- Historical valuation range context
+- Peer comparison table with key multiples
+- Sensitivity analysis on key assumptions
+- Analyst consensus vs your view
+
+**D. Technical & Flow Analysis**
+- Multi-timeframe price structure (daily/weekly)
+- Key support/resistance levels with volume confirmation
+- Institutional flow data, smart money positioning
+- Options flow / derivatives positioning if relevant
+- Trend strength and momentum indicators
+
+**E. Sentiment & Narrative Analysis**
+- Social media sentiment trends and shifts
+- KOL/influencer positioning changes
+- News flow analysis — what's priced in vs what's not
+- Retail vs institutional sentiment divergence
+
+**F. Macro & Thematic Context**
+- Sector rotation dynamics
+- Policy and regulatory environment
+- Supply chain / industry cycle positioning
+- Cross-market correlations and contagion risks
+
+**G. Catalyst Calendar**
+- Time-ordered list of upcoming events
+- Expected impact and probability assessment
+- Pre-positioning recommendations for each catalyst
+
+Guidelines for modules:
+- Each module MUST contain original analysis, not data recitation
+- Use tables for comparative data (peer comps, financial trends, scenario modeling)
+- Include specific numbers: growth rates, margins, multiples, price levels
+- Cross-reference between modules — show how fundamental changes map to technical levels
+- Challenge consensus view — identify where market pricing diverges from evidence
+
+---
+
+8. Risk Matrix (MANDATORY) — Use ## heading
+Professional risk assessment table:
+
+| Risk Factor | Probability | Impact | Mitigation / Monitor |
+|-------------|------------|--------|---------------------|
+| [specific risk] | High/Med/Low | [quantified if possible] | [what to watch] |
+
+Include minimum 4 risks across different categories (fundamental, technical, macro, sentiment).
+
+---
+
+9. Scenario Analysis (MANDATORY) — Use ## heading
+Expanded scenario modeling with more granularity than a simple bull/base/bear:
+
+| Scenario | Probability | Price Target | Timeline | Key Assumption | Trigger to Confirm |
+|----------|------------|-------------|----------|----------------|-------------------|
+| Aggressive Bull | ~% | $X | Xm | [assumption] | [observable trigger] |
+| Base Bull | ~% | $X | Xm | [assumption] | [observable trigger] |
+| Neutral | ~% | $X | Xm | [assumption] | [observable trigger] |
+| Bear | ~% | $X | Xm | [assumption] | [observable trigger] |
+| Tail Risk | ~% | $X | Xm | [assumption] | [observable trigger] |
+
+---
+
+10. Expert Debate Analysis (MANDATORY when expert debate data is provided) — Use ## heading
+This section is the SIGNATURE of this report — it showcases the multi-expert roundtable process.
+
+Structure:
+**a) Key Debate Points** — What did the experts focus on? What angles did each expert bring?
+  - Summarize each expert's core viewpoint in 1-2 sentences with their confidence level
+  - Use a table format:
+  | Expert | Core View | Confidence | Key Argument |
+  |--------|-----------|------------|-------------|
+  | [name] | Bullish/Bearish/Neutral | X% | [1-line argument] |
+
+**b) Points of Agreement** — Where did experts converge? What does consensus tell us?
+  - List 2-3 points where most experts agreed, and explain why this convergence strengthens conviction
+
+**c) Points of Contention** — Where did experts DISAGREE? This is the most valuable part.
+  - List 2-4 specific disagreements between experts
+  - For each: which experts, what they disagreed on, what data would resolve it
+  - Format: "FA vs QT on [topic]: FA argues [X], QT counters [Y]. Resolution: watch [metric]"
+
+**d) Synthesis Verdict** — How the debate shaped the final thesis
+  - Did the debate change the initial analysis? If so, how?
+  - What new insights emerged from the multi-perspective review?
+  - Final confidence level after incorporating expert debate
+
+If no expert debate data is provided, SKIP this section entirely.
+
+---
+
+11. Actionable Strategy (MANDATORY) — Use ## heading
+Concrete implementation plan:
+- **Position sizing**: % of portfolio, scaling plan
+- **Entry strategy**: Specific levels, order types, timing
+- **Stop loss**: Hard stop + mental stop levels with logic
+- **Take profit**: Staged exits with rationale
+- **Hedging**: Options overlay or pair trade recommendations if applicable
+- **Timeline**: Hold period expectation
+- **Review triggers**: What would make you reassess (both positive and negative)
+
+---
+
+12. Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
+- Translate heading to user's language (e.g. "关键监控指标")
+- 5-8 specific, quantifiable metrics/events to track going forward
+- Each item: what to monitor, current value → threshold that changes thesis, frequency of check
+- Format as a structured list with bold metric names
+
+═══ ABSOLUTE RULES ═══
+1. HEADING LEVELS: # for report title. ## for section headings. **Bold** for subsections within. No ### or ####.
+2. Section titles MUST be specific and analytical — not generic. Create proper research section titles (e.g. "收入放缓与利润弹性的博弈", "估值锚定：DCF vs 可比公司的分歧").
+3. Synthesize evidence across ALL data sources. Highlight where different data dimensions agree (conviction) and where they conflict (uncertainty).
+4. Never fabricate data. If exact numbers aren't available, state the directional finding and name the missing metric.
+5. INLINE CITATIONS: Retain all URLs from raw data as clickable Markdown links.
+6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text, metrics. No English mixed in. Vice versa for English. Non-negotiable.
+7. Length: 3000-6000 words. This is a deep research product — completeness and depth are expected. But every sentence must add analytical value. No filler.
+8. End with "Key Monitoring Dashboard" — this MUST be the absolute last section. Nothing after it.
+12. EXPERT DEBATE: If the input contains expert debate data, the "Expert Debate Analysis" section is MANDATORY and should be one of the most detailed sections. This is the unique value of this report.
+9. QUANTITATIVE DENSITY: The report should feel data-rich. Include specific numbers wherever possible. Tables are encouraged for comparative data.
+10. SECTION FLEXIBILITY: For non-stock topics (macro, crypto, general), adapt modules naturally. Skip stock-specific modules. Focus on what matters for the topic.
+11. CROSS-REFERENCING: Explicitly connect insights across sections. "The deteriorating margin trend (Section 3B) supports the bearish technical breakdown below $X (Section 3D)" style references add analytical rigor.
+
+═══ STYLE RULES ═══
+- Authoritative but evidence-based. Present findings with conviction backed by data.
+- Professional research tone — not academic, not casual. Think Goldman Sachs equity research meets hedge fund strategy note.
+- Use precise language: "15% probability of…" not "unlikely". "Support at $142 with 2.3M share volume cluster" not "there's support nearby".
+- Tables and data visualization take priority over prose when data supports it.
+- Each section should build the thesis progressively — the report should read as one coherent argument, not disconnected modules.
+
+═══ INTERNAL (DO NOT OUTPUT) ═══
+Before writing, build your internal thesis:
+1. Clear directional stance + conviction level
+2. The key variable the market is mispricing
+3. 3 specific numbers that anchor your thesis
+4. The one thing that would make you wrong
+Do NOT output this reasoning. Begin the report directly.
+`;
+
+      const traderMemoPrompt = `You are a top-tier macro + equity research analyst with strong opinions.
 
 Your job is NOT to summarize information.
-Your job is to form a clear, tradeable view and guide decision-making.
+Your job is to form a clear, tradeable view and guide decision-making — grounded in rigorous fundamental, valuation, financial, and technical analysis.
 
 Write like a sharp internal memo or trader note — not a formal report.
 
@@ -789,17 +1019,32 @@ ${contextString}
 If you include a title, it MUST:
 - Reflect the core trade or decision
 - Anchor on ONE key variable (not abstract themes)
-- Be consistent with the TL;DR Bias and Action
+- Be consistent with the Executive Snapshot Bias and Action
 
 Good titles: highlight one key driver, challenge a specific market assumption, or define a conditional trade (e.g. "TSLA: Short Until $280 Breaks")
 Avoid: abstract phrases ("paradox", "battle", "era"), generic contrasts ("growth vs valuation"), patterns like "not X, but Y"
 
-If not included: start directly with TL;DR.
+If not included: start directly with Quote Snapshot or the Executive Snapshot (no heading).
 
 ---
 
-1. TL;DR + Executive Snapshot (MANDATORY, no heading)
-- Do NOT output a heading. Start directly.
+0.5. Quote Snapshot (MANDATORY when analyzing a specific stock/asset)
+- If the analysis involves a specific ticker, output a structured quote block BEFORE the TL;DR.
+- Use the heading "## Quote Snapshot" (English) or "## 标的信息" (Chinese, following language rule).
+- Format as a bullet list with bold keys. Include ONLY data available in the raw reports — do NOT fabricate numbers.
+- Required fields (use whatever is available):
+  - **Symbol**: TICKER
+  - **Name**: Company name
+  - **Last Price**: current price from the raw report
+  - **Change (%)**: percentage change if available
+  - **Volume**: trading volume if available
+- Chinese equivalents: **证券代码**, **股票名称**, **最新价**, **涨跌幅**, **成交量**
+- If no specific price data is available in the raw reports, SKIP this section entirely.
+
+---
+
+1. Executive Snapshot (MANDATORY — NO HEADING AT ALL)
+- NEVER output a heading like "TL;DR", "Summary", "结论", "总结", "Executive Summary", or any variant. Start the content directly without any heading.
 - First, a compact snapshot:
   Bias / Action / Confidence / Key Trigger (one line each)
 - Then 2-3 sentences maximum:
@@ -808,31 +1053,35 @@ If not included: start directly with TL;DR.
 
 ---
 
-2–7. Analysis Sections
-Write each with your OWN unique, topic-specific ## heading. These are INTERNAL guidelines only — do NOT use them as titles:
+2–5. Deep-Dive Sections (2-4 sections, FLEXIBLE)
+Pick 2-4 angles that matter MOST for this specific topic. Each section gets its own vivid, specific ## heading. Do NOT use generic titles — create headlines a reader would actually click.
 
-a) **The Consensus & Its Flaw** — What is the market currently pricing in? Why does it sound reasonable? Then identify THE KEY INFLECTION POINT: the specific expectation where the market has a cognitive bias. Don't just say "market is wrong" — pinpoint WHERE the mispricing is and WHY.
+Choose from (but don't feel obligated to cover all):
+- **Business & Fundamentals**: revenue structure, growth drivers, segment breakdown, competitive moat, management quality
+- **Valuation**: PE/PS/PEG vs peers and history, analyst targets, implied upside/downside. Use tables when data supports it
+- **Financial Quality**: margins, cash flow, balance sheet, ROE — focus on inflection points and trends, not encyclopedic coverage
+- **Technical & Flow**: price action, support/resistance, moving averages, fund flows, short interest, institutional positioning
+- **Macro / Thematic**: sector rotation, policy tailwinds/headwinds, supply chain dynamics — when relevant
+- **Catalyst Calendar**: upcoming earnings, product launches, regulatory decisions — time-sensitive events
 
-b) **The Divergent Edge** — What variable is being ignored or underweighted? This is the alpha. Be specific — not "AI demand is strong" but "Blackwell thermal supply chain bottleneck limits Q2 shipments to 450K units, not the 600K Street expects."
+Guidelines:
+- Each section should have a POINT OF VIEW, not just describe data. "Revenue grew 15%" is description. "Ad revenue is masking a gaming collapse" is analysis.
+- Use narrative paragraphs with tables where data supports it. NOT bullet-point dumps.
+- If exact numbers aren't in the raw data, discuss qualitatively without fabricating.
+- Cover fundamental + valuation + technical dimensions across your chosen sections. Don't skip all quantitative angles.
 
-c) **Hard Data Thresholds** — For each key driver, provide quantitative red lines in a table:
+---
 
-| Indicator | Bull Threshold | Bear Threshold | Current | Source |
-|-----------|---------------|----------------|---------|--------|
-| Gross Margin | >75% | <72% | 73.5% | Q1 ER |
-| ... | ... | ... | ... | ... |
+6. Signal vs Noise (MANDATORY) — Table format with your own creative ## heading:
 
-If data is available from the raw reports, use exact numbers. If not, state the metric and why it matters without fabricating numbers.
-
-d) **Signal vs Noise** — Table format:
-
-| Noise (over-weighted) | Signal (under-weighted) |
-|----------------------|----------------------|
+| Noise (over-weighted by market) | Signal (under-weighted by market) |
+|-------------------------------|----------------------------------|
 | [thing + why it's noise] | [thing + why it matters] |
 
-e) **Positioning** — Concrete: entry level, stop loss, target, position sizing logic. What to do NOW vs what to wait for. If no clear trade, say "wait for [specific catalyst]."
+7. Positioning (MANDATORY) — Use your own creative ## heading.
+Concrete: entry level, stop loss, target, position sizing logic. What to do NOW vs what to wait for. If no clear trade, say "wait for [specific catalyst]."
 
-f) **Stress Test** — NOT a disclaimer. Model 2-3 scenarios with probability and price impact:
+8. Stress Test (MANDATORY) — Use your own creative ## heading. NOT a disclaimer. Model 2-3 scenarios with probability and price impact:
 
 | Scenario | Probability | Price Impact | Key Assumption |
 |----------|------------|-------------|----------------|
@@ -840,16 +1089,14 @@ f) **Stress Test** — NOT a disclaimer. Model 2-3 scenarios with probability an
 | Base | ~% | $X → $Y | [assumption] |
 | Bear | ~% | $X → $Y | [assumption] |
 
-Identify the floor price under panic conditions. What's the worst-case downside?
-
-Within sections, use narrative paragraphs with tables where data supports it. NOT bullet-point dumps.
+Identify the floor price under panic conditions.
 
 ---
 
-8. Tags (translate to user's language)
+9. Tags (translate to user's language)
 - Importance: High / Medium / Low · Categories: 2-3 tags
 
-9. Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
+10. Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 - Translate heading to user's language (e.g. "值得关注的问题：")
 - Format as **bold heading** followed by 3-5 bullet points
 - Each bullet: forward-looking question tied to a specific data point or event with a time horizon
@@ -857,21 +1104,22 @@ Within sections, use narrative paragraphs with tables where data supports it. NO
 
 ═══ ABSOLUTE RULES ═══
 1. HEADING LEVELS: # for report title only. ## for all section headings. No ### or ####. Use **bold** for subsections.
-2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Key Findings", "Deep Analysis", "Risk & Uncertainty", "The Consensus & Its Flaw", "Hard Data Thresholds" etc. — these are internal labels, not output headings.
+2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Fundamental Analysis", "Valuation", "Financial Health", "Signal vs Noise", "Positioning", "Stress Test" etc. — these are internal labels, not output headings. Create engaging, specific headings (e.g. "广告引擎点火，但游戏拖了后腿", "23倍PE：贵还是便宜？", "多空交锋：谁在买？谁在跑？").
 3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
 4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
 5. INLINE CITATIONS: Retain URLs from search reports as clickable Markdown links, e.g. ([Bloomberg](https://...)).
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
-7. Length: 800-2000 words. Depth over brevity, but no padding. Every sentence must earn its place.
+7. Length: 1500-3500 words. Depth over brevity, but no padding. Every sentence must earn its place. Cover ALL analysis dimensions — fundamental, valuation, financial, technical, and actionable trade setup.
 8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
-9. REDUCE qualitative statements, INCREASE quantitative red lines. "Margins are important" is worthless. "Margin below 72% = thesis broken" is actionable.
+9. REDUCE qualitative statements, INCREASE quantitative data. "Margins are important" is worthless. "Margin below 72% = thesis broken" is actionable.
+10. SECTION FLEXIBILITY: For non-stock topics (macro, crypto, general questions), adapt sections naturally — skip stock-specific sections like Quote Snapshot, Valuation, Financial Health. Focus on sections that fit the topic.
 
 ═══ STYLE RULES ═══
 - Be opinionated, not neutral. Use "My take:" for direct assessments.
 - No fluff, no textbook tone. Write like a trader thinking out loud.
 - Short, punchy paragraphs. Each section adds NEW insight (no repetition).
 - Do NOT just summarize news. Do NOT hedge excessively. Do NOT default to "it depends".
-- MUST produce clear Bias + Action. MUST include Signal vs Noise table. MUST include Positioning with levels. MUST include Stress Test scenarios.
+- MUST produce clear Bias + Action. MUST include Signal vs Noise table. MUST include Positioning with levels. MUST include Stress Test scenarios. Deep-dive sections are flexible — pick the angles that matter most.
 
 ═══ INTERNAL (DO NOT OUTPUT) ═══
 Before writing, internally decide:
@@ -883,9 +1131,14 @@ Before writing, internally decide:
 Do NOT reveal this reasoning. Begin writing directly.
 `;
 
+      // Round 1 always uses the trader memo prompt (quick initial draft)
+      // For roundtable: after consensus debate, a second Deep Research pass integrates everything
+      const synthesizePrompt = traderMemoPrompt;
+      const synthesisMaxTokens = 8192;
+
       try {
-        console.log('[agent:chat] Starting synthesis stream, prompt length:', synthesizePrompt.length);
-        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, 6144);
+        console.log('[agent:chat] Starting synthesis stream (%s mode), prompt length:', isDeepResearch ? 'deep-research' : 'trader-memo', synthesizePrompt.length);
+        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
         console.log('[agent:chat] Synthesis stream obtained, reading...');
         const synReader = synthesisStream.getReader();
         const synDecoder = new TextDecoder();
@@ -899,7 +1152,7 @@ Do NOT reveal this reasoning. Begin writing directly.
               try {
                 const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
                 const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) { synFullContent += delta; streamToChat(delta); }
+                if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
               } catch(e) {}
             }
             break;
@@ -915,7 +1168,7 @@ Do NOT reveal this reasoning. Begin writing directly.
               try {
                 const parsed = JSON.parse(sseData);
                 const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) { synFullContent += delta; streamToChat(delta); }
+                if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
               } catch (e) {}
             }
           }
@@ -945,69 +1198,50 @@ Do NOT reveal this reasoning. Begin writing directly.
         } | null = null;
 
         if (data.mode === 'roundtable') {
+          // Phase 1: Initial draft is already generated silently (not streamed)
           emitter.emitModule('consensus', 'active', { status: 'building', round: 1, maxRounds: 3 });
-          emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
-
-          // Strip trailing "Questions to watch" section (must be the last section per prompt)
-          const questionsPattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,2}\s*)[^\n]*?(?:question|watch|watchlist|关注|问题)[^\n]*?\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
-          const questionsMatch = synFullContent.match(questionsPattern);
-          const cleanedSynthesis = questionsMatch
-            ? synFullContent.slice(0, questionsMatch.index).trimEnd()
-            : synFullContent;
-          // Keep the questions for appending after consensus
-          const questionsSection = questionsMatch ? questionsMatch[0] : '';
-
-          // If questions were found and stripped, replace the streamed content so the
-          // frontend no longer shows them in the middle of the response.
-          if (questionsMatch) {
-            emitter.emitContentReplace(cleanedSynthesis);
-          }
 
           try {
-            streamToChat('\n\n');
-            const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${cleanedSynthesis}`;
+            // Phase 2: Expert debate — send initial draft to consensus engine
+            emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
+            const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${synFullContent}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
             
-            // Build Expert Council section — only show individual experts if they differ
-            let expertSection = '';
+            // Collect individual expert perspectives with structured debate context
+            let expertDebateContext = '';
             const agentResponses = consensusResult.consensus?.agentResponses || [];
+            const nameMap: Record<string, string> = {
+              agent_0: 'Fundamental Analyst',
+              agent_1: 'Macro Strategist',
+              agent_2: 'Sentiment Engine',
+              agent_3: 'Quant Tracker',
+            };
+            const roundsUsed = Number(consensusResult.consensus?.roundsUsed ?? 1) || 1;
+            const consensusReached = consensusResult.consensus?.consensusReached !== false;
+
+            // Emit round-by-round progress so the frontend graph updates progressively
+            for (let r = 1; r <= roundsUsed; r++) {
+              emitter.emitModule('consensus', 'active', { status: 'discussing', round: r, maxRounds: 3 });
+            }
+
             if (agentResponses.length > 0) {
-              const agentNames = ['Fundamental Analyst', 'Macro Strategist', 'Sentiment Engine', 'Quant Tracker'];
-              const nameMap: Record<string, string> = {
-                agent_0: 'Fundamental Analyst',
-                agent_1: 'Macro Strategist',
-                agent_2: 'Sentiment Engine',
-                agent_3: 'Quant Tracker',
-              };
-              // Check if all experts gave the same answer (consensus engine often duplicates)
-              const answers = agentResponses.map((r: any) => r.answer?.trim());
-              const uniqueAnswers = new Set(answers);
-              
-              if (uniqueAnswers.size > 1) {
-                // Experts actually disagree — show individual perspectives
-                expertSection += `\n\n**Individual Expert Perspectives:**\n\n`;
-                agentResponses.forEach((resp: any, idx: number) => {
-                  const name = nameMap[resp.agentId] || agentNames[idx] || resp.agentId;
-                  const conf = Math.round(resp.confidence * 100);
-                  expertSection += `**${name}** (${conf}% confidence):\n${resp.answer}\n\n`;
-                });
-              }
+              expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
+              expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
+              expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
+              expertDebateContext += `Consensus confidence: ${Math.round(Number(consensusResult.consensus?.confidence ?? 0) * 100)}%\n\n`;
+              expertDebateContext += `Final Consensus Verdict:\n${finalAnswerText}\n\n`;
+              expertDebateContext += `Individual Expert Positions:\n`;
+              agentResponses.forEach((resp: any, idx: number) => {
+                const name = nameMap[resp.agentId] || `Expert ${idx + 1}`;
+                const conf = Math.round((resp.confidence || 0) * 100);
+                expertDebateContext += `--- ${name} (${conf}% confidence) ---\n${resp.answer}\n\n`;
+              });
             }
 
-            if (finalAnswerText) {
-              const fullConsensusText = `\n\n---\n\n## Expert Council Verdict\n\n${finalAnswerText}${expertSection}`;
-              finalDbContent = cleanedSynthesis + fullConsensusText + questionsSection;
-              streamToChat(fullConsensusText + questionsSection);
-            } else {
-              finalDbContent = cleanedSynthesis + questionsSection;
-            }
-            
-            if (consensusResult.consensus) {
-              consensusResult.consensus.finalAnswer = finalDbContent;
-            }
-
+            // ── Immediately send consensus_done so frontend shows full RoundTable graph ──
+            // This happens BEFORE Phase 3 (deep research), so the graph appears while the report streams.
             const conf = Number(consensusResult.consensus?.confidence ?? 0);
             const reached = consensusResult.consensus?.consensusReached !== false;
             const verdictMatch = finalAnswerText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
@@ -1019,19 +1253,69 @@ Do NOT reveal this reasoning. Begin writing directly.
 
             consensusFlowData = {
               status: 'concluded',
-              round: Math.min(3, Number(consensusResult.consensus?.roundsUsed ?? 3) || 3),
+              round: Math.min(3, roundsUsed || 3),
               maxRounds: 3,
               conclusion: { verdict: verdictLabel, confidence: conf },
             };
             emitter.emitModule('consensus', 'completed', consensusFlowData);
-            
             socket.emit('agent:chat:consensus_done', {
               sessionId,
               result: consensusResult
             });
+
+            // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate
+            emitter.emitModule('consensus', 'active', { status: 'synthesizing', round: roundsUsed + 1, maxRounds: 3 });
+            const deepResearchInput = `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`;
+            const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
+
+            console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
+
+            const deepStream = await aiService.chatStream([{ role: 'user', content: deepResearchFinalPrompt }], 'superagent', undefined, 16384);
+            const deepReader = deepStream.getReader();
+            const deepDecoder = new TextDecoder();
+            let deepFullContent = '';
+            let deepBuffer = '';
+
+            while (true) {
+              const { done, value } = await deepReader.read();
+              if (done || isAborted()) {
+                if (!isAborted() && deepBuffer.trim().startsWith('data: ') && deepBuffer.trim() !== 'data: [DONE]') {
+                  try {
+                    const parsed = JSON.parse(deepBuffer.trim().slice(6).trim());
+                    const delta = parsed.choices?.[0]?.delta?.content || '';
+                    if (delta) { deepFullContent += delta; }
+                  } catch(e) {}
+                }
+                break;
+              }
+              deepBuffer += deepDecoder.decode(value, { stream: true });
+              const lines = deepBuffer.split('\n');
+              deepBuffer = lines.pop() || '';
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed === 'data: [DONE]') continue;
+                if (!trimmed.startsWith('data: ')) continue;
+                try {
+                  const parsed = JSON.parse(trimmed.slice(6).trim());
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    deepFullContent += delta;
+                    // Stream directly — initial draft was never shown to user
+                    streamToChat(delta);
+                  }
+                } catch (e) {}
+              }
+            }
+
+            // Use the deep research output as final content
+            finalDbContent = deepFullContent;
+            
+            if (consensusResult.consensus) {
+              consensusResult.consensus.finalAnswer = finalDbContent;
+            }
           } catch (e: any) {
-            finalDbContent = cleanedSynthesis + `\n\n---\n\n## ⚠️ Consensus Error\n${e.message}` + questionsSection;
-            streamToChat(`\n\n---\n\n## ⚠️ Consensus Error\n${e.message}` + questionsSection);
+            finalDbContent = synFullContent + `\n\n---\n\n## ⚠️ Consensus Error\n${e.message}`;
+            streamToChat(`\n\n---\n\n## ⚠️ Consensus Error\n${e.message}`);
             consensusFlowData = {
               status: 'concluded',
               round: 1,

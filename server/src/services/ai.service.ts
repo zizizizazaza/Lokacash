@@ -231,26 +231,31 @@ export class LokaAIService {
       })),
     ];
 
+    const requestBody = {
+        model: this.model,
+        messages: apiMessages,
+        max_tokens: maxTokens || 2048,
+        temperature: 0.5,
+        stream: true,
+      };
+    console.log(`[AI chatStream] model=${this.model}, max_tokens=${requestBody.max_tokens}, messages=${apiMessages.length}, inputLen=${JSON.stringify(apiMessages).length}`);
+
     const response = await fetch(this.baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify({
-        model: this.model,
-        messages: apiMessages,
-        max_tokens: maxTokens || 2048,
-        temperature: 0.5,
-        stream: true,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`[AI chatStream] ERROR ${response.status}: ${errorText.slice(0, 500)}`);
       throw new Error(`AI API error (${response.status}): ${errorText}`);
     }
 
+    console.log(`[AI chatStream] Response OK, status=${response.status}`);
     return response.body!;
   }
 

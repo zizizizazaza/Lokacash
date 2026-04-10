@@ -6,9 +6,19 @@ interface QuoteData {
   symbol: string;
   name?: string;
   market?: string;
+  lang?: string;
   price?: string;
   change?: string;
   volume?: string;
+  amount?: string;
+  high?: string;
+  low?: string;
+  open?: string;
+  prevClose?: string;
+  marketCap?: string;
+  pe?: string;
+  pb?: string;
+  turnover?: string;
   asOf?: string;
 }
 
@@ -64,51 +74,109 @@ export function extractQuoteSnapshot(content: string): { quote: QuoteData | null
   return { quote, body: body.replace(/^\n{3,}/, '\n\n') };
 }
 
-/** Renders a stock quote snapshot as a compact card */
+/** Bilingual label map keyed by lang */
+const LABELS: Record<string, Record<string, string>> = {
+  zh: { open: '开盘', prevClose: '昨收', high: '最高', low: '最低', volume: '成交量', amount: '成交额', marketCap: '市值', pe: 'PE', pb: 'PB', turnover: '换手率' },
+  en: { open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low', volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap', pe: 'PE', pb: 'PB', turnover: 'Turnover' },
+};
+
+/** Market badge style map (supports both zh & en market labels) */
+const MKT_STYLE: Record<string, string> = {
+  '美股': 'bg-blue-500/10 text-blue-600', '港股': 'bg-amber-500/10 text-amber-600', 'A股': 'bg-red-500/10 text-red-600',
+  'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
+};
+
+/** Renders a stock quote snapshot as a styled card */
 export function QuoteCard({ quote }: { quote: QuoteData }) {
+  const lang = quote.lang || 'zh';
+  const L = LABELS[lang] || LABELS.zh;
+
   const isPositive = quote.change ? /^\+|涨/.test(quote.change) : null;
   const isNegative = quote.change ? /^-|跌/.test(quote.change) : null;
   const changeColor = isPositive ? 'text-emerald-600' : isNegative ? 'text-red-500' : 'text-gray-500';
-  const changeBg = isPositive ? 'bg-emerald-50' : isNegative ? 'bg-red-50' : 'bg-gray-50';
+  const changeBg = isPositive
+    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20'
+    : isNegative
+    ? 'bg-red-500/8 ring-1 ring-red-500/20'
+    : 'bg-gray-100 ring-1 ring-gray-200/60';
+
+  // Subtle background tint based on price movement
+  const cardBg = isPositive
+    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
+    : isNegative
+    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
+    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
+
+  const mktCls = quote.market ? (MKT_STYLE[quote.market] || 'bg-gray-100 text-gray-500') : '';
+
+  // Helper: check if a value is meaningful (not N/A, empty, zero-ish)
+  const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
+
+  // Build stats array with localized labels, skipping empty/N/A
+  const stats: { label: string; value: string }[] = [];
+  if (ok(quote.open)) stats.push({ label: L.open, value: quote.open! });
+  if (ok(quote.prevClose)) stats.push({ label: L.prevClose, value: quote.prevClose! });
+  if (ok(quote.high)) stats.push({ label: L.high, value: quote.high! });
+  if (ok(quote.low)) stats.push({ label: L.low, value: quote.low! });
+  if (ok(quote.volume)) stats.push({ label: L.volume, value: quote.volume! });
+  if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
+  if (ok(quote.marketCap)) stats.push({ label: L.marketCap, value: quote.marketCap! });
+  if (ok(quote.pe)) stats.push({ label: L.pe, value: quote.pe! });
+  if (ok(quote.pb)) stats.push({ label: L.pb, value: quote.pb! });
+  if (ok(quote.turnover)) stats.push({ label: L.turnover, value: quote.turnover! });
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3 mb-4 rounded-xl border border-gray-200 bg-gray-50/60 shadow-sm">
-      {/* Symbol & Name */}
-      <div className="min-w-0">
-        <div className="flex items-baseline gap-2">
-          <span className="text-[15px] font-bold text-gray-900 tracking-tight">{quote.symbol}</span>
-          {quote.market && (
-            <span className="text-[10px] font-medium text-gray-400 uppercase">{quote.market}</span>
-          )}
+    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5">
+            <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{quote.symbol}</span>
+            {quote.market && (
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase`}>{quote.market}</span>
+            )}
+          </div>
+          {quote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide">{quote.name}</p>}
         </div>
-        {quote.name && (
-          <p className="text-[11px] text-gray-400 truncate mt-0.5">{quote.name}</p>
+        {ok(quote.price) && (
+          <div className="text-right shrink-0 flex flex-col items-end">
+            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{quote.price}</p>
+            {ok(quote.change) && (
+              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${changeBg} ${changeColor} tabular-nums`}>
+                {isPositive && <span className="mr-0.5">▲</span>}
+                {isNegative && <span className="mr-0.5">▼</span>}
+                {quote.change}
+              </span>
+            )}
+          </div>
         )}
       </div>
 
-      {/* Price */}
-      {quote.price && (
-        <div className="ml-auto text-right shrink-0">
-          <p className="text-[17px] font-semibold text-gray-900 tabular-nums">{quote.price}</p>
-          {quote.change && (
-            <span className={`inline-block text-[11px] font-medium px-1.5 py-0.5 rounded ${changeBg} ${changeColor} tabular-nums`}>
-              {quote.change}
-            </span>
-          )}
+      {/* Divider */}
+      {stats.length > 0 && (
+        <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
+      )}
+
+      {/* Stats grid */}
+      {stats.length > 0 && (
+        <div className="px-5 py-3.5">
+          <div className="grid grid-cols-5 gap-x-4 gap-y-3">
+            {stats.map((s) => (
+              <div key={s.label} className="min-w-0">
+                <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
+                <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {/* Volume & Time */}
-      <div className="shrink-0 text-right border-l border-gray-200 pl-4 hidden sm:block">
-        {quote.volume && (
-          <p className="text-[11px] text-gray-400">
-            <span className="text-gray-500 font-medium">{quote.volume}</span> vol
-          </p>
-        )}
-        {quote.asOf && (
-          <p className="text-[10px] text-gray-300 mt-0.5">{quote.asOf}</p>
-        )}
-      </div>
+      {/* Timestamp */}
+      {quote.asOf && (
+        <div className="px-5 pb-3 pt-0">
+          <p className="text-[9px] text-gray-300 tracking-wide">{quote.asOf}</p>
+        </div>
+      )}
     </div>
   );
 }

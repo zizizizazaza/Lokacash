@@ -322,8 +322,8 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
 };
 
 // ─── RoundtableView Component ──────────────────────────
-const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
-    // Empty state: show the roundtable graphic with agents but no rounds
+const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean }> = ({ data, isWaiting }) => {
+    // Empty / waiting state: show the roundtable graphic with agents but no rounds
     if (data.rounds.length === 0) {
         const emptyAgents = ROUNDTABLE_AGENTS;
         const E_SIZE = 220, E_CTR = E_SIZE / 2, E_R = 72, E_AV = 38, E_HALF = E_AV / 2;
@@ -338,7 +338,6 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                     <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
                 </div>
                 <div className="flex-1 flex flex-col items-center justify-center px-5">
-                    {/* Static roundtable graphic */}
                     <div className="relative" style={{ width: E_SIZE, height: E_SIZE + 24 }}>
                         <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE }} viewBox={`0 0 ${E_SIZE} ${E_SIZE}`}>
                             <circle cx={E_CTR} cy={E_CTR} r={E_R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
@@ -347,31 +346,67 @@ const RoundtableView: React.FC<{ data: RoundtableData }> = ({ data }) => {
                                 <line key={i} x1={E_CTR} y1={E_CTR} x2={p.x} y2={p.y} stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
                             ))}
                         </svg>
-                        {/* Center idle indicator */}
+                        {/* Center indicator */}
                         <div className="absolute flex items-center justify-center" style={{ left: E_CTR - 26, top: E_CTR - 26, width: 52, height: 52 }}>
-                            <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
-                                <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
-                            </div>
-                        </div>
-                        {/* Agent avatars */}
-                        {emptyAgents.map((agent, i) => {
-                            const pos = emptyPositions[i];
-                            const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                            return (
-                                <div key={agent.initials} className="absolute flex flex-col items-center"
-                                    style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
-                                    <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
-                                        style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
-                                        {AGENT_ICON(agent.initials)}
+                            {isWaiting ? (
+                                <div className="w-[52px] h-[52px] rounded-full bg-blue-50/80 border-2 border-blue-200 flex flex-col items-center justify-center">
+                                    <div className="flex gap-[3px] mb-1">
+                                        {[0, 1, 2].map(d => (
+                                            <div key={d} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${d * 0.2}s` }} />
+                                        ))}
                                     </div>
-                                    <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                        {agent.name}
-                                    </span>
+                                    <span className="text-[8px] text-blue-400 font-bold">PREP</span>
                                 </div>
-                            );
-                        })}
+                            ) : (
+                                <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
+                                    <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
+                                </div>
+                            )}
+                        </div>
+                        {/* Agent avatars — orbit when waiting */}
+                        {isWaiting ? (
+                            <div className="absolute rt-orbit" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE + 24, transformOrigin: `${E_CTR}px ${E_CTR}px` }}>
+                                {emptyAgents.map((agent, i) => {
+                                    const pos = emptyPositions[i];
+                                    const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                                    return (
+                                        <div key={agent.initials} className="absolute flex flex-col items-center rt-counter-orbit"
+                                            style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV, transformOrigin: `${E_HALF}px ${E_HALF}px` }}>
+                                            <div className="rounded-full flex items-center justify-center text-white shadow-sm ring-2 ring-blue-200/40 ring-offset-1"
+                                                style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.8 }}>
+                                                {AGENT_ICON(agent.initials)}
+                                            </div>
+                                            <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                                {agent.name}
+                                            </span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            emptyAgents.map((agent, i) => {
+                                const pos = emptyPositions[i];
+                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                                return (
+                                    <div key={agent.initials} className="absolute flex flex-col items-center"
+                                        style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
+                                        <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
+                                            style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
+                                            {AGENT_ICON(agent.initials)}
+                                        </div>
+                                        <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                            {agent.name}
+                                        </span>
+                                    </div>
+                                );
+                            })
+                        )}
                     </div>
-                    <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
+                    {isWaiting ? (
+                        <p className="text-[12px] font-medium text-blue-500 mt-4">Analyzing & gathering data...</p>
+                    ) : (
+                        <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
+                    )}
                 </div>
             </div>
         );
@@ -1234,6 +1269,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
+    const tocNavRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
     const restoredFromPendingRef = useRef(
@@ -1336,7 +1372,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         // Match a bold/heading title containing question/watch/关注/问题 keywords,
         // then a bullet list. Allow optional trailing tags/text after the bullet list.
         // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
-        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,2}\s*)[^\n]*?(?:question|watch|关注|问题|考虑)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)/i;
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑|思考)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)/i;
         const match = content.match(pattern);
         if (match) {
             const questions = match[1].split('\n')
@@ -1387,7 +1423,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     // Show real roundtable data from consensus_done event, otherwise empty
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
     // Stock quote cards keyed by message index
-    const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; price?: string; change?: string; volume?: string; high?: string; low?: string; marketCap?: string }>>({});
+    const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
     const currentConsensus = activeGraphMsgIdx !== null ? consensusResults[activeGraphMsgIdx] : null;
     const currentRoundtableData: RoundtableData = currentConsensus
         ? buildRoundtableFromConsensus(currentConsensus)
@@ -1401,7 +1437,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const m = messages[j];
             if (m.role === 'assistant' && m.content && !m.isStreaming && m.content !== '__cancelled__') {
                 const cleaned = stripInternalResearchCitations(m.content);
-                const h = extractHeadings(cleaned);
+                const { body: noQuote } = extractQuoteSnapshot(cleaned);
+                const h = extractHeadings(noQuote);
                 if (h.length >= 2) map[j] = h;
             }
         }
@@ -1455,11 +1492,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             }
             setActiveTocId(current);
 
-            // Float position
+            // Float position – clamp between the answer's h1 title and its action-bar
             const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
             if (firstEl) {
-                const offset = firstEl.offsetTop - container.scrollTop;
-                setTocTopPx(Math.max(8, Math.min(offset, 200)));
+                const floatTop = Math.max(8, firstEl.offsetTop - container.scrollTop);
+
+                // Bottom boundary: when TOC would overlap the action bar, let it scroll away with content
+                const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
+                const tocH = tocNavRef.current?.offsetHeight || 0;
+                if (actionsEl && tocH > 0) {
+                    const pinnedTop = actionsEl.offsetTop - container.scrollTop - tocH - 16;
+                    setTocTopPx(Math.min(floatTop, pinnedTop));
+                } else {
+                    setTocTopPx(floatTop);
+                }
             }
         };
         container.addEventListener('scroll', onScroll, { passive: true });
@@ -1924,7 +1970,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
         
         setActiveGraphMsgIdx(msgIdx);
-        setShowGraphPanel(false);
+        // Keep graph panel open in roundtable mode so user sees the waiting state
+        if (chatMode !== 'roundtable') setShowGraphPanel(false);
 
         setThinkingProcesses(prev => ({
             ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
@@ -2116,6 +2163,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     {/* TOC floating panel */}
                     {tocHeadings.length > 0 && (
                         <nav
+                            ref={tocNavRef}
                             className="absolute left-3 z-30 hidden md:block transition-all duration-150"
                             style={{ top: tocTopPx }}
                         >
@@ -2200,33 +2248,85 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     return (
                                                         <>
                                                             {/* Live stock quote card from real-time data */}
-                                                            {liveQuote && (
-                                                                <div className="flex items-center gap-4 px-4 py-3 mb-4 rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white shadow-sm">
-                                                                    <div className="min-w-0">
-                                                                        <div className="flex items-baseline gap-2">
-                                                                            <span className="text-[15px] font-bold text-gray-900 tracking-tight">{liveQuote.symbol}</span>
-                                                                        </div>
-                                                                        {liveQuote.name && <p className="text-[11px] text-gray-400 mt-0.5">{liveQuote.name}</p>}
-                                                                    </div>
-                                                                    {liveQuote.price && (
-                                                                        <div className="ml-auto text-right shrink-0">
-                                                                            <p className="text-[17px] font-semibold text-gray-900 tabular-nums">{liveQuote.price}</p>
-                                                                            {liveQuote.change && (
-                                                                                <span className={`inline-block text-[11px] font-medium px-1.5 py-0.5 rounded tabular-nums ${
-                                                                                    liveQuote.change.startsWith('+') ? 'bg-emerald-50 text-emerald-600'
-                                                                                        : liveQuote.change.startsWith('-') ? 'bg-red-50 text-red-500'
-                                                                                        : 'bg-gray-50 text-gray-500'
-                                                                                }`}>{liveQuote.change}</span>
+                                                            {liveQuote && (() => {
+                                                                const isUp = liveQuote.change?.startsWith('+');
+                                                                const isDown = liveQuote.change?.startsWith('-');
+                                                                const chgColor = isUp ? 'text-emerald-600' : isDown ? 'text-red-500' : 'text-gray-500';
+                                                                const chgBg = isUp
+                                                                    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20'
+                                                                    : isDown
+                                                                    ? 'bg-red-500/8 ring-1 ring-red-500/20'
+                                                                    : 'bg-gray-100 ring-1 ring-gray-200/60';
+                                                                const cardBg = isUp
+                                                                    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
+                                                                    : isDown
+                                                                    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
+                                                                    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
+                                                                const mktStyles: Record<string, string> = {
+                                                                    '美股': 'bg-blue-500/10 text-blue-600', '港股': 'bg-amber-500/10 text-amber-600', 'A股': 'bg-red-500/10 text-red-600',
+                                                                    'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
+                                                                };
+                                                                const mktCls = liveQuote.market ? (mktStyles[liveQuote.market] || 'bg-gray-100 text-gray-500') : '';
+                                                                const lang = liveQuote.lang || 'zh';
+                                                                const L = lang === 'en'
+                                                                    ? { open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low', volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap', pe: 'PE', pb: 'PB', turnover: 'Turnover' }
+                                                                    : { open: '开盘', prevClose: '昨收', high: '最高', low: '最低', volume: '成交量', amount: '成交额', marketCap: '市值', pe: 'PE', pb: 'PB', turnover: '换手率' };
+                                                                const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
+                                                                const stats: { label: string; value: string }[] = [];
+                                                                if (ok(liveQuote.open)) stats.push({ label: L.open, value: liveQuote.open! });
+                                                                if (ok(liveQuote.prevClose)) stats.push({ label: L.prevClose, value: liveQuote.prevClose! });
+                                                                if (ok(liveQuote.high)) stats.push({ label: L.high, value: liveQuote.high! });
+                                                                if (ok(liveQuote.low)) stats.push({ label: L.low, value: liveQuote.low! });
+                                                                if (ok(liveQuote.volume)) stats.push({ label: L.volume, value: liveQuote.volume! });
+                                                                if (ok(liveQuote.amount)) stats.push({ label: L.amount, value: liveQuote.amount! });
+                                                                if (ok(liveQuote.marketCap)) stats.push({ label: L.marketCap, value: liveQuote.marketCap! });
+                                                                if (ok(liveQuote.pe)) stats.push({ label: L.pe, value: liveQuote.pe! });
+                                                                if (ok(liveQuote.pb)) stats.push({ label: L.pb, value: liveQuote.pb! });
+                                                                if (ok(liveQuote.turnover)) stats.push({ label: L.turnover, value: liveQuote.turnover! });
+                                                                return (
+                                                                    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
+                                                                        {/* Header */}
+                                                                        <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
+                                                                            <div className="min-w-0">
+                                                                                <div className="flex items-center gap-2.5">
+                                                                                    <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{liveQuote.symbol}</span>
+                                                                                    {liveQuote.market && <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase`}>{liveQuote.market}</span>}
+                                                                                </div>
+                                                                                {liveQuote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide">{liveQuote.name}</p>}
+                                                                            </div>
+                                                                            {liveQuote.price && (
+                                                                                <div className="text-right shrink-0 flex flex-col items-end">
+                                                                                    <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{liveQuote.price}</p>
+                                                                                    {liveQuote.change && (
+                                                                                        <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${chgBg} ${chgColor} tabular-nums`}>
+                                                                                            {isUp && <span className="mr-0.5">▲</span>}
+                                                                                            {isDown && <span className="mr-0.5">▼</span>}
+                                                                                            {liveQuote.change}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
                                                                             )}
                                                                         </div>
-                                                                    )}
-                                                                    <div className="shrink-0 text-right border-l border-gray-200 pl-4 hidden sm:block space-y-0.5">
-                                                                        {liveQuote.volume && <p className="text-[11px] text-gray-400"><span className="text-gray-500 font-medium">{liveQuote.volume}</span> vol</p>}
-                                                                        {liveQuote.marketCap && <p className="text-[11px] text-gray-400"><span className="text-gray-500 font-medium">{liveQuote.marketCap}</span> cap</p>}
-                                                                        {liveQuote.high && liveQuote.low && <p className="text-[10px] text-gray-300">{liveQuote.low} – {liveQuote.high}</p>}
+                                                                        {/* Divider */}
+                                                                        {stats.length > 0 && (
+                                                                            <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
+                                                                        )}
+                                                                        {/* Stats grid */}
+                                                                        {stats.length > 0 && (
+                                                                            <div className="px-5 py-3.5">
+                                                                                <div className="grid grid-cols-5 gap-x-4 gap-y-3">
+                                                                                    {stats.map((s) => (
+                                                                                        <div key={s.label} className="min-w-0">
+                                                                                            <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
+                                                                                            <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
                                                                     </div>
-                                                                </div>
-                                                            )}
+                                                                );
+                                                            })()}
                                                             {/* Fallback: markdown-parsed quote card */}
                                                             {!liveQuote && quote && <QuoteCard quote={quote} />}
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
@@ -2236,7 +2336,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     );
                                                 })() : null}
                                                 {!msg.isStreaming && msg.content && (
-                                                    <div className="flex items-center gap-0.5 mt-3">
+                                                    <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
                                                         {msg.content !== '__cancelled__' && (
                                                         <button
@@ -2518,7 +2618,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
-                        <RoundtableView data={currentRoundtableData} />
+                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} />
                     </div>
                 )}
             </div>
