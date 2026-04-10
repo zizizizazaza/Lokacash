@@ -1204,7 +1204,20 @@ Do NOT reveal this reasoning. Begin writing directly.
           try {
             // Phase 2: Expert debate — send initial draft to consensus engine
             emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
-            const consensusTask = `Please review this Synthesized Financial Report and provide your final Verdict and Analysis:\n\n${synFullContent}`;
+            // Detect language so experts respond consistently
+            const isZhTask = /[\u4e00-\u9fff]/.test(data.content);
+            const langInstruction = isZhTask
+              ? '\n\n重要：你的所有分析和结论必须全部使用中文。不要评价报告本身的质量，而是对分析主题给出你自己的独立分析和判断。'
+              : '\n\nIMPORTANT: Provide your own independent analysis of the topic, NOT a review of the report quality. Respond entirely in English.';
+            const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${data.content}"
+
+Focus on:
+1. Your directional view (bullish/bearish/neutral) with conviction level
+2. Key factors supporting your view
+3. Main risks to your thesis
+4. Specific price levels or targets if applicable
+
+Research context:\n${synFullContent}${langInstruction}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';

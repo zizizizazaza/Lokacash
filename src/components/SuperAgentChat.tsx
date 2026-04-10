@@ -250,6 +250,7 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
     const rounds: ConsensusRound[] = [];
 
     if (discussionRounds.length > 0) {
+        let prevFingerprint = '';
         for (const dr of discussionRounds) {
             const roundNum: number = dr.round_number ?? (rounds.length + 1);
             const agentMap: Record<string, any> = dr.agent_responses || {};
@@ -270,17 +271,34 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
                 }
             }
 
-            const status: string = dr.consensus_status || 'forming';
+            // Deduplicate: skip rounds whose agent content is identical to previous
+            const fingerprint = agents.map(a => a.reasoning).join('|||');
+            if (fingerprint === prevFingerprint && rounds.length > 0) {
+                rounds[rounds.length - 1].status = 'reached';
+                rounds[rounds.length - 1].summary = `${agents.length} experts reached consensus.`;
+                continue;
+            }
+            prevFingerprint = fingerprint;
+
+            // Infer status: API rarely includes consensus_status per round,
+            // so derive it from the top-level consensusReached + round position.
+            // Non-last rounds didn't reach consensus (otherwise there'd be no next round).
+            // Last round inherits the top-level result.
+            const isLastRound = dr === discussionRounds[discussionRounds.length - 1];
+            const status: 'forming' | 'reached' | 'diverging' =
+                dr.consensus_status === 'reached' || dr.consensus_status === 'diverging'
+                    ? dr.consensus_status
+                    : isLastRound
+                        ? (consensusReached ? 'reached' : 'diverging')
+                        : 'diverging'; // earlier rounds: no consensus → proceeded to next round
 
             rounds.push({
                 round: roundNum,
                 agents,
-                status: status as 'forming' | 'reached' | 'diverging',
+                status,
                 summary: status === 'reached'
                     ? `${agents.length} experts reached consensus.`
-                    : status === 'diverging'
-                        ? `Experts’ opinions are diverging.`
-                        : `${agents.length} experts forming consensus...`,
+                    : `No consensus — proceeded to next round.`,
             });
         }
     } else {
@@ -322,7 +340,7 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
 };
 
 // ─── RoundtableView Component ──────────────────────────
-const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean }> = ({ data, isWaiting }) => {
+const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean }> = ({ data, isWaiting, isLive }) => {
     // Empty / waiting state: show the roundtable graphic with agents but no rounds
     if (data.rounds.length === 0) {
         const emptyAgents = ROUNDTABLE_AGENTS;
@@ -423,6 +441,13 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean }> = 
     const [visibleVotes, setVisibleVotes] = useState(0);
 
     useEffect(() => {
+        // If not live (viewing past result), jump straight to final state — no animation
+        if (!isLive && totalRounds > 0) {
+            setPlayRoundIdx(totalRounds - 1);
+            setPlayPhase('consensus');
+            setVisibleVotes(graphAgents.length);
+            return;
+        }
         const timers: ReturnType<typeof setTimeout>[] = [];
         let t = 0;
         for (let r = 0; r < totalRounds; r++) {
@@ -439,7 +464,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean }> = 
         }
         timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(graphAgents.length); }, t));
         return () => timers.forEach(clearTimeout);
-    }, [totalRounds]);
+    }, [totalRounds, isLive]);
 
     const isSpinning = playPhase === 'discussing';
     const isConsensusReached = playPhase === 'consensus';
@@ -580,8 +605,8 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean }> = 
                 {data.rounds.map((round) => {
                     const isExpanded = expandedRound === round.round;
                     const isReached = round.status === 'reached';
-                    const statusLabel = isReached ? '✓ Consensus' : round.status === 'diverging' ? '✗ Diverging' : '⟳ Forming';
-                    const statusCls = isReached ? 'bg-emerald-50 text-emerald-600' : round.status === 'diverging' ? 'bg-red-50 text-red-500' : 'bg-amber-50 text-amber-600';
+                    const statusLabel = isReached ? '✓ Consensus' : '→ Next Round';
+                    const statusCls = isReached ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500';
                     return (
                         <div key={round.round} className="relative">
                             {round.round < data.rounds.length && (
@@ -1424,7 +1449,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
     // Stock quote cards keyed by message index
     const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
-    const currentConsensus = activeGraphMsgIdx !== null ? consensusResults[activeGraphMsgIdx] : null;
+    const currentConsensus = (() => {
+        // First try the active message's consensus
+        if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
+            return consensusResults[activeGraphMsgIdx];
+        }
+        // Fallback: show the most recent consensus so the graph isn't empty
+        const keys = Object.keys(consensusResults).map(Number).sort((a, b) => b - a);
+        return keys.length > 0 ? consensusResults[keys[0]] : null;
+    })();
     const currentRoundtableData: RoundtableData = currentConsensus
         ? buildRoundtableFromConsensus(currentConsensus)
         : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
@@ -1438,7 +1471,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             if (m.role === 'assistant' && m.content && !m.isStreaming && m.content !== '__cancelled__') {
                 const cleaned = stripInternalResearchCitations(m.content);
                 const { body: noQuote } = extractQuoteSnapshot(cleaned);
-                const h = extractHeadings(noQuote);
+                const h = extractHeadings(noQuote, j);
                 if (h.length >= 2) map[j] = h;
             }
         }
@@ -2232,6 +2265,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         }}
                                                     />
                                                 )}
+                                                {/* Clickable badge to view past roundtable consensus */}
+                                                {consensusResults[i] && !msg.isStreaming && (
+                                                    <button
+                                                        onClick={() => { setActiveGraphMsgIdx(i); setShowGraphPanel(true); setShowThinkingPanel(false); }}
+                                                        className="inline-flex items-center gap-1.5 mb-2 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
+                                                    >
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                                                        Roundtable
+                                                    </button>
+                                                )}
                                                 {msg.content === '__cancelled__' ? (() => {
                                                     const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
                                                     const isChinese = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
@@ -2330,7 +2373,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             {/* Fallback: markdown-parsed quote card */}
                                                             {!liveQuote && quote && <QuoteCard quote={quote} />}
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                                {renderMarkdownContent(body)}
+                                                                {renderMarkdownContent(body, i)}
                                                             </div>
                                                         </>
                                                     );
@@ -2618,7 +2661,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
-                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} />
+                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && chatMode === 'roundtable'} />
                     </div>
                 )}
             </div>

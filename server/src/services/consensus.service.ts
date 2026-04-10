@@ -117,8 +117,8 @@ export async function runConsensusEngine(userId: string, mode: string, message: 
       task: message,
       message_id: messageId,
       quorum_threshold: 0.6,
-      stability_horizon: 2,
-      max_rounds: 3,
+      stability_horizon: 1,
+      max_rounds: 2,
     }),
   });
   console.log(`[Consensus] Step 4 ✅ Consensus finished`);

@@ -380,22 +380,24 @@ function headingSlug(text: string): string {
   return text.replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'h';
 }
 
-export function extractHeadings(text: string): { level: number; text: string; id: string }[] {
+export function extractHeadings(text: string, msgIdx?: number): { level: number; text: string; id: string }[] {
   if (!text) return [];
+  const prefix = msgIdx != null ? `m${msgIdx}-` : '';
   const headings: { level: number; text: string; id: string }[] = [];
   for (const line of text.split('\n')) {
     const m3 = line.match(/^###\s+(.+)/);
-    if (m3) { headings.push({ level: 3, text: m3[1].replace(/\*\*/g, ''), id: headingSlug(m3[1].replace(/\*\*/g, '')) }); continue; }
+    if (m3) { headings.push({ level: 3, text: m3[1].replace(/\*\*/g, ''), id: prefix + headingSlug(m3[1].replace(/\*\*/g, '')) }); continue; }
     const m2 = line.match(/^##\s+(.+)/);
-    if (m2) { headings.push({ level: 2, text: m2[1].replace(/\*\*/g, ''), id: headingSlug(m2[1].replace(/\*\*/g, '')) }); continue; }
+    if (m2) { headings.push({ level: 2, text: m2[1].replace(/\*\*/g, ''), id: prefix + headingSlug(m2[1].replace(/\*\*/g, '')) }); continue; }
     const m1 = line.match(/^#\s+(.+)/);
-    if (m1 && !line.startsWith('##')) { headings.push({ level: 1, text: m1[1].replace(/\*\*/g, ''), id: headingSlug(m1[1].replace(/\*\*/g, '')) }); continue; }
+    if (m1 && !line.startsWith('##')) { headings.push({ level: 1, text: m1[1].replace(/\*\*/g, ''), id: prefix + headingSlug(m1[1].replace(/\*\*/g, '')) }); continue; }
   }
   return headings;
 }
 
-export function renderMarkdownContent(text: string): React.ReactNode {
+export function renderMarkdownContent(text: string, msgIdx?: number): React.ReactNode {
   if (!text) return null;
+  const prefix = msgIdx != null ? `m${msgIdx}-` : '';
   const lines = text.split('\n');
   const elements: React.ReactNode[] = [];
   let i = 0;
@@ -410,7 +412,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
     if (/^#{3}\s/.test(line)) {
       const hText = line.replace(/^#{3}\s/, '');
       elements.push(
-        <h3 key={i} id={headingSlug(hText.replace(/\*\*/g, ''))} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
+        <h3 key={i} id={prefix + headingSlug(hText.replace(/\*\*/g, ''))} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
           {parseLine(hText)}
         </h3>,
       );
@@ -420,7 +422,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
     if (/^#{2}\s/.test(line)) {
       const hText = line.replace(/^#{2}\s/, '');
       elements.push(
-        <h2 key={i} id={headingSlug(hText.replace(/\*\*/g, ''))} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
+        <h2 key={i} id={prefix + headingSlug(hText.replace(/\*\*/g, ''))} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
           {parseLine(hText)}
         </h2>,
       );
@@ -430,7 +432,7 @@ export function renderMarkdownContent(text: string): React.ReactNode {
     if (/^#\s/.test(line) && !line.startsWith('##')) {
       const hText = line.replace(/^#\s/, '');
       elements.push(
-        <h1 key={i} id={headingSlug(hText.replace(/\*\*/g, ''))} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
+        <h1 key={i} id={prefix + headingSlug(hText.replace(/\*\*/g, ''))} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
           {parseLine(hText)}
         </h1>,
       );
