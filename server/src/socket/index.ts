@@ -493,16 +493,57 @@ Text: "${query}"`;
         plan = await aiService.evaluateRouting(routingQuery);
       } catch (routingErr: any) {
         console.error('evaluateRouting failed:', routingErr.message);
-        plan = { isSimpleChat: true, capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
+        plan = { isSimpleChat: true, queryType: 'general', capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
       }
 
       if (data.mode === 'roundtable') {
         plan.isSimpleChat = false;
       }
 
-      socket.emit('agent:chat:routed', {
-        sessionId,
-        mode: data.mode === 'roundtable' ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto')
+      // Guru Council mode: always trigger simulation
+      if (data.agentId === 'guru-council') {
+        plan.isSimpleChat = false;
+        plan.queryType = 'guru-council';
+        plan.capabilities.simulate.needed = true;
+        // Use tickers from routing if available, otherwise default to broad market
+        if (!plan.capabilities.simulate.tickers?.length) {
+          plan.capabilities.simulate.tickers = plan.capabilities.analysis?.tickers?.length
+            ? plan.capabilities.analysis.tickers
+            : ['SPY', 'QQQ'];
+        }
+        // Detect if user mentioned specific named gurus
+        const GURU_NAME_MAP: Record<string, string> = {
+          'damodaran': 'aswath_damodaran', 'aswath damodaran': 'aswath_damodaran',
+          'ben graham': 'ben_graham', 'graham': 'ben_graham', 'benjamin graham': 'ben_graham',
+          'bill ackman': 'bill_ackman', 'ackman': 'bill_ackman',
+          'cathie wood': 'cathie_wood', 'cathie': 'cathie_wood',
+          'charlie munger': 'charlie_munger', 'munger': 'charlie_munger',
+          'michael burry': 'michael_burry', 'burry': 'michael_burry', 'dr. burry': 'michael_burry',
+          'mohnish pabrai': 'mohnish_pabrai', 'pabrai': 'mohnish_pabrai',
+          'nassim taleb': 'nassim_taleb', 'taleb': 'nassim_taleb',
+          'peter lynch': 'peter_lynch', 'lynch': 'peter_lynch',
+          'phil fisher': 'phil_fisher', 'fisher': 'phil_fisher', 'philip fisher': 'phil_fisher',
+          'rakesh jhunjhunwala': 'rakesh_jhunjhunwala', 'rakesh': 'rakesh_jhunjhunwala', 'jhunjhunwala': 'rakesh_jhunjhunwala',
+          'stanley druckenmiller': 'stanley_druckenmiller', 'druckenmiller': 'stanley_druckenmiller',
+          'warren buffett': 'warren_buffett', 'buffett': 'warren_buffett', 'warren': 'warren_buffett',
+        };
+        const queryLower = data.content.toLowerCase();
+        const mentionedSet = new Set<string>();
+        // Sort by length descending to match longer phrases first
+        const sortedKeys = Object.keys(GURU_NAME_MAP).sort((a, b) => b.length - a.length);
+        for (const phrase of sortedKeys) {
+          if (queryLower.includes(phrase)) {
+            mentionedSet.add(GURU_NAME_MAP[phrase]);
+          }
+        }
+        if (mentionedSet.size > 0) {
+          plan.specificGurus = Array.from(mentionedSet);
+        }
+      }
+      
+      socket.emit('agent:chat:routed', { 
+        sessionId, 
+        mode: data.mode === 'roundtable' ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
       });
 
       const streamToChat = (chunk: string) => {
@@ -587,6 +628,7 @@ Text: "${query}"`;
       let finalSocialSources: any[] = [];
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
+      let savedQuoteCard: any = null;
 
       if (plan.capabilities.search.needed) {
         emitter.emitModule('search', 'active', {
@@ -727,65 +769,67 @@ Text: "${query}"`;
                       // Only show card if price is a real number (not "365 (analyst target)" etc.)
                       const numPrice = typeof q.price === 'number' ? q.price : parseFloat(String(q.price));
                       if (!isNaN(numPrice)) {
-                        // Detect language from user's original message
-                        const isZh = /[\u4e00-\u9fff]/.test(data.content);
-                        const fmtVol = (v: number | null) => {
-                          if (v == null) return undefined;
-                          if (isZh) {
-                            if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
-                            if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
-                          } else {
-                            if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
-                            if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-                            if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-                          }
-                          return String(v);
-                        };
-                        const fmtMv = (v: number | null) => {
-                          if (v == null) return undefined;
-                          if (isZh) {
-                            if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿';
-                            if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
-                          } else {
-                            if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
-                            if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-                          }
-                          return String(v);
-                        };
-                        // Detect market from symbol code
-                        const detectMarket = (sym: string) => {
-                          if (!sym) return undefined;
-                          if (/^\d{6}\.(SH|SS)$/.test(sym) || /^(sh|sz)\d{6}$/i.test(sym) || /^[036]\d{5}$/.test(sym))
-                            return isZh ? 'A股' : 'A-Share';
-                          if (/\.HK$/i.test(sym) || /^0[0-9]{4}\.?$/i.test(sym))
-                            return isZh ? '港股' : 'HK';
-                          if (/^[A-Z]{1,5}$/.test(sym) || /\.(US|NASDAQ|NYSE)$/i.test(sym))
-                            return isZh ? '美股' : 'US';
-                          return undefined;
-                        };
-                        emitToUser(userId, 'agent:chat:quote', {
-                          sessionId,
-                          quote: {
-                            symbol: q.symbol,
-                            name: q.name || undefined,
-                            market: detectMarket(q.symbol),
-                            lang: isZh ? 'zh' : 'en',
-                            price: numPrice.toFixed(2),
-                            change: q.change_pct != null
-                              ? (q.change_pct >= 0 ? '+' : '') + Number(q.change_pct).toFixed(2) + '%'
-                              : undefined,
-                            volume: fmtVol(q.volume),
-                            amount: fmtVol(q.amount),
-                            high: q.high != null ? Number(q.high).toFixed(2) : undefined,
-                            low: q.low != null ? Number(q.low).toFixed(2) : undefined,
-                            open: q.open != null ? Number(q.open).toFixed(2) : undefined,
-                            prevClose: q.prev_close != null ? Number(q.prev_close).toFixed(2) : undefined,
-                            marketCap: fmtMv(q.total_mv || q.circ_mv),
-                            pe: q.pe != null ? Number(q.pe).toFixed(2) : undefined,
-                            pb: q.pb != null ? Number(q.pb).toFixed(2) : undefined,
-                            turnover: q.turnover != null ? Number(q.turnover).toFixed(2) + '%' : undefined,
-                          },
-                        });
+                      // Detect language from user's original message
+                      const isZh = /[\u4e00-\u9fff]/.test(data.content);
+                      const fmtVol = (v: number | null) => {
+                        if (v == null) return undefined;
+                        if (isZh) {
+                          if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+                          if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        } else {
+                          if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+                          if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+                          if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+                        }
+                        return String(v);
+                      };
+                      const fmtMv = (v: number | null) => {
+                        if (v == null) return undefined;
+                        if (isZh) {
+                          if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿';
+                          if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+                        } else {
+                          if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+                          if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+                        }
+                        return String(v);
+                      };
+                      // Detect market from symbol code
+                      const detectMarket = (sym: string) => {
+                        if (!sym) return undefined;
+                        if (/^\d{6}\.(SH|SS)$/.test(sym) || /^(sh|sz)\d{6}$/i.test(sym) || /^[036]\d{5}$/.test(sym))
+                          return isZh ? 'A股' : 'A-Share';
+                        if (/\.HK$/i.test(sym) || /^0[0-9]{4}\.?$/i.test(sym))
+                          return isZh ? '港股' : 'HK';
+                        if (/^[A-Z]{1,5}$/.test(sym) || /\.(US|NASDAQ|NYSE)$/i.test(sym))
+                          return isZh ? '美股' : 'US';
+                        return undefined;
+                      };
+                      const quotePayload = {
+                          symbol: q.symbol,
+                          name: q.name || undefined,
+                          market: detectMarket(q.symbol),
+                          lang: isZh ? 'zh' : 'en',
+                          price: numPrice.toFixed(2),
+                          change: q.change_pct != null
+                            ? (q.change_pct >= 0 ? '+' : '') + Number(q.change_pct).toFixed(2) + '%'
+                            : undefined,
+                          volume: fmtVol(q.volume),
+                          amount: fmtVol(q.amount),
+                          high: q.high != null ? Number(q.high).toFixed(2) : undefined,
+                          low: q.low != null ? Number(q.low).toFixed(2) : undefined,
+                          open: q.open != null ? Number(q.open).toFixed(2) : undefined,
+                          prevClose: q.prev_close != null ? Number(q.prev_close).toFixed(2) : undefined,
+                          marketCap: fmtMv(q.total_mv || q.circ_mv),
+                          pe: q.pe != null ? Number(q.pe).toFixed(2) : undefined,
+                          pb: q.pb != null ? Number(q.pb).toFixed(2) : undefined,
+                          turnover: q.turnover != null ? Number(q.turnover).toFixed(2) + '%' : undefined,
+                      };
+                      savedQuoteCard = quotePayload;
+                      emitToUser(userId, 'agent:chat:quote', {
+                        sessionId,
+                        quote: quotePayload,
+                      });
                       } // end !isNaN(numPrice)
                     }
                   } catch (e) { }
@@ -813,19 +857,28 @@ Text: "${query}"`;
         let tickers = plan.capabilities.simulate.tickers || [];
         if (!tickers.length) tickers = ['SPY', 'QQQ'];
 
+        const GENERIC_ANALYST_KEYS = new Set(['technical_analyst', 'fundamentals_analyst', 'growth_analyst', 'news_sentiment_analyst', 'sentiment_analyst', 'valuation_analyst']);
+
+        const analysisOptions: any = { tickers, showReasoning: true };
+        if (plan.specificGurus?.length > 0) {
+          analysisOptions.analysts = plan.specificGurus;
+        }
+
         promises.push(
-          hedgefundService.runAnalysis({ tickers, showReasoning: true }, () => { })
+          hedgefundService.runAnalysis(analysisOptions, () => {})
             .then(hfResult => {
               const panelists = Object.keys(hfResult.analyst_signals || {}).map(p => ({
                 name: p,
                 avatar: 'L',
                 status: 'done',
                 verdict: Object.values(hfResult.analyst_signals[p] || {})[0]?.signal || 'Hold',
-                confidence: Object.values(hfResult.analyst_signals[p] || {})[0]?.confidence || 0
+                confidence: Object.values(hfResult.analyst_signals[p] || {})[0]?.confidence || 0,
+                group: GENERIC_ANALYST_KEYS.has(p) ? 'analyst' : 'guru'
               }));
               finalPanelists = panelists;
               emitter.emitModule('simulation', 'completed', { panelists });
-              const rep = hedgefundService.formatReport(hfResult);
+              const isGuruCouncil = plan.queryType === 'guru-council';
+              const rep = hedgefundService.formatReport(hfResult, isGuruCouncil);
               return { type: 'SIMULATION', data: rep };
             })
             .catch(e => {
@@ -871,7 +924,7 @@ ${inputContext}
 
 === REPORT STRUCTURE ===
 
-0. Report Title (MANDATORY)
+Report Title (MANDATORY)
 - Format: # (single hash) for clear, professional framing
 - Must convey the core thesis and asset/topic in one line
 - Example: "# NVDA: AI Capex Cycle Peaks — Re-rating Risk Rising"
@@ -879,7 +932,7 @@ ${inputContext}
 
 ---
 
-1. Research Overview (MANDATORY — NO HEADING, start directly)
+Research Overview (MANDATORY — NO HEADING, start directly)
 A compact, high-density executive brief:
 - **Verdict**: Bullish / Bearish / Neutral + Conviction Level (High/Medium/Low)
 - **Core Thesis**: 2-3 sentences — What is the key insight the market is missing?
@@ -888,7 +941,7 @@ A compact, high-density executive brief:
 
 ---
 
-2. Methodology & Data Scope (MANDATORY) — Use ## heading
+Methodology & Data Scope (MANDATORY) — Use ## heading
 Brief statement of:
 - What data sources were analyzed (news, social sentiment, on-chain/financial data, technical indicators)
 - Time horizon of the analysis
@@ -897,7 +950,7 @@ Brief statement of:
 
 ---
 
-3–7. Core Analysis Modules (3-5 sections, DEEP)
+Core Analysis Modules (3-5 sections, DEEP)
 Choose the most relevant modules from:
 
 **A. Fundamental & Business Analysis**
@@ -952,7 +1005,7 @@ Guidelines for modules:
 
 ---
 
-8. Risk Matrix (MANDATORY) — Use ## heading
+Risk Matrix (MANDATORY) — Use ## heading
 Professional risk assessment table:
 
 | Risk Factor | Probability | Impact | Mitigation / Monitor |
@@ -963,7 +1016,7 @@ Include minimum 4 risks across different categories (fundamental, technical, mac
 
 ---
 
-9. Scenario Analysis (MANDATORY) — Use ## heading
+Scenario Analysis (MANDATORY) — Use ## heading
 Expanded scenario modeling with more granularity than a simple bull/base/bear:
 
 | Scenario | Probability | Price Target | Timeline | Key Assumption | Trigger to Confirm |
@@ -976,7 +1029,7 @@ Expanded scenario modeling with more granularity than a simple bull/base/bear:
 
 ---
 
-10. Expert Debate Analysis (MANDATORY when expert debate data is provided) — Use ## heading
+Expert Debate Analysis (MANDATORY when expert debate data is provided) — Use ## heading
 This section is the SIGNATURE of this report — it showcases the multi-expert roundtable process.
 
 Structure:
@@ -1004,7 +1057,7 @@ If no expert debate data is provided, SKIP this section entirely.
 
 ---
 
-11. Actionable Strategy (MANDATORY) — Use ## heading
+Actionable Strategy (MANDATORY) — Use ## heading
 Concrete implementation plan:
 - **Position sizing**: % of portfolio, scaling plan
 - **Entry strategy**: Specific levels, order types, timing
@@ -1016,14 +1069,14 @@ Concrete implementation plan:
 
 ---
 
-12. Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
+Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
 - Translate heading to user's language (e.g. "关键监控指标")
 - 5-8 specific, quantifiable metrics/events to track going forward
 - Each item: what to monitor, current value → threshold that changes thesis, frequency of check
 - Format as a structured list with bold metric names
 
 ═══ ABSOLUTE RULES ═══
-1. HEADING LEVELS: # for report title. ## for section headings. **Bold** for subsections within. No ### or ####.
+1. HEADING LEVELS: # for report title. ## for section headings. **Bold** for subsections within. No ### or ####. NEVER prefix headings with numbers like "1.", "2.", "3." — the frontend auto-generates numbering.
 2. Section titles MUST be specific and analytical — not generic. Create proper research section titles (e.g. "收入放缓与利润弹性的博弈", "估值锚定：DCF vs 可比公司的分歧").
 3. Synthesize evidence across ALL data sources. Highlight where different data dimensions agree (conviction) and where they conflict (uncertainty).
 4. Never fabricate data. If exact numbers aren't available, state the directional finding and name the missing metric.
@@ -1066,7 +1119,7 @@ ${contextString}
 
 === OUTPUT STRUCTURE ===
 
-0. Title (OPTIONAL, HIGH-SIGNAL)
+Title (OPTIONAL, HIGH-SIGNAL)
 - Only include a title if it helps someone decide what to do.
 - Format: use # (single hash) for the title — visually larger than ## section headings. Do NOT use ##, ###, or ####.
 
@@ -1097,7 +1150,7 @@ If not included: start directly with Quote Snapshot or the Executive Snapshot (n
 
 ---
 
-1. Executive Snapshot (MANDATORY — NO HEADING AT ALL)
+Executive Snapshot (MANDATORY — NO HEADING AT ALL)
 - NEVER output a heading like "TL;DR", "Summary", "结论", "总结", "Executive Summary", or any variant. Start the content directly without any heading.
 - First, a compact snapshot:
   Bias / Action / Confidence / Key Trigger (one line each)
@@ -1107,7 +1160,7 @@ If not included: start directly with Quote Snapshot or the Executive Snapshot (n
 
 ---
 
-2–5. Deep-Dive Sections (2-4 sections, FLEXIBLE)
+Deep-Dive Sections (2-4 sections, FLEXIBLE)
 Pick 2-4 angles that matter MOST for this specific topic. Each section gets its own vivid, specific ## heading. Do NOT use generic titles — create headlines a reader would actually click.
 
 Choose from (but don't feel obligated to cover all):
@@ -1126,16 +1179,16 @@ Guidelines:
 
 ---
 
-6. Signal vs Noise (MANDATORY) — Table format with your own creative ## heading:
+Signal vs Noise (MANDATORY) — Table format with your own creative ## heading:
 
 | Noise (over-weighted by market) | Signal (under-weighted by market) |
 |-------------------------------|----------------------------------|
 | [thing + why it's noise] | [thing + why it matters] |
 
-7. Positioning (MANDATORY) — Use your own creative ## heading.
+Positioning (MANDATORY) — Use your own creative ## heading.
 Concrete: entry level, stop loss, target, position sizing logic. What to do NOW vs what to wait for. If no clear trade, say "wait for [specific catalyst]."
 
-8. Stress Test (MANDATORY) — Use your own creative ## heading. NOT a disclaimer. Model 2-3 scenarios with probability and price impact:
+Stress Test (MANDATORY) — Use your own creative ## heading. NOT a disclaimer. Model 2-3 scenarios with probability and price impact:
 
 | Scenario | Probability | Price Impact | Key Assumption |
 |----------|------------|-------------|----------------|
@@ -1147,17 +1200,17 @@ Identify the floor price under panic conditions.
 
 ---
 
-9. Tags (translate to user's language)
+Tags (translate to user's language)
 - Importance: High / Medium / Low · Categories: 2-3 tags
 
-10. Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
+Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 - Translate heading to user's language (e.g. "值得关注的问题：")
 - Format as **bold heading** followed by 3-5 bullet points
 - Each bullet: forward-looking question tied to a specific data point or event with a time horizon
 - CRITICAL: No text, tags, or sections may appear after this list
 
 ═══ ABSOLUTE RULES ═══
-1. HEADING LEVELS: # for report title only. ## for all section headings. No ### or ####. Use **bold** for subsections.
+1. HEADING LEVELS: # for report title only. ## for all section headings. No ### or ####. Use **bold** for subsections and key terms throughout the text. NEVER prefix headings with numbers like "1.", "2.", "3." — the frontend auto-generates numbering.
 2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Fundamental Analysis", "Valuation", "Financial Health", "Signal vs Noise", "Positioning", "Stress Test" etc. — these are internal labels, not output headings. Create engaging, specific headings (e.g. "广告引擎点火，但游戏拖了后腿", "23倍PE：贵还是便宜？", "多空交锋：谁在买？谁在跑？").
 3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
 4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
@@ -1185,13 +1238,519 @@ Before writing, internally decide:
 Do NOT reveal this reasoning. Begin writing directly.
 `;
 
-      // Round 1 always uses the trader memo prompt (quick initial draft)
-      // For roundtable: after consensus debate, a second Deep Research pass integrates everything
-      const synthesizePrompt = traderMemoPrompt;
-      const synthesisMaxTokens = 8192;
+      // ─── Research Report Prompt ───
+      const researchPrompt = `You are a senior research analyst at a top-tier consulting firm (McKinsey / Bain / BCG caliber).
+
+Your job is NOT to summarize search results. Your job is to synthesize information into a structured, insightful research report that helps decision-makers understand a topic deeply.
+
+Write like an internal research brief — clear, structured, data-driven, with strong conclusions.
+
+=== INPUT ===
+Topic: ${data.content}
+Context:
+${contextString}
+
+=== OUTPUT STRUCTURE ===
+
+Title
+- Use # (single hash). Reflect the core research question or finding.
+- Good: "东南亚外卖市场：Grab 与 GoTo 的补贴战谁能赢？"
+- Avoid: generic titles like "市场研究报告"
+
+Executive Summary (NO ## HEADING, NO numbering — start the summary text directly after the title)
+- 3-5 sentences. Core findings + key conclusion. What should the reader take away?
+
+Analysis Sections (3-5 sections, each with a ## heading)
+Pick sections that best fit the topic. Each gets a vivid, specific ## heading.
+Choose from:
+- **Market Overview**: market size, growth rate, key trends, geographic breakdown
+- **Competitive Landscape**: key players, market share, positioning, moat analysis
+- **Technology & Product**: tech stack, product comparison, feature matrix, architecture
+- **Business Model**: revenue model, unit economics, pricing, cost structure
+- **Team & Organization**: founding team, key hires, org structure, culture
+- **Funding & Financials**: funding history, valuation, revenue, burn rate, runway
+- **Supply Chain / Industry Structure**: upstream/downstream, dependencies, bottlenecks
+- **Regulatory & Macro**: policy environment, regulatory risks, macro factors
+
+Guidelines:
+- Each section must have a POINT OF VIEW. "Revenue grew 15%" is data. "Revenue growth is decelerating because of market saturation" is insight.
+- Use tables and comparison matrices where data supports it.
+- Cite sources with inline Markdown links when available.
+- Do NOT fabricate data. If specific numbers aren't available, discuss qualitatively.
+
+Key Findings — Summary table or bullet list of the most important discoveries.
+
+Risks & Challenges — What could go wrong? What are the unknowns?
+
+Conclusion & Recommendations — Clear, actionable takeaways. What should the reader do with this information?
+
+Questions to Watch (LAST SECTION)
+- 3-5 forward-looking questions with specific triggers or data points to monitor.
+
+═══ ABSOLUTE RULES ═══
+1. HEADING LEVELS: # for title only. ## for sections. Use **bold** for subsections and key terms, figures, and conclusions throughout the text. NEVER prefix headings with numbers like "1.", "2.", "3." — the frontend auto-generates numbering in the Table of Contents.
+2. Section titles MUST be specific and engaging, not generic labels.
+3. Synthesize across sources. Surface contradictions and emergent patterns.
+4. Never fabricate data. Use qualitative discussion when numbers are unavailable.
+5. INLINE CITATIONS: Retain URLs as clickable Markdown links.
+6. LANGUAGE: Match user's language entirely. Chinese query = all Chinese. English = all English.
+7. Length: 1500-3000 words. Depth over breadth.
+8. Tables for comparisons, bullet lists for key points, narrative for analysis.
+`;
+
+      // ─── Market Brief Prompt ───
+      const marketBriefPrompt = `You are a senior market strategist writing a concise daily market briefing.
+
+Your job is to deliver a fast, scannable overview of what happened in the market — not deep analysis. Think: morning market email that a trader reads in 2 minutes.
+
+=== INPUT ===
+Topic: ${data.content}
+Context:
+${contextString}
+
+=== OUTPUT STRUCTURE ===
+
+# [Market/Sector] Brief — [Date or Context]
+
+## Market Overview
+- Major index movements (S&P 500, Nasdaq, Dow, or relevant regional indices)
+- Overall sentiment: risk-on / risk-off / mixed
+- Key numbers in a compact table:
+
+| Index | Price | Change | % |
+|-------|-------|--------|---|
+
+## Top Movers
+- Top 5 gainers and losers (sectors or individual names)
+- Brief reason for each major move (1 sentence max)
+
+## Key Catalysts
+- 2-4 bullet points: the events driving today's market action
+- Each bullet: what happened + market reaction
+
+## Earnings / Events Calendar
+- Notable earnings released today + market reaction (beat/miss, stock move)
+- Upcoming events in next 1-3 days
+
+## Tomorrow's Watch
+- 3-5 items to watch: upcoming data releases, earnings, events, technical levels
+
+═══ RULES ═══
+1. LANGUAGE: Match user's language entirely.
+2. Be CONCISE. No fluff. Every sentence earns its place.
+3. Use tables for data, bullets for events. Minimal narrative paragraphs.
+4. Cite sources with inline links when available.
+5. Never fabricate data. If specific numbers aren't in the context, say "data pending" or skip.
+6. Length: 500-1200 words. This is a brief, not a report.
+7. Focus on "what happened" and "what's next", not "deep analysis".
+`;
+
+      // ─── Guru Council Prompt ───
+      const guruCouncilPrompt = `You are moderating a roundtable of legendary investors analyzing a specific asset or market question.
+
+Your job is to present each guru's perspective through their known investment framework, then synthesize a consensus recommendation. This is NOT a generic summary — each guru must speak in character with their known methodology.
+
+IMPORTANT: The raw simulation data below contains only short signal summaries (1-2 sentences per analyst). Your job is to EXPAND each guru's view into a full analysis paragraph by applying their well-known investment framework to the available data. Use the signal direction (bullish/bearish/neutral) and confidence as anchors, then reason through HOW that guru would arrive at that conclusion based on their published methodology.
+
+=== INPUT ===
+Topic: ${data.content}
+Context:
+${contextString}
+
+=== OUTPUT STRUCTURE ===
+
+# [Asset/Topic]: Guru Council Roundtable
+
+## Asset Overview
+- Asset name, ticker, current price (if available from context)
+- Brief context: what makes this worth analyzing now (use search data if available)
+
+## Guru Perspectives
+
+For each guru in the simulation data, create a detailed subsection. If the user named specific gurus, prioritize those. Otherwise use all gurus from the simulation results.
+
+**[Guru Name]**
+
+- **Investment Framework**: 2-3 sentences explaining their known methodology (e.g., Buffett = circle of competence + economic moat + margin of safety; Lynch = PEG ratio + growth categories; Dalio = All Weather + macro cycles)
+- **Analysis**: 4-8 sentences. This is the core — apply their specific framework to this asset using ALL available data (fundamental metrics, search results, technicals, news). Reference specific numbers when available. Explain WHY this guru would reach their signal conclusion.
+- **Signal**: 🟢 Bullish / 🔴 Bearish / 🟡 Neutral (match the simulation data)
+- **Conviction**: X% (match the simulation data)
+
+## Key Disagreements
+- Where do the gurus disagree? What's the core tension?
+- 3-4 bullet points highlighting specific debates with data backing
+
+## Consensus Decision
+- Weighted consensus: summarize the majority view
+- Recommended action with confidence level
+- Key conditions or price levels that would change the recommendation
+
+## Risk Factors
+- 3-5 risk factors the gurus collectively flag
+- What scenario would make them ALL wrong?
+
+## Questions to Watch
+- 3-5 forward-looking questions with specific data triggers and time horizons
+
+═══ RULES ═══
+1. Each guru MUST use their actual known framework — not generic "analysis". Buffett talks about moats and margin of safety. Lynch talks about PEG and growth categories. Burry talks about asymmetric bets and overlooked data.
+2. EXPAND the short simulation signals into full analysis paragraphs. The raw data is just direction — you provide the reasoning depth.
+3. LANGUAGE: Match user's language entirely. Chinese query = all Chinese.
+4. Use actual data from context. Integrate search results + simulation signals + any financial data.
+5. Gurus can and should DISAGREE. Don't force consensus where data doesn't support it.
+6. Cite sources with inline links when available.
+7. Length: 2000-4000 words. Each guru section should be substantial (150-300 words).
+8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
+`;
+
+      // ─── Guru Council HTML Template ───
+      const buildGuruCouncilHtmlPrompt = (inputContext: string) => `You are a world-class frontend designer creating a visual report for a Guru Council (multi-investor roundtable) analysis.
+
+Your task is to produce a SELF-CONTAINED HTML document that presents each guru's analysis in a visually compelling way. Think: investor presentation deck meets Apple design.
+
+=== INPUT ===
+Topic: ${data.content}
+${inputContext}
+
+=== OUTPUT FORMAT ===
+Output a COMPLETE, self-contained HTML document. Do NOT use markdown. Output raw HTML only — no \`\`\`html fences, no explanatory text.
+
+The HTML must:
+1. Be a single <div class="report-wrap"> with embedded <style> and optional <script> tags
+2. Use CSS custom properties for theming (inherit from parent: --color-text-primary, --color-text-secondary, --color-text-tertiary, --color-background-secondary, --color-border-tertiary, --border-radius-md, --border-radius-lg, --font-sans)
+3. Be mobile-responsive
+
+=== DESIGN SYSTEM ===
+<style>
+  .report-wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 1rem; font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
+  
+  .report-header { border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); padding-bottom: 1.5rem; margin-bottom: 2rem; }
+  .report-label { font-size: 11px; letter-spacing: 0.12em; color: var(--color-text-tertiary, #999); text-transform: uppercase; margin-bottom: 0.5rem; }
+  .report-title { font-size: 22px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); line-height: 1.4; margin-bottom: 1rem; }
+  .report-verdict { display: inline-flex; align-items: center; gap: 8px; background: var(--color-background-secondary, #f5f5f5); border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
+  .verdict-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  .section { margin-bottom: 2rem; }
+  .section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary, #666); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1rem; padding-bottom: 6px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+
+  /* Guru cards */
+  .guru-grid { display: flex; flex-direction: column; gap: 16px; margin-bottom: 2rem; }
+  .guru-card { position: relative; border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 20px; }
+  .guru-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding-right: 80px; }
+  .guru-avatar { width: 44px; height: 44px; border-radius: 50%; background: var(--color-background-secondary, #f5f5f5); display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 600; color: var(--color-text-secondary, #666); }
+  .guru-name { font-size: 15px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); }
+  .guru-framework { font-size: 12px; color: var(--color-text-tertiary, #999); }
+  .guru-signal { position: absolute; top: 16px; right: 16px; display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .signal-bullish { background: #DCFCE7; color: #166534; }
+  .signal-bearish { background: #FEE2E2; color: #991B1B; }
+  .signal-neutral { background: #FEF3C7; color: #92400E; }
+  .guru-analysis { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 12px; }
+  .guru-footer { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--color-text-tertiary, #999); }
+  .conf-bar { width: 100px; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
+  .conf-fill { height: 100%; border-radius: 3px; }
+
+  /* Consensus panel */
+  .consensus-panel { background: var(--color-background-secondary, #f5f5f5); border-radius: 12px; padding: 20px; margin-bottom: 2rem; }
+  .consensus-verdict { font-size: 18px; font-weight: 500; margin-bottom: 8px; }
+  .consensus-detail { font-size: 13px; line-height: 1.7; color: var(--color-text-secondary, #666); }
+
+  /* Comparison matrix */
+  .cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 2rem; }
+  .cmp-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: center; padding: 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .cmp-table th:first-child { text-align: left; }
+  .cmp-table td { padding: 10px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); text-align: center; }
+  .cmp-table td:first-child { text-align: left; font-weight: 500; }
+
+  /* Debate section */
+  .debate-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .debate-item:last-child { border-bottom: none; }
+  .debate-label { font-size: 11px; font-weight: 500; color: #185FA5; background: #E6F1FB; padding: 2px 8px; border-radius: 8px; white-space: nowrap; height: fit-content; }
+  .debate-text { font-size: 13px; line-height: 1.6; color: var(--color-text-primary, #1a1a1a); }
+
+  /* Summary stats hero */
+  .stats-hero { display: flex; gap: 24px; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 1px solid rgba(0,0,0,0.06); border-radius: 16px; padding: 28px; margin-bottom: 2rem; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .stats-gauge { flex: 0 0 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .gauge-ring { position: relative; width: 110px; height: 110px; }
+  .gauge-ring svg { width: 110px; height: 110px; transform: rotate(-90deg); }
+  .gauge-ring circle { fill: none; stroke-width: 7; stroke-linecap: round; }
+  .gauge-track { stroke: #e2e8f0; }
+  .gauge-value { transition: stroke-dashoffset .6s ease; filter: drop-shadow(0 0 4px rgba(0,0,0,0.08)); }
+  .gauge-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .gauge-pct { font-size: 22px; font-weight: 700; color: var(--color-text-primary, #0f172a); line-height: 1; letter-spacing: -0.02em; }
+  .gauge-label { font-size: 10px; color: #94a3b8; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
+  .stats-breakdown { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+  .stat-row { display: flex; align-items: center; gap: 10px; }
+  .stat-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .stat-dot-bullish { background: #10b981; }
+  .stat-dot-bearish { background: #f43f5e; }
+  .stat-dot-neutral { background: #f59e0b; }
+  .stat-name { font-size: 13px; font-weight: 600; color: var(--color-text-primary, #1e293b); min-width: 60px; }
+  .stat-bar-wrap { flex: 1; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
+  .stat-bar { height: 100%; border-radius: 3px; transition: width .5s ease; }
+  .stat-bar-bullish { background: linear-gradient(90deg, #10b981, #34d399); }
+  .stat-bar-bearish { background: linear-gradient(90deg, #f43f5e, #fb7185); }
+  .stat-bar-neutral { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+  .stat-count { font-size: 13px; font-weight: 600; color: #64748b; min-width: 28px; text-align: right; }
+
+  /* Risk items */
+  .risk-list { display: flex; flex-direction: column; gap: 8px; }
+  .risk-item { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
+  .risk-dot { min-width: 6px; height: 6px; border-radius: 50%; background: #E24B4A; margin-top: 7px; }
+
+  .report-wrap ul, .report-wrap ol { padding-left: 1.2em; margin: 0.5rem 0; }
+  .report-wrap li { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 4px; text-align: left; }
+
+  @media (max-width: 600px) {
+    .stats-hero { flex-direction: column; align-items: stretch; }
+    .stats-gauge { flex: 0 0 auto; }
+    .guru-head { flex-wrap: wrap; }
+    .cmp-table { font-size: 12px; }
+  }
+</style>
+
+=== REPORT STRUCTURE ===
+1. Report Header: label "GURU COUNCIL REPORT", title, consensus verdict badge
+2. Summary Stats Hero (.stats-hero) — COPY THIS EXACT HTML STRUCTURE (fill in real values):
+
+<div class="stats-hero">
+  <div class="stats-gauge">
+    <div class="gauge-ring">
+      <svg viewBox="0 0 120 120">
+        <circle class="gauge-track" cx="60" cy="60" r="46" stroke-dasharray="289" stroke-dashoffset="0"></circle>
+        <circle class="gauge-value" cx="60" cy="60" r="46" stroke="#22C55E" stroke-dasharray="289" stroke-dashoffset="CALC_OFFSET"></circle>
+      </svg>
+      <div class="gauge-center">
+        <span class="gauge-pct">XX%</span>
+        <span class="gauge-label">Conviction</span>
+      </div>
+    </div>
+  </div>
+  <div class="stats-breakdown">
+    <div class="stat-row"><span class="stat-dot stat-dot-bullish"></span><span class="stat-name">Bullish</span><div class="stat-bar-wrap"><div class="stat-bar stat-bar-bullish" style="width:XX%"></div></div><span class="stat-count">N</span></div>
+    <div class="stat-row"><span class="stat-dot stat-dot-neutral"></span><span class="stat-name">Neutral</span><div class="stat-bar-wrap"><div class="stat-bar stat-bar-neutral" style="width:XX%"></div></div><span class="stat-count">N</span></div>
+    <div class="stat-row"><span class="stat-dot stat-dot-bearish"></span><span class="stat-name">Bearish</span><div class="stat-bar-wrap"><div class="stat-bar stat-bar-bearish" style="width:XX%"></div></div><span class="stat-count">N</span></div>
+  </div>
+</div>
+
+   CALC_OFFSET formula: offset = 289 * (1 - conviction_pct / 100). Example: 70% conviction → offset = 289 * 0.3 = 86.7. Choose stroke color by majority signal: #10b981 (bullish), #f43f5e (bearish), #f59e0b (neutral).
+3. Guru Cards: one card per guru (.guru-card) with avatar initial, name, framework, analysis paragraph, conviction bar. The signal badge (.guru-signal) is positioned at the TOP-RIGHT corner of the card via CSS absolute positioning — just add it as a direct child of .guru-card.
+4. Comparison Matrix: table showing all gurus × key dimensions (Signal, Conviction, Key Argument) — use .cmp-table
+5. Debate Points: key disagreements between gurus (.debate-item)
+6. Consensus Panel: weighted consensus, recommended action (.consensus-panel)
+7. Risks: collective risk factors (.risk-list)
+8. The report ENDS here after Risks. Do NOT add a Related Questions section — the frontend renders that separately.
+
+=== CRITICAL RULES ===
+1. Output ONLY the HTML starting with <style> and <div class="report-wrap">. NO preamble text, NO code fences (\`\`\`), NO explanatory sentences before or after the HTML.
+2. Use REAL data from the input. Never fabricate.
+3. LANGUAGE: Match the user's language.
+4. Colors: green (#166534/#10b981) for bullish, red (#991B1B/#f43f5e) for bearish, amber (#92400E/#f59e0b) for neutral, blue (#378ADD/#185FA5) for info.
+5. Each guru card must show their actual signal and reasoning — NOT generic placeholders.
+6. Keep the design minimal, data-dense, professional.
+7. The HTML must work standalone. No external JS libraries needed — use pure CSS + inline SVG for the gauge.
+8. The Summary Stats Hero is MANDATORY — always render it as section 2 right after the header.
+9. Do NOT use markdown syntax (**bold**, *italic*, -- dashes) anywhere inside the HTML content. All text must be plain HTML. Use <strong> instead of **, <em> instead of *, <ul>/<li> instead of dashes.
+10. For the SVG gauge: both circles MUST have r="46", cx="60", cy="60". The circumference is 289. Calculate stroke-dashoffset exactly.
+11. The report ends after the Risks section. No "Data Sources" footnote, no Related Questions, no horizontal rules, no extra text after the last </div>.
+12. Section titles and headings must be plain text inside HTML tags. Never wrap titles in ** asterisks.
+`;
+
+      const buildWebReportPrompt = (inputContext: string) => `You are a senior research director at a top-tier investment research firm AND a world-class frontend designer.
+
+Your task is to produce a professional-grade DEEP RESEARCH REPORT rendered as a SELF-CONTAINED HTML document. Think: Bloomberg Terminal meets Apple design aesthetics.
+
+=== INPUT ===
+Topic: ${data.content}
+${inputContext}
+
+=== OUTPUT FORMAT ===
+Output a COMPLETE, self-contained HTML document. Do NOT use markdown. Output raw HTML only — no \`\`\`html fences, no explanatory text before or after.
+
+The HTML must:
+1. Be a single <div class="report-wrap"> with embedded <style> and optional <script> tags
+2. Use CSS custom properties for theming (inherit from parent: --color-text-primary, --color-text-secondary, --color-text-tertiary, --color-background-secondary, --color-border-tertiary, --border-radius-md, --border-radius-lg, --font-sans)
+3. Fallback colors for standalone viewing
+4. Be mobile-responsive
+5. Use Chart.js from CDN for any charts (bar, line, etc)
+
+=== DESIGN SYSTEM ===
+<style>
+  .report-wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 1rem; font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
+  
+  /* Header */
+  .report-header { border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); padding-bottom: 1.5rem; margin-bottom: 2rem; }
+  .report-label { font-size: 11px; letter-spacing: 0.12em; color: var(--color-text-tertiary, #999); text-transform: uppercase; margin-bottom: 0.5rem; }
+  .report-title { font-size: 22px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); line-height: 1.4; margin-bottom: 1rem; }
+  .report-verdict { display: inline-flex; align-items: center; gap: 8px; background: var(--color-background-secondary, #f5f5f5); border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
+  .verdict-dot { width: 8px; height: 8px; border-radius: 50%; }
+  
+  /* KPI Cards */
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 2rem; }
+  .kpi-card { background: var(--color-background-secondary, #f5f5f5); border-radius: 8px; padding: 14px 16px; }
+  .kpi-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 6px; }
+  .kpi-value { font-size: 20px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); }
+  .kpi-sub { font-size: 11px; color: var(--color-text-tertiary, #999); margin-top: 2px; }
+  .kpi-up { color: #3B6D11; } .kpi-dn { color: #A32D2D; }
+  
+  /* Sections */
+  .section { margin-bottom: 2rem; }
+  .section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary, #666); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1rem; padding-bottom: 6px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  
+  /* Thesis box */
+  .thesis-box { background: var(--color-background-secondary, #f5f5f5); border-left: 2px solid #378ADD; padding: 14px 16px; font-size: 14px; line-height: 1.7; margin-bottom: 1rem; }
+  
+  /* Catalysts */
+  .catalyst-list { display: flex; flex-direction: column; gap: 8px; }
+  .catalyst-item { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
+  .catalyst-num { min-width: 20px; height: 20px; border-radius: 50%; background: #E6F1FB; color: #185FA5; font-size: 11px; font-weight: 500; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+  
+  /* Layout */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+  
+  /* Tables */
+  .seg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .seg-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: right; padding: 6px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .seg-table th:first-child { text-align: left; }
+  .seg-table td { padding: 8px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); text-align: right; }
+  .seg-table td:first-child { text-align: left; color: var(--color-text-secondary, #666); }
+  
+  /* Bar charts (CSS) */
+  .bar-mini { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+  .bar-mini-label { min-width: 80px; color: var(--color-text-secondary, #666); }
+  .bar-mini-track { flex: 1; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
+  .bar-mini-fill { height: 100%; border-radius: 3px; }
+  .bar-mini-val { min-width: 30px; text-align: right; font-weight: 500; }
+  
+  /* Scenario cards */
+  .scenario-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 2rem; }
+  .scenario-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 14px; }
+  .sc-label { font-size: 11px; font-weight: 500; margin-bottom: 6px; }
+  .sc-price { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
+  .sc-prob { font-size: 12px; color: var(--color-text-tertiary, #999); margin-bottom: 8px; }
+  .sc-tag { font-size: 11px; color: var(--color-text-secondary, #666); line-height: 1.5; }
+  .sc-bull { border-top: 2px solid #639922; } .sc-base { border-top: 2px solid #378ADD; }
+  .sc-flat { border-top: 2px solid #888780; } .sc-bear { border-top: 2px solid #E24B4A; }
+  
+  /* Risk table */
+  .risk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .risk-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: left; padding: 6px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .risk-table td { padding: 9px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); vertical-align: top; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .pill-low { background: #EAF3DE; color: #3B6D11; } .pill-mid { background: #FAEEDA; color: #854F0B; } .pill-high { background: #FAECE7; color: #993C1D; }
+  
+  /* Expert rows */
+  .expert-row { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); font-size: 13px; }
+  .expert-row:last-child { border-bottom: none; }
+  .expert-name { min-width: 90px; color: var(--color-text-secondary, #666); }
+  .expert-view { flex: 1; }
+  .conf-bar { width: 80px; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
+  .conf-fill { height: 100%; border-radius: 3px; background: #378ADD; }
+  
+  /* Expert debate cards */
+  .expert-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 16px; margin-bottom: 10px; }
+  .expert-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .expert-avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--color-background-secondary, #f5f5f5); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: var(--color-text-secondary, #666); }
+  .expert-meta { flex: 1; }
+  .expert-label { font-size: 13px; font-weight: 600; color: var(--color-text-primary, #1a1a1a); }
+  .expert-signal { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .expert-signal-bullish { background: #DCFCE7; color: #166534; }
+  .expert-signal-bearish { background: #FEE2E2; color: #991B1B; }
+  .expert-signal-neutral { background: #FEF3C7; color: #92400E; }
+  .expert-body { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); }
+  .expert-conf { margin-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--color-text-tertiary, #999); }
+  
+  /* Debate section */
+  .debate-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .debate-item:last-child { border-bottom: none; }
+  .debate-label { font-size: 11px; font-weight: 500; color: #185FA5; background: #E6F1FB; padding: 2px 8px; border-radius: 8px; white-space: nowrap; height: fit-content; }
+  .debate-text { font-size: 13px; line-height: 1.6; color: var(--color-text-primary, #1a1a1a); }
+  
+  /* Consensus panel */
+  .consensus-panel { background: var(--color-background-secondary, #f5f5f5); border-radius: 12px; padding: 20px; margin-bottom: 2rem; }
+  .consensus-verdict { font-size: 18px; font-weight: 500; margin-bottom: 8px; }
+  .consensus-detail { font-size: 13px; line-height: 1.7; color: var(--color-text-secondary, #666); }
+  
+  /* Monitor & Trade */
+  .monitor-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .monitor-item { background: var(--color-background-secondary, #f5f5f5); border-radius: 8px; padding: 12px 14px; }
+  .m-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 4px; }
+  .m-current { font-size: 15px; font-weight: 500; }
+  .m-trigger { font-size: 11px; color: #185FA5; margin-top: 2px; }
+  .trade-box { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .trade-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 12px 14px; }
+  .t-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 4px; }
+  .t-value { font-size: 14px; font-weight: 500; }
+  
+  /* Lists */
+  .report-wrap ul, .report-wrap ol { padding-left: 1.2em; margin: 0.5rem 0; }
+  .report-wrap li { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 4px; text-align: left; }
+  .report-wrap ul { list-style: disc; }
+  .report-wrap ol { list-style: decimal; }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .two-col { grid-template-columns: 1fr; }
+    .scenario-grid { grid-template-columns: repeat(2, 1fr); }
+    .monitor-list { grid-template-columns: 1fr; }
+    .trade-box { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+
+=== REPORT STRUCTURE (adapt sections to topic) ===
+1. Report Header: label, title, verdict badge with colored dot
+2. KPI Grid: 3-4 key metrics with sub-labels (use .kpi-grid)
+3. Core Thesis: thesis-box with catalysts list
+4. Data Visualization: two-col layout with bar charts (.bar-mini) and tables (.seg-table)
+5. Scenario Analysis: 3-4 scenario cards (.scenario-grid with .sc-bull/.sc-base/.sc-flat/.sc-bear)
+6. Risk Matrix: table with probability/impact pills (.pill-low/.pill-mid/.pill-high)
+7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert’s core view, confidence, and key argument using expert-row components. Include:
+   - Expert cards: each expert with name, signal (bullish/bearish/neutral), confidence bar, and 1-2 sentence core argument
+   - Points of Agreement: where experts converged
+   - Points of Contention: where experts disagreed and what data would resolve it
+   - Synthesis: how the debate shaped the final thesis
+8. Key Monitoring: monitor-list with current values and triggers
+9. Action Strategy: trade-box with entry/stop/target cards
+10. The report ENDS here after Action Strategy. Do NOT add a Related Questions section — the frontend renders that separately.
+
+=== CRITICAL RULES ===
+1. Output ONLY the HTML starting with <style> and <div class="report-wrap">. No markdown, no code fences, no explanation text.
+2. All text content must be data-driven and analytical — use the actual research data provided.
+3. Use REAL numbers from the input data. Never fabricate financial figures.
+4. LANGUAGE: Match the user's language. Chinese query = all Chinese content. English = all English.
+5. Use Chart.js (CDN: https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js) for complex charts. Put <script> tags at the end.
+6. Canvas elements MUST have unique IDs.
+7. All colors should use semantic meaning: green (#3B6D11/#639922) for positive, red (#A32D2D/#E24B4A) for negative, blue (#378ADD/#185FA5) for neutral/info.
+8. For non-stock topics, adapt the template — skip stock-specific widgets, add relevant ones.
+9. Keep the design minimal, data-dense, and professional. No decorative elements.
+10. The HTML must work standalone — include all styles inline.
+11. Do NOT use markdown syntax anywhere: no **bold**, no *italic*, no -- dashes for lists. All text must be plain HTML (<strong>, <em>, <ul>/<li>).
+12. Section titles and headings must be plain text inside HTML tags. Never wrap titles in ** asterisks.
+13. The report ends after Action Strategy / Key Monitoring. Do NOT add a Related Questions section, "Data Sources" footnote, or any extra text — the frontend renders those separately.
+`;
+
+      // Route synthesis prompt by queryType
+      const queryType = plan.queryType || 'investment-analysis';
+      let synthesizePrompt: string;
+      switch (queryType) {
+        case 'research':
+          synthesizePrompt = researchPrompt;
+          break;
+        case 'market-brief':
+          synthesizePrompt = marketBriefPrompt;
+          break;
+        case 'guru-council':
+          synthesizePrompt = guruCouncilPrompt;
+          break;
+        case 'investment-analysis':
+        default:
+          synthesizePrompt = traderMemoPrompt;
+          break;
+      }
+      const synthesisMaxTokens = queryType === 'market-brief' ? 4096 : 8192;
 
       try {
-        console.log('[agent:chat] Starting synthesis stream (%s mode), prompt length:', isDeepResearch ? 'deep-research' : 'trader-memo', synthesizePrompt.length);
+        console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
         const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
         console.log('[agent:chat] Synthesis stream obtained, reading...');
         const synReader = synthesisStream.getReader();
@@ -1250,6 +1809,8 @@ Do NOT reveal this reasoning. Begin writing directly.
           maxRounds: number;
           conclusion: { verdict: string; confidence: number };
         } | null = null;
+        /** Full consensus result for DB persistence — restored on session history load */
+        let savedConsensusResult: any = null;
 
         if (data.mode === 'roundtable') {
           // Phase 1: Initial draft is already generated silently (not streamed)
@@ -1273,7 +1834,8 @@ Focus on:
 
 Research context:\n${synFullContent}${langInstruction}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
-
+            savedConsensusResult = consensusResult;
+            
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
 
             // Collect individual expert perspectives with structured debate context
@@ -1414,13 +1976,107 @@ Research context:\n${synFullContent}${langInstruction}`;
                 modules: flowModules,
                 isActive: false,
                 route: 'Super Agent Orchestrator'
-              }
+              },
+              consensusResult: savedConsensusResult ?? undefined,
+              quoteCard: savedQuoteCard ?? undefined,
             })
           }
         });
 
         emitter.emitModule('done', 'completed', { duration: dur });
         emitter.emitStreamDone(finalDbContent);
+
+        // --- Async HTML report generation (non-blocking) ---
+        // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
+        const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+        if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
+          // Emit generating signal immediately so frontend shows Web tab skeleton
+          const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
+          const genMsgIdx = pendingMsgCount - 1;
+          console.log(`[agent:chat:html] Emitting html_generating: sessionId=${sessionId}, msgIdx=${genMsgIdx}, pendingMsgCount=${pendingMsgCount}`);
+          emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
+          (async () => {
+            try {
+              console.log(`[agent:chat:html] Starting async HTML generation for session ${sessionId}, queryType=${queryType}, input length=${finalDbContent.length}`);
+              const htmlPrompt = queryType === 'guru-council'
+                ? buildGuruCouncilHtmlPrompt(finalDbContent)
+                : buildWebReportPrompt(finalDbContent);
+              const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 16384);
+              const htmlReader = htmlStream.getReader();
+              const htmlDecoder = new TextDecoder();
+              let htmlContent = '';
+              let htmlBuf = '';
+              let chunkCount = 0;
+              while (true) {
+                const { done, value } = await htmlReader.read();
+                if (done) {
+                  // Process remaining buffer
+                  if (htmlBuf.trim()) {
+                    const remainLines = htmlBuf.split('\n');
+                    for (const line of remainLines) {
+                      const t = line.trim();
+                      if (t.startsWith('data: ')) {
+                        const d = t.slice(6).trim();
+                        if (d === '[DONE]') continue;
+                        try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+                      }
+                    }
+                  }
+                  break;
+                }
+                chunkCount++;
+                htmlBuf += htmlDecoder.decode(value, { stream: true });
+                const htmlLines = htmlBuf.split('\n');
+                htmlBuf = htmlLines.pop() || '';
+                for (const line of htmlLines) {
+                  const t = line.trim();
+                  if (t.startsWith('data: ')) {
+                    const d = t.slice(6).trim();
+                    if (d === '[DONE]') continue;
+                    try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+                  }
+                }
+              }
+              console.log(`[agent:chat:html] Stream finished. chunks=${chunkCount}, htmlLength=${htmlContent.length}`);
+              // ── Sanitize: strip LLM preamble/postamble and markdown fences ──
+              const sanitizeHtml = (raw: string): string => {
+                let s = raw.trim();
+                // Remove opening ```html or ``` fence and everything before <style or <div
+                s = s.replace(/^```html\s*/i, '').replace(/^```\s*/, '');
+                // Find first real HTML tag
+                const firstTag = Math.min(
+                  s.indexOf('<style') >= 0 ? s.indexOf('<style') : Infinity,
+                  s.indexOf('<div')   >= 0 ? s.indexOf('<div')   : Infinity,
+                );
+                if (firstTag > 0 && firstTag < Infinity) s = s.slice(firstTag);
+                // Remove trailing ``` fence
+                s = s.replace(/\n?```\s*$/, '').trim();
+                return s;
+              };
+              htmlContent = sanitizeHtml(htmlContent);
+              if (htmlContent.length > 100) {
+                // Compute frontend-compatible message index
+                const msgCount = await prisma.chatMessage.count({ where: { sessionId } });
+                const msgIdx = msgCount - 1;
+                console.log(`[agent:chat:html] msgCount=${msgCount}, msgIdx=${msgIdx}`);
+                // Update DB metadata with htmlReport
+                const lastMsg = await prisma.chatMessage.findFirst({ where: { sessionId, role: 'assistant' }, orderBy: { createdAt: 'desc' } });
+                if (lastMsg) {
+                  const existingMeta = lastMsg.metadata ? JSON.parse(lastMsg.metadata as string) : {};
+                  existingMeta.htmlReport = htmlContent;
+                  await prisma.chatMessage.update({ where: { id: lastMsg.id }, data: { metadata: JSON.stringify(existingMeta) } });
+                  console.log(`[agent:chat:html] DB updated with htmlReport`);
+                }
+                emitToUser(userId, 'agent:chat:html_ready', { sessionId, msgIdx, html: htmlContent });
+                console.log(`[agent:chat:html] ✅ HTML report emitted for session ${sessionId}, msgIdx=${msgIdx}, length=${htmlContent.length}`);
+              } else {
+                console.log(`[agent:chat:html] ⚠️ HTML content too short (${htmlContent.length}), skipping`);
+              }
+            } catch (htmlErr: any) {
+              console.error('[agent:chat:html] ❌ HTML report generation failed:', htmlErr.message);
+            }
+          })();
+        }
       } catch (err: any) {
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
         emitToUser(userId, 'agent:chat:error', { sessionId, error: err.message });

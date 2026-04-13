@@ -51,6 +51,13 @@ const AnimStyles = () => (
       70%  { box-shadow: 0 0 0 6px rgba(17,24,39,0) }
       100% { box-shadow: 0 0 0 0 rgba(17,24,39,0) }
     }
+    @keyframes fade-hint {
+      0%   { opacity:0; transform:translateY(4px) }
+      100% { opacity:1; transform:translateY(0) }
+    }
+    .animate-fade-hint {
+      animation: fade-hint 0.35s ease-out both;
+    }
 
     /* ── Hero entrance ── */
     .hero-title {
