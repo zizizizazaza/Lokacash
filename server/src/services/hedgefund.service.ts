@@ -153,7 +153,7 @@ export const hedgefundService = {
   /**
    * Format the raw result into a human-readable markdown report
    */
-  formatReport(result: HedgeFundResult): string {
+  formatReport(result: HedgeFundResult, fullReasoning = false): string {
     const lines: string[] = [];
 
     lines.push(`## AI Hedge Fund Analysis Report`);
@@ -182,20 +182,38 @@ export const hedgefundService = {
 
     // Analyst Signals
     if (result.analyst_signals && Object.keys(result.analyst_signals).length > 0) {
-      lines.push(`### Analyst Signals`);
-      lines.push('');
-      lines.push('| Analyst | Ticker | Signal | Confidence | Key Reasoning |');
-      lines.push('|---------|--------|--------|------------|---------------|');
-
-      for (const [agent, signals] of Object.entries(result.analyst_signals)) {
-        for (const [ticker, signal] of Object.entries(signals)) {
-          const sigEmoji = signal.signal?.toUpperCase() === 'BULLISH' ? '🟢' :
-                          signal.signal?.toUpperCase() === 'BEARISH' ? '🔴' : '🟡';
-          const reasoning = signal.reasoning ? signal.reasoning.slice(0, 80) + (signal.reasoning.length > 80 ? '...' : '') : '';
-          lines.push(`| ${agent} | ${ticker} | ${sigEmoji} ${signal.signal} | ${signal.confidence}% | ${reasoning} |`);
+      if (fullReasoning) {
+        // Full format: each analyst gets a subsection with complete reasoning
+        lines.push(`### Analyst Signals (Detailed)`);
+        lines.push('');
+        for (const [agent, signals] of Object.entries(result.analyst_signals)) {
+          for (const [ticker, signal] of Object.entries(signals)) {
+            const sigEmoji = signal.signal?.toUpperCase() === 'BULLISH' ? '🟢' :
+                            signal.signal?.toUpperCase() === 'BEARISH' ? '🔴' : '🟡';
+            lines.push(`**${agent}** — ${ticker}: ${sigEmoji} ${signal.signal} (${signal.confidence}%)`);
+            if (signal.reasoning) {
+              lines.push(signal.reasoning);
+            }
+            lines.push('');
+          }
         }
+      } else {
+        // Compact table format with truncated reasoning
+        lines.push(`### Analyst Signals`);
+        lines.push('');
+        lines.push('| Analyst | Ticker | Signal | Confidence | Key Reasoning |');
+        lines.push('|---------|--------|--------|------------|---------------|');
+
+        for (const [agent, signals] of Object.entries(result.analyst_signals)) {
+          for (const [ticker, signal] of Object.entries(signals)) {
+            const sigEmoji = signal.signal?.toUpperCase() === 'BULLISH' ? '🟢' :
+                            signal.signal?.toUpperCase() === 'BEARISH' ? '🔴' : '🟡';
+            const reasoning = signal.reasoning ? signal.reasoning.slice(0, 80) + (signal.reasoning.length > 80 ? '...' : '') : '';
+            lines.push(`| ${agent} | ${ticker} | ${sigEmoji} ${signal.signal} | ${signal.confidence}% | ${reasoning} |`);
+          }
+        }
+        lines.push('');
       }
-      lines.push('');
     }
 
     return lines.join('\n');

@@ -60,7 +60,7 @@ li { margin-bottom: 4px; }
     useEffect(() => {
         const handler = (e: MessageEvent) => {
             if (e.data?.type === 'loka-iframe-height' && typeof e.data.height === 'number') {
-                setIframeHeight(Math.min(e.data.height + 20, 5000));
+                setIframeHeight(Math.min(e.data.height + 4, 5000));
             }
         };
         window.addEventListener('message', handler);
@@ -151,6 +151,7 @@ interface SimPanelist {
     status: 'pending' | 'active' | 'done';
     verdict?: string;
     confidence?: number;
+    group?: 'guru' | 'analyst';
 }
 
 interface SimulationModuleData {
@@ -829,8 +830,34 @@ const ThinkingInlineTrigger: React.FC<{
     const durLabel =
         typeof dur === 'number' && !Number.isNaN(dur) ? String(dur) : '?';
     const activeModule = thinking.modules.find(m => m.status === 'active');
-    const labels: Record<string, string> = { search: 'Searching...', analysis: 'Analyzing...', simulation: 'Simulating...', consensus: 'Reaching consensus...' };
-    const label = thinking.isActive ? (activeModule ? labels[activeModule.type] || 'Processing...' : 'Processing...') : `Loka completed in ${durLabel}s`;
+
+    // ── Single cycling label that changes every 3s ──
+    const phaseMsgs: Record<string, string[]> = useMemo(() => ({
+        search: ['Searching the web...', 'Scanning market feeds...', 'Checking social signals...', 'Reading financial data...', 'Crawling news sources...'],
+        analysis: ['Analyzing data...', 'Cross-referencing sources...', 'Evaluating fundamentals...', 'Identifying key patterns...'],
+        simulation: ['Running simulations...', 'Modeling scenarios...', 'Stress-testing thesis...', 'Simulating guru perspectives...'],
+        consensus: ['Reaching consensus...', 'Weighing expert views...', 'Forming final opinion...', 'Calculating conviction...'],
+    }), []);
+    const [msgIdx, setMsgIdx] = useState(0);
+    useEffect(() => {
+        if (!thinking.isActive) return;
+        setMsgIdx(0);
+        const iv = setInterval(() => setMsgIdx(i => i + 1), 3000);
+        return () => clearInterval(iv);
+    }, [thinking.isActive, activeModule?.type]);
+
+    const label = useMemo(() => {
+        if (!thinking.isActive) return `Loka completed in ${durLabel}s`;
+        const trace = thinking.toolTrace;
+        const running = trace?.filter(t => t.status === 'running');
+        // If something is actively fetching, show that specifically
+        if (activeModule?.type === 'search' && running && running.length > 0) {
+            return `Fetching ${running[0].displayName}...`;
+        }
+        const type = activeModule?.type || 'search';
+        const msgs = phaseMsgs[type] || phaseMsgs.search;
+        return msgs[msgIdx % msgs.length];
+    }, [thinking.isActive, thinking.toolTrace, activeModule, msgIdx, durLabel, phaseMsgs]);
 
     const isSimple = thinking.routedMode === 'fast';
 
@@ -854,8 +881,8 @@ const ThinkingInlineTrigger: React.FC<{
             ) : (
                 <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
             )}
-            <span className="text-[13px] font-medium text-gray-600">{label}</span>
-            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+            <span key={label} className="text-[13px] font-medium text-gray-500 animate-fade-hint">{label}</span>
+            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
         </button>
     );
 };
@@ -1112,6 +1139,36 @@ const ThinkingProcessSidePanel: React.FC<{
     const SimulationModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const d = mod.data as SimulationModuleData | undefined;
         if (!d) return null;
+
+        const hasGroups = d.panelists.some(p => p.group);
+        const gurus = hasGroups ? d.panelists.filter(p => p.group === 'guru') : [];
+        const analysts = hasGroups ? d.panelists.filter(p => p.group === 'analyst') : [];
+        const ungrouped = hasGroups ? [] : d.panelists;
+
+        const renderPanelist = (p: SimPanelist, i: number) => {
+            const colors = ['bg-blue-100 text-blue-700', 'bg-purple-100 text-purple-700', 'bg-emerald-100 text-emerald-700', 'bg-amber-100 text-amber-700', 'bg-rose-100 text-rose-700', 'bg-cyan-100 text-cyan-700'];
+            const initials = p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2);
+            return (
+                <div key={i} className="flex items-center gap-2.5">
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${colors[i % colors.length]}`}>
+                        {initials}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                            <span className="text-[12px] font-medium text-gray-700">{p.name}</span>
+                            {p.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing...</span>}
+                        </div>
+                        {p.status === 'done' && p.verdict && (
+                            <span className={`text-[11px] ${p.verdict === 'Buy' ? 'text-emerald-600' : p.verdict === 'Sell' ? 'text-red-500' : 'text-yellow-600'}`}>
+                                {p.verdict} · {confidenceToPercent(p.confidence)}% confidence
+                            </span>
+                        )}
+                    </div>
+                    <StatusIcon status={p.status} size="sm" />
+                </div>
+            );
+        };
+
         return (
             <div>
                 <div className="flex items-center gap-2.5 mb-2">
@@ -1119,29 +1176,18 @@ const ThinkingProcessSidePanel: React.FC<{
                     <span className="text-[14px] font-bold text-gray-900">Simulating</span>
                 </div>
                 <div className="ml-7 space-y-2 mb-3">
-                    {d.panelists.map((p, i) => {
-                        const colors = ['bg-blue-100 text-blue-700', 'bg-purple-100 text-purple-700', 'bg-emerald-100 text-emerald-700', 'bg-amber-100 text-amber-700', 'bg-rose-100 text-rose-700', 'bg-cyan-100 text-cyan-700'];
-                        const initials = p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2);
-                        return (
-                        <div key={i} className="flex items-center gap-2.5">
-                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${colors[i % colors.length]}`}>
-                                {initials}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-[12px] font-medium text-gray-700">{p.name}</span>
-                                    {p.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing...</span>}
-                                </div>
-                                {p.status === 'done' && p.verdict && (
-                                    <span className={`text-[11px] ${p.verdict === 'Buy' ? 'text-emerald-600' : p.verdict === 'Sell' ? 'text-red-500' : 'text-yellow-600'}`}>
-                                        {p.verdict} · {confidenceToPercent(p.confidence)}% confidence
-                                    </span>
-                                )}
-                            </div>
-                            <StatusIcon status={p.status} size="sm" />
-                        </div>
-                        );
-                    })}
+                    {ungrouped.map((p, i) => renderPanelist(p, i))}
+                    {hasGroups && gurus.length > 0 && (
+                        <>
+                            {gurus.map((p, i) => renderPanelist(p, i))}
+                        </>
+                    )}
+                    {hasGroups && analysts.length > 0 && (
+                        <>
+                            <div className="border-t border-gray-100 my-1" />
+                            {analysts.map((p, i) => renderPanelist(p, i + gurus.length))}
+                        </>
+                    )}
                     {d.prediction && (
                         <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 flex items-center justify-between">
                             <span className="text-[11px] text-gray-500 font-medium">Prediction</span>
@@ -1382,6 +1428,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
     const [htmlReports, setHtmlReports] = useState<Record<number, string>>({});
+    const [htmlGenerating, setHtmlGenerating] = useState<Record<number, boolean>>({});
     const [msgViewMode, setMsgViewMode] = useState<Record<number, 'docs' | 'web'>>({});
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
     const [agentPickerOpen, setAgentPickerOpen] = useState(false);
@@ -1470,7 +1517,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const questions = match[1].split('\n')
                 .map(l => l.trim())
                 .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
-                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
+                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').replace(/\*\*/g, '').trim())
                 .filter(Boolean);
             if (questions.length > 0) {
                 // Strip everything from the questions heading onwards
@@ -1538,7 +1585,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             if (m.role === 'assistant' && m.content && !m.isStreaming && m.content !== '__cancelled__') {
                 const cleaned = stripInternalResearchCitations(m.content);
                 const { body: noQuote } = extractQuoteSnapshot(cleaned);
-                const h = extractHeadings(noQuote, j);
+                const { body: noFollowUp } = extractFollowUpQuestions(noQuote);
+                const h = extractHeadings(noFollowUp, j);
                 if (h.length >= 2) map[j] = h;
             }
         }
@@ -1601,17 +1649,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             // Float position – clamp between the answer's h1 title and its action-bar
             const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
             if (firstEl) {
-                const floatTop = Math.max(8, firstEl.offsetTop - container.scrollTop);
+                let floatTop = Math.max(8, firstEl.offsetTop - container.scrollTop);
 
                 // Bottom boundary: when TOC would overlap the action bar, let it scroll away with content
                 const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
                 const tocH = tocNavRef.current?.offsetHeight || 0;
                 if (actionsEl && tocH > 0) {
                     const pinnedTop = actionsEl.offsetTop - container.scrollTop - tocH - 16;
-                    setTocTopPx(Math.min(floatTop, pinnedTop));
-                } else {
-                    setTocTopPx(floatTop);
+                    floatTop = Math.min(floatTop, pinnedTop);
                 }
+                // Ensure TOC doesn't overlap the input bar (reserve 80px at bottom)
+                const maxTop = container.clientHeight - 80;
+                floatTop = Math.min(floatTop, maxTop);
+                setTocTopPx(floatTop);
             }
         };
         container.addEventListener('scroll', onScroll, { passive: true });
@@ -1856,8 +1906,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
+            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
             setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
+        };
+
+        const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
+            if (data.sessionId !== sessionId) return;
+            setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
         };
 
         socket.on('agent:chat:routing', onRouting);
@@ -1873,6 +1929,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:consensus_done', onConsensusDone);
         socket.on('agent:chat:quote', onQuote);
         socket.on('agent:chat:html_ready', onHtmlReady);
+        socket.on('agent:chat:html_generating', onHtmlGenerating);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -1888,6 +1945,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:consensus_done', onConsensusDone);
             socket.off('agent:chat:quote', onQuote);
             socket.off('agent:chat:html_ready', onHtmlReady);
+            socket.off('agent:chat:html_generating', onHtmlGenerating);
         };
     }, [sessionId]);
 
@@ -2303,15 +2361,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         <nav
                             ref={tocNavRef}
                             className="absolute left-3 z-30 hidden md:block transition-all duration-150"
-                            style={{ top: tocTopPx }}
+                            style={{ top: tocTopPx, maxHeight: `calc(100% - ${Math.max(tocTopPx, 0)}px - 80px)`, overflow: 'hidden' }}
                         >
-                            <div className="w-[220px] bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
-                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide">Sections</p>
+                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
+                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
                                 <ul className="space-y-0.5">
-                                    {tocHeadings.filter(h => h.level >= 2).map((h, idx) => {
+                                    {(() => {
+                                        // Filter and optimize TOC hierarchy:
+                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
+                                        const filtered = tocHeadings.filter(h => h.level >= 2);
+                                        const optimized: typeof filtered = [];
+                                        for (let fi = 0; fi < filtered.length; fi++) {
+                                            const h = filtered[fi];
+                                            if (h.level === 2) {
+                                                optimized.push(h);
+                                            } else if (h.level >= 3) {
+                                                // Count siblings: how many consecutive level-3 items follow the same level-2 parent
+                                                const parentIdx = optimized.findLastIndex(x => x.level === 2);
+                                                let siblingCount = 0;
+                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
+                                                // Only show sub-items if there are 2+ siblings
+                                                if (siblingCount >= 2) optimized.push(h);
+                                            }
+                                        }
+                                        return optimized;
+                                    })().map((h, idx, arr) => {
                                         const isActive = activeTocId === h.id;
                                         const sectionNum = h.level === 2
-                                            ? tocHeadings.filter(x => x.level === 2).indexOf(h) + 1
+                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
                                             : null;
                                         return (
                                             <li key={idx}>
@@ -2370,39 +2447,44 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         }}
                                                     />
                                                 )}
-                                                {/* Clickable badge to view past roundtable consensus */}
-                                                {consensusResults[i] && !msg.isStreaming && (
-                                                    <button
-                                                        onClick={() => { setActiveGraphMsgIdx(i); setShowGraphPanel(true); setShowThinkingPanel(false); }}
-                                                        className="inline-flex items-center gap-1.5 mb-2 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
-                                                    >
-                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                                                        Roundtable
-                                                    </button>
-                                                )}
-                                                {/* Per-message Docs / Web tab toggle */}
-                                                {msg.role === 'assistant' && htmlReports[i] && !msg.isStreaming && (
-                                                    <div className="flex items-center gap-0.5 mb-2 p-0.5 bg-gray-100 rounded-lg w-fit">
-                                                        <button
-                                                            onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
-                                                            className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                                                                (msgViewMode[i] || 'docs') === 'docs'
-                                                                    ? 'bg-white text-gray-900 shadow-sm'
-                                                                    : 'text-gray-500 hover:text-gray-700'
-                                                            }`}
-                                                        >
-                                                            Docs
-                                                        </button>
-                                                        <button
-                                                            onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
-                                                            className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                                                                msgViewMode[i] === 'web'
-                                                                    ? 'bg-white text-gray-900 shadow-sm'
-                                                                    : 'text-gray-500 hover:text-gray-700'
-                                                            }`}
-                                                        >
-                                                            Web
-                                                        </button>
+                                                {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
+                                                {msg.role === 'assistant' && !msg.isStreaming && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <div className="flex items-center gap-1.5">
+                                                        {(htmlReports[i] || htmlGenerating[i]) && (
+                                                            <div className="flex items-center gap-0.5 p-0.5 bg-gray-100 rounded-lg">
+                                                                <button
+                                                                    onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
+                                                                    className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
+                                                                        (msgViewMode[i] || 'docs') === 'docs'
+                                                                            ? 'bg-white text-gray-900 shadow-sm'
+                                                                            : 'text-gray-500 hover:text-gray-700'
+                                                                    }`}
+                                                                >
+                                                                    Docs
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
+                                                                    className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
+                                                                        msgViewMode[i] === 'web'
+                                                                            ? 'bg-white text-gray-900 shadow-sm'
+                                                                            : 'text-gray-500 hover:text-gray-700'
+                                                                    }`}
+                                                                >
+                                                                    Web
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                        </div>
+                                                        {consensusResults[i] && (
+                                                            <button
+                                                                onClick={() => { setActiveGraphMsgIdx(i); setShowGraphPanel(true); setShowThinkingPanel(false); }}
+                                                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
+                                                            >
+                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                                                                Roundtable
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 )}
                                                 {msg.content === '__cancelled__' ? (() => {
@@ -2419,6 +2501,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         : { quote: null, body: bodyNoQuestions };
                                                     const liveQuote = quoteCards[i];
                                                     const showWebView = msgViewMode[i] === 'web' && htmlReports[i];
+                                                    const showWebSkeleton = msgViewMode[i] === 'web' && htmlGenerating[i] && !htmlReports[i];
                                                     return (
                                                         <>
                                                             {/* Live stock quote card from real-time data */}
@@ -2505,6 +2588,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             {!liveQuote && quote && <QuoteCard quote={quote} />}
                                                             {showWebView ? (
                                                                 <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
+                                                            ) : showWebSkeleton ? (
+                                                                <div className="rounded-xl border border-gray-100 bg-gray-50 p-6 space-y-4 animate-pulse">
+                                                                    <div className="h-3 bg-gray-200 rounded w-1/4" />
+                                                                    <div className="h-5 bg-gray-200 rounded w-2/3" />
+                                                                    <div className="h-20 bg-gray-200 rounded" />
+                                                                    <div className="space-y-2">
+                                                                        <div className="h-3 bg-gray-200 rounded w-full" />
+                                                                        <div className="h-3 bg-gray-200 rounded w-5/6" />
+                                                                        <div className="h-3 bg-gray-200 rounded w-4/6" />
+                                                                    </div>
+                                                                    <p className="text-[12px] text-gray-400 text-center !mt-6">Rendering Web report…</p>
+                                                                </div>
                                                             ) : (
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
                                                                 {renderMarkdownContent(body, i)}
