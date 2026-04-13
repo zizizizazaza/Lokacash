@@ -150,8 +150,11 @@ function buildSystemPrompt(assetContext?: AssetContext): string {
 }
 
 
+export type QueryType = 'investment-analysis' | 'research' | 'market-brief' | 'guru-council' | 'general';
+
 export interface OrchestratorPlan {
   isSimpleChat: boolean;
+  queryType: QueryType;
   capabilities: {
     analysis: { needed: boolean; tickers?: string[] };
     search: { needed: boolean; query?: string };
@@ -281,6 +284,7 @@ export class LokaAIService {
     if (!this.isConfigured) {
       return {
         isSimpleChat: true,
+        queryType: 'general',
         capabilities: {
           analysis: { needed: false },
           search: { needed: false },
@@ -289,12 +293,13 @@ export class LokaAIService {
       };
     }
 
-    const routerPrompt = getGlobalTimeContext() + `You are the Coordinator for a Super Agent. Your job is to analyze the user's query and decide which underlying specialist agents must be triggered in parallel. 
+    const routerPrompt = `You are the Coordinator for a Super Agent. Your job is to analyze the user's query and decide which underlying specialist agents must be triggered in parallel, AND classify the query type for output template routing.
 Output JSON only, no markdown.
 
 JSON SCHEMA:
 {
   "isSimpleChat": boolean, // True ONLY if the query is a greeting, basic platform Q&A, or simple chat (e.g., "hi", "how are you", "what can you do"). If it requires real world data, searching, or analysis, set false.
+  "queryType": "investment-analysis" | "research" | "market-brief" | "guru-council" | "general",
   "capabilities": {
     "analysis": { "needed": boolean, "tickers": ["..."] }, // Stock/asset PRICE analysis tool. SET TRUE ONLY when the user wants quantitative financial data: stock price movements, technical indicators (K-line, MA, RSI), fundamental metrics (PE, PB, revenue), or explicit buy/sell/hold advice on a tradeable ticker. Requires valid tickers. Do NOT use for: market research, competitive landscape, industry analysis, business strategy questions, or general "what do people think" questions — those are search tasks.
     "search": { "needed": boolean, "query": "..." }, // Deep Web/Social Search tool. SET TRUE for: market sentiment, news, public opinion, competitive analysis, industry research, market landscape questions, business strategy, macro context, or any question requiring recent real-world information. Provide a concise English search query.
@@ -302,22 +307,32 @@ JSON SCHEMA:
   }
 }
 
+QUERY TYPE CLASSIFICATION (decide in this order, first match wins):
+1. "general" — greeting, chitchat, simple Q&A, translation, platform questions. Must have isSimpleChat=true.
+2. "guru-council" — user explicitly names famous investors (Buffett/巴菲特, Dalio/达里奥, Lynch/林奇, Munger/芒格, Soros/索罗斯, etc.) AND asks to analyze a target from their perspective/framework. Just mentioning a name is NOT enough (e.g. "巴菲特最近买了什么" → research). Must be "evaluate X using their investment framework".
+3. "investment-analysis" — buy/sell/hold decision on a specific tradeable asset with ticker. Questions about price targets, valuation, technical analysis, position sizing, entry/exit. The user wants a TRADE DECISION.
+4. "market-brief" — time-sensitive market overview, multi-asset wrap-up, news digest. Keywords: today/今天/本周/market wrap/涨跌/财报日历/要闻/板块轮动. Focus is "what happened" not "deep analysis of one topic".
+5. "research" — everything else that needs depth: industry research, competitive analysis, supply chain, business model comparison, startup due diligence, technology trends, non-tradeable company evaluation.
+
 RULES:
-1. "isSimpleChat": When true, ALL capabilities must be false. Use for trivial fast talk.
+1. "isSimpleChat": When true, ALL capabilities must be false AND queryType must be "general".
 2. "analysis": Stock Analysis tool — for PRICE and FINANCIAL DATA queries only. Needs tradeable tickers. Questions about companies as businesses (competitive position, strategy, market share) are NOT analysis — they are search.
 3. "search": Deep Web/Social Search — for ANY question needing real-world information: sentiment, news, market research, competitive landscape, industry trends, business analysis.
 4. "simulate": AI Hedge Fund Simulation — only when user asks for forecasting or simulating scenarios.
 5. A user can trigger multiple! "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
 
 Examples:
-Query: "大家对特斯拉怎么看" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Tesla TSLA market sentiment opinion"},"simulate":{"needed":false}}}
-Query: "今天英伟达怎么走的" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["NVDA"]},"search":{"needed":true,"query":"Nvidia NVDA stock news today"},"simulate":{"needed":false}}}
-Query: "深度分析一下阿里和腾讯的投资价值" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["BABA", "TCEHY"]},"search":{"needed":false},"simulate":{"needed":false}}}
-Query: "模拟：如果第三季度降息50个基点对科技股有什么影响" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["QQQ"]},"search":{"needed":true,"query":"Fed 50bps rate cut impact on tech sector"},"simulate":{"needed":true,"tickers":["QQQ"]}}}
-Query: "hi, 你能干啥" -> {"isSimpleChat":true,"capabilities":{"analysis":{"needed":false},"search":{"needed":false},"simulate":{"needed":false}}}
-Query: "调研东南亚的外卖市场" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Southeast Asian food delivery market competitive landscape"},"simulate":{"needed":false}}}
-Query: "Can GoTo's subsidies hold against Grab's war chest?" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"GoTo vs Grab Indonesia competition subsidies war chest"},"simulate":{"needed":false}}}
-Query: "GRAB的股价走势如何，值得买入吗" -> {"isSimpleChat":false,"capabilities":{"analysis":{"needed":true,"tickers":["GRAB"]},"search":{"needed":true,"query":"Grab stock GRAB buy sell analysis"},"simulate":{"needed":false}}}
+Query: "hi, 你能干啥" -> {"isSimpleChat":true,"queryType":"general","capabilities":{"analysis":{"needed":false},"search":{"needed":false},"simulate":{"needed":false}}}
+Query: "从巴菲特和达里奥的视角分析NVDA" -> {"isSimpleChat":false,"queryType":"guru-council","capabilities":{"analysis":{"needed":true,"tickers":["NVDA"]},"search":{"needed":true,"query":"Nvidia NVDA latest news fundamentals"},"simulate":{"needed":true,"tickers":["NVDA"]}}}
+Query: "NVDA 值得买吗" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":true,"tickers":["NVDA"]},"search":{"needed":true,"query":"Nvidia NVDA stock buy sell analysis"},"simulate":{"needed":false}}}
+Query: "今天美股怎么样" -> {"isSimpleChat":false,"queryType":"market-brief","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"US stock market today summary top movers"},"simulate":{"needed":false}}}
+Query: "今日加密市场要闻" -> {"isSimpleChat":false,"queryType":"market-brief","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"crypto market news today highlights"},"simulate":{"needed":false}}}
+Query: "台积电CoWoS封装产能分配是否向NVDA倾斜" -> {"isSimpleChat":false,"queryType":"research","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"TSMC CoWoS packaging capacity allocation Nvidia"},"simulate":{"needed":false}}}
+Query: "调研东南亚的外卖市场" -> {"isSimpleChat":false,"queryType":"research","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Southeast Asian food delivery market competitive landscape"},"simulate":{"needed":false}}}
+Query: "Evaluate Midjourney as an investment — team, revenue, growth" -> {"isSimpleChat":false,"queryType":"research","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Midjourney AI company revenue team growth investment"},"simulate":{"needed":false}}}
+Query: "深度分析一下阿里和腾讯的投资价值" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":true,"tickers":["BABA","TCEHY"]},"search":{"needed":true,"query":"Alibaba Tencent investment value comparison"},"simulate":{"needed":false}}}
+Query: "巴菲特最近买了什么股票" -> {"isSimpleChat":false,"queryType":"research","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Warren Buffett recent stock purchases portfolio"},"simulate":{"needed":false}}}
+Query: "模拟：如果第三季度降息50个基点对科技股有什么影响" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":true,"tickers":["QQQ"]},"search":{"needed":true,"query":"Fed 50bps rate cut impact on tech sector"},"simulate":{"needed":true,"tickers":["QQQ"]}}}
 
 Query: "${query}"`;
 
@@ -331,7 +346,7 @@ Query: "${query}"`;
         body: JSON.stringify({
           model: this.model,
           messages: [{ role: 'user', content: routerPrompt }],
-          max_tokens: 220,
+          max_tokens: 256,
           temperature: 0,
           response_format: { type: "json_object" }
         }),
@@ -357,8 +372,13 @@ Query: "${query}"`;
         console.log('[evaluateRouting] Orchestrator Plan:', JSON.stringify(parsed, null, 2));
         
         // Ensure defaults fall back gracefully
+        const validQueryTypes = ['investment-analysis', 'research', 'market-brief', 'guru-council', 'general'] as const;
+        const rawQT = parsed.queryType;
+        const queryType: QueryType = validQueryTypes.includes(rawQT) ? rawQT : (parsed.isSimpleChat ? 'general' : 'research');
+
         const safePlan: OrchestratorPlan = {
           isSimpleChat: Boolean(parsed.isSimpleChat),
+          queryType,
           capabilities: {
             analysis: {
               needed: Boolean(parsed.capabilities?.analysis?.needed),
@@ -385,6 +405,7 @@ Query: "${query}"`;
     // Fallback if AI fails or network timeout
     return {
       isSimpleChat: true,
+      queryType: 'general',
       capabilities: {
         analysis: { needed: false },
         search: { needed: false },
