@@ -452,6 +452,18 @@ Text: "${query}"`;
       if (data.mode === 'roundtable') {
         plan.isSimpleChat = false; 
       }
+
+      // Guru Council mode: always trigger simulation
+      if (data.agentId === 'guru-council') {
+        plan.isSimpleChat = false;
+        plan.capabilities.simulate.needed = true;
+        // Use tickers from routing if available, otherwise default to broad market
+        if (!plan.capabilities.simulate.tickers?.length) {
+          plan.capabilities.simulate.tickers = plan.capabilities.analysis?.tickers?.length
+            ? plan.capabilities.analysis.tickers
+            : ['SPY', 'QQQ'];
+        }
+      }
       
       socket.emit('agent:chat:routed', { 
         sessionId, 
@@ -540,6 +552,7 @@ Text: "${query}"`;
       let finalSocialSources: any[] = [];
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
+      let savedQuoteCard: any = null;
 
       if (plan.capabilities.search.needed) {
         emitter.emitModule('search', 'active', { 
@@ -716,9 +729,7 @@ Text: "${query}"`;
                           return isZh ? '美股' : 'US';
                         return undefined;
                       };
-                      emitToUser(userId, 'agent:chat:quote', {
-                        sessionId,
-                        quote: {
+                      const quotePayload = {
                           symbol: q.symbol,
                           name: q.name || undefined,
                           market: detectMarket(q.symbol),
@@ -737,7 +748,11 @@ Text: "${query}"`;
                           pe: q.pe != null ? Number(q.pe).toFixed(2) : undefined,
                           pb: q.pb != null ? Number(q.pb).toFixed(2) : undefined,
                           turnover: q.turnover != null ? Number(q.turnover).toFixed(2) + '%' : undefined,
-                        },
+                      };
+                      savedQuoteCard = quotePayload;
+                      emitToUser(userId, 'agent:chat:quote', {
+                        sessionId,
+                        quote: quotePayload,
                       });
                       } // end !isNaN(numPrice)
                     }
@@ -1131,6 +1146,149 @@ Before writing, internally decide:
 Do NOT reveal this reasoning. Begin writing directly.
 `;
 
+      const buildWebReportPrompt = (inputContext: string) => `You are a senior research director at a top-tier investment research firm AND a world-class frontend designer.
+
+Your task is to produce a professional-grade DEEP RESEARCH REPORT rendered as a SELF-CONTAINED HTML document. Think: Bloomberg Terminal meets Apple design aesthetics.
+
+=== INPUT ===
+Topic: ${data.content}
+${inputContext}
+
+=== OUTPUT FORMAT ===
+Output a COMPLETE, self-contained HTML document. Do NOT use markdown. Output raw HTML only — no \`\`\`html fences, no explanatory text before or after.
+
+The HTML must:
+1. Be a single <div class="report-wrap"> with embedded <style> and optional <script> tags
+2. Use CSS custom properties for theming (inherit from parent: --color-text-primary, --color-text-secondary, --color-text-tertiary, --color-background-secondary, --color-border-tertiary, --border-radius-md, --border-radius-lg, --font-sans)
+3. Fallback colors for standalone viewing
+4. Be mobile-responsive
+5. Use Chart.js from CDN for any charts (bar, line, etc)
+
+=== DESIGN SYSTEM ===
+<style>
+  .report-wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
+  
+  /* Header */
+  .report-header { border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); padding-bottom: 1.5rem; margin-bottom: 2rem; }
+  .report-label { font-size: 11px; letter-spacing: 0.12em; color: var(--color-text-tertiary, #999); text-transform: uppercase; margin-bottom: 0.5rem; }
+  .report-title { font-size: 22px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); line-height: 1.4; margin-bottom: 1rem; }
+  .report-verdict { display: inline-flex; align-items: center; gap: 8px; background: var(--color-background-secondary, #f5f5f5); border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
+  .verdict-dot { width: 8px; height: 8px; border-radius: 50%; }
+  
+  /* KPI Cards */
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 2rem; }
+  .kpi-card { background: var(--color-background-secondary, #f5f5f5); border-radius: 8px; padding: 14px 16px; }
+  .kpi-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 6px; }
+  .kpi-value { font-size: 20px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); }
+  .kpi-sub { font-size: 11px; color: var(--color-text-tertiary, #999); margin-top: 2px; }
+  .kpi-up { color: #3B6D11; } .kpi-dn { color: #A32D2D; }
+  
+  /* Sections */
+  .section { margin-bottom: 2rem; }
+  .section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary, #666); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1rem; padding-bottom: 6px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  
+  /* Thesis box */
+  .thesis-box { background: var(--color-background-secondary, #f5f5f5); border-left: 2px solid #378ADD; padding: 14px 16px; font-size: 14px; line-height: 1.7; margin-bottom: 1rem; }
+  
+  /* Catalysts */
+  .catalyst-list { display: flex; flex-direction: column; gap: 8px; }
+  .catalyst-item { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
+  .catalyst-num { min-width: 20px; height: 20px; border-radius: 50%; background: #E6F1FB; color: #185FA5; font-size: 11px; font-weight: 500; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+  
+  /* Layout */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+  
+  /* Tables */
+  .seg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .seg-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: right; padding: 6px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .seg-table th:first-child { text-align: left; }
+  .seg-table td { padding: 8px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); text-align: right; }
+  .seg-table td:first-child { text-align: left; color: var(--color-text-secondary, #666); }
+  
+  /* Bar charts (CSS) */
+  .bar-mini { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+  .bar-mini-label { min-width: 80px; color: var(--color-text-secondary, #666); }
+  .bar-mini-track { flex: 1; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
+  .bar-mini-fill { height: 100%; border-radius: 3px; }
+  .bar-mini-val { min-width: 30px; text-align: right; font-weight: 500; }
+  
+  /* Scenario cards */
+  .scenario-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 2rem; }
+  .scenario-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 14px; }
+  .sc-label { font-size: 11px; font-weight: 500; margin-bottom: 6px; }
+  .sc-price { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
+  .sc-prob { font-size: 12px; color: var(--color-text-tertiary, #999); margin-bottom: 8px; }
+  .sc-tag { font-size: 11px; color: var(--color-text-secondary, #666); line-height: 1.5; }
+  .sc-bull { border-top: 2px solid #639922; } .sc-base { border-top: 2px solid #378ADD; }
+  .sc-flat { border-top: 2px solid #888780; } .sc-bear { border-top: 2px solid #E24B4A; }
+  
+  /* Risk table */
+  .risk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .risk-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: left; padding: 6px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
+  .risk-table td { padding: 9px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); vertical-align: top; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .pill-low { background: #EAF3DE; color: #3B6D11; } .pill-mid { background: #FAEEDA; color: #854F0B; } .pill-high { background: #FAECE7; color: #993C1D; }
+  
+  /* Expert rows */
+  .expert-row { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); font-size: 13px; }
+  .expert-row:last-child { border-bottom: none; }
+  .expert-name { min-width: 90px; color: var(--color-text-secondary, #666); }
+  .expert-view { flex: 1; }
+  .conf-bar { width: 80px; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
+  .conf-fill { height: 100%; border-radius: 3px; background: #378ADD; }
+  
+  /* Monitor & Trade */
+  .monitor-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .monitor-item { background: var(--color-background-secondary, #f5f5f5); border-radius: 8px; padding: 12px 14px; }
+  .m-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 4px; }
+  .m-current { font-size: 15px; font-weight: 500; }
+  .m-trigger { font-size: 11px; color: #185FA5; margin-top: 2px; }
+  .trade-box { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .trade-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 12px 14px; }
+  .t-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 4px; }
+  .t-value { font-size: 14px; font-weight: 500; }
+  
+  /* Lists */
+  .report-wrap ul, .report-wrap ol { padding-left: 1.2em; margin: 0.5rem 0; }
+  .report-wrap li { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 4px; text-align: left; }
+  .report-wrap ul { list-style: disc; }
+  .report-wrap ol { list-style: decimal; }
+  
+  /* Responsive */
+  @media (max-width: 600px) {
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .two-col { grid-template-columns: 1fr; }
+    .scenario-grid { grid-template-columns: repeat(2, 1fr); }
+    .monitor-list { grid-template-columns: 1fr; }
+    .trade-box { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+
+=== REPORT STRUCTURE (adapt sections to topic) ===
+1. Report Header: label, title, verdict badge with colored dot
+2. KPI Grid: 3-4 key metrics with sub-labels (use .kpi-grid)
+3. Core Thesis: thesis-box with catalysts list
+4. Data Visualization: two-col layout with bar charts (.bar-mini) and tables (.seg-table)
+5. Scenario Analysis: 3-4 scenario cards (.scenario-grid with .sc-bull/.sc-base/.sc-flat/.sc-bear)
+6. Risk Matrix: table with probability/impact pills (.pill-low/.pill-mid/.pill-high)
+7. Expert Views: expert-row with confidence bars (if expert debate data available)
+8. Key Monitoring: monitor-list with current values and triggers
+9. Action Strategy: trade-box with entry/stop/target cards
+10. Footer: data sources with timestamp
+
+=== CRITICAL RULES ===
+1. Output ONLY the HTML starting with <style> and <div class="report-wrap">. No markdown, no code fences, no explanation text.
+2. All text content must be data-driven and analytical — use the actual research data provided.
+3. Use REAL numbers from the input data. Never fabricate financial figures.
+4. LANGUAGE: Match the user's language. Chinese query = all Chinese content. English = all English.
+5. Use Chart.js (CDN: https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js) for complex charts. Put <script> tags at the end.
+6. Canvas elements MUST have unique IDs.
+7. All colors should use semantic meaning: green (#3B6D11/#639922) for positive, red (#A32D2D/#E24B4A) for negative, blue (#378ADD/#185FA5) for neutral/info.
+8. For non-stock topics, adapt the template — skip stock-specific widgets, add relevant ones.
+9. Keep the design minimal, data-dense, and professional. No decorative elements.
+10. The HTML must work standalone — include all styles inline.
+`;
+
       // Round 1 always uses the trader memo prompt (quick initial draft)
       // For roundtable: after consensus debate, a second Deep Research pass integrates everything
       const synthesizePrompt = traderMemoPrompt;
@@ -1196,6 +1354,8 @@ Do NOT reveal this reasoning. Begin writing directly.
           maxRounds: number;
           conclusion: { verdict: string; confidence: number };
         } | null = null;
+        /** Full consensus result for DB persistence — restored on session history load */
+        let savedConsensusResult: any = null;
 
         if (data.mode === 'roundtable') {
           // Phase 1: Initial draft is already generated silently (not streamed)
@@ -1219,6 +1379,7 @@ Focus on:
 
 Research context:\n${synFullContent}${langInstruction}`;
             const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
+            savedConsensusResult = consensusResult;
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
             
@@ -1360,13 +1521,82 @@ Research context:\n${synFullContent}${langInstruction}`;
                 modules: flowModules,
                 isActive: false,
                 route: 'Super Agent Orchestrator'
-              }
+              },
+              consensusResult: savedConsensusResult ?? undefined,
+              quoteCard: savedQuoteCard ?? undefined,
             })
           }
         });
         
         emitter.emitModule('done', 'completed', { duration: dur });
         emitter.emitStreamDone(finalDbContent);
+
+        // --- Async HTML report generation (non-blocking) ---
+        if (finalDbContent && finalDbContent.length > 200) {
+          (async () => {
+            try {
+              console.log(`[agent:chat:html] Starting async HTML generation for session ${sessionId}, input length=${finalDbContent.length}`);
+              const htmlPrompt = buildWebReportPrompt(finalDbContent);
+              const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 16384);
+              const htmlReader = htmlStream.getReader();
+              const htmlDecoder = new TextDecoder();
+              let htmlContent = '';
+              let htmlBuf = '';
+              let chunkCount = 0;
+              while (true) {
+                const { done, value } = await htmlReader.read();
+                if (done) {
+                  // Process remaining buffer
+                  if (htmlBuf.trim()) {
+                    const remainLines = htmlBuf.split('\n');
+                    for (const line of remainLines) {
+                      const t = line.trim();
+                      if (t.startsWith('data: ')) {
+                        const d = t.slice(6).trim();
+                        if (d === '[DONE]') continue;
+                        try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+                      }
+                    }
+                  }
+                  break;
+                }
+                chunkCount++;
+                htmlBuf += htmlDecoder.decode(value, { stream: true });
+                const htmlLines = htmlBuf.split('\n');
+                htmlBuf = htmlLines.pop() || '';
+                for (const line of htmlLines) {
+                  const t = line.trim();
+                  if (t.startsWith('data: ')) {
+                    const d = t.slice(6).trim();
+                    if (d === '[DONE]') continue;
+                    try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+                  }
+                }
+              }
+              console.log(`[agent:chat:html] Stream finished. chunks=${chunkCount}, htmlLength=${htmlContent.length}`);
+              if (htmlContent.length > 100) {
+                // Compute frontend-compatible message index
+                const msgCount = await prisma.chatMessage.count({ where: { sessionId } });
+                const msgIdx = msgCount - 1;
+                console.log(`[agent:chat:html] msgCount=${msgCount}, msgIdx=${msgIdx}`);
+                // Update DB metadata with htmlReport
+                const lastMsg = await prisma.chatMessage.findFirst({ where: { sessionId, role: 'assistant' }, orderBy: { createdAt: 'desc' } });
+                if (lastMsg) {
+                  const existingMeta = lastMsg.metadata ? JSON.parse(lastMsg.metadata as string) : {};
+                  existingMeta.htmlReport = htmlContent;
+                  await prisma.chatMessage.update({ where: { id: lastMsg.id }, data: { metadata: JSON.stringify(existingMeta) } });
+                  console.log(`[agent:chat:html] DB updated with htmlReport`);
+                }
+                emitToUser(userId, 'agent:chat:html_ready', { sessionId, msgIdx, html: htmlContent });
+                console.log(`[agent:chat:html] ✅ HTML report emitted for session ${sessionId}, msgIdx=${msgIdx}, length=${htmlContent.length}`);
+              } else {
+                console.log(`[agent:chat:html] ⚠️ HTML content too short (${htmlContent.length}), skipping`);
+              }
+            } catch (htmlErr: any) {
+              console.error('[agent:chat:html] ❌ HTML report generation failed:', htmlErr.message);
+            }
+          })();
+        }
       } catch (err: any) {
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
         emitToUser(userId, 'agent:chat:error', { sessionId, error: err.message });

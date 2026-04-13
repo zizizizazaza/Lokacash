@@ -136,8 +136,11 @@ function buildSystemPrompt(assetContext?: AssetContext): string {
 }
 
 
+export type QueryType = 'investment-analysis' | 'research' | 'market-brief' | 'guru-council' | 'general';
+
 export interface OrchestratorPlan {
   isSimpleChat: boolean;
+  queryType: QueryType;
   capabilities: {
     analysis: { needed: boolean; tickers?: string[] };
     search: { needed: boolean; query?: string };

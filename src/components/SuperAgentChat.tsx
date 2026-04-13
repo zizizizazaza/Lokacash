@@ -24,6 +24,68 @@ const InputIcons = {
 
 const ChatChevron = () => <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>;
 
+// ── HTML Report Frame (Web output mode) ──
+const HtmlReportFrame: React.FC<{ html: string; isStreaming: boolean }> = ({ html, isStreaming }) => {
+    const iframeRef = useRef<HTMLIFrameElement>(null);
+    const [iframeHeight, setIframeHeight] = useState(400);
+
+    useEffect(() => {
+        const iframe = iframeRef.current;
+        if (!iframe) return;
+        // Strip any markdown code fences the LLM might have wrapped around
+        const cleanHtml = html.replace(/^```html?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+        const fullDoc = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root { --color-text-primary: #1a1a1a; --color-text-secondary: #666; --color-text-tertiary: #999; --color-background-secondary: #f5f5f5; --color-border-tertiary: #e5e5e5; --border-radius-md: 8px; --border-radius-lg: 12px; --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.6; }
+ul, ol { padding-left: 1.2em; margin: 0.5rem 0; text-align: left; }
+li { margin-bottom: 4px; }
+</style>
+</head><body>${cleanHtml}
+<script>
+  function sendHeight() {
+    var h = document.documentElement.scrollHeight;
+    window.parent.postMessage({ type: 'loka-iframe-height', height: h }, '*');
+  }
+  sendHeight();
+  new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('load', function() { setTimeout(sendHeight, 300); });
+</` + `script>
+</body></html>`;
+        iframe.srcdoc = fullDoc;
+    }, [html]);
+
+    useEffect(() => {
+        const handler = (e: MessageEvent) => {
+            if (e.data?.type === 'loka-iframe-height' && typeof e.data.height === 'number') {
+                setIframeHeight(Math.min(e.data.height + 20, 5000));
+            }
+        };
+        window.addEventListener('message', handler);
+        return () => window.removeEventListener('message', handler);
+    }, []);
+
+    return (
+        <div className="relative w-full">
+            {isStreaming && (
+                <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 py-1 bg-white/80 backdrop-blur-sm rounded-lg border border-gray-200/60 shadow-sm">
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                    <span className="text-[11px] text-gray-500 font-medium">Rendering...</span>
+                </div>
+            )}
+            <iframe
+                ref={iframeRef}
+                sandbox="allow-scripts"
+                className="w-full border-0 rounded-xl overflow-hidden"
+                style={{ height: iframeHeight, transition: 'height 0.3s ease' }}
+                title="Research Report"
+            />
+        </div>
+    );
+};
+
 const CHAT_MODES = [
   { id: 'auto' as const,        label: 'Auto',        desc: 'Smart auto-routing to the optimal pipeline', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
   { id: 'fast' as const,        label: 'Fast',        desc: 'Direct response, minimal orchestration',    icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
@@ -978,6 +1040,9 @@ const ThinkingProcessSidePanel: React.FC<{
         );
     };
 
+    // ── HTML Report Frame (Web output mode) ──
+    // defined at module level as HtmlReportFrame
+
     // ── Analysis Module Renderer ──
     const AnalysisModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const d = mod.data as AnalysisModuleData | undefined;
@@ -1316,6 +1381,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
+    const [htmlReports, setHtmlReports] = useState<Record<number, string>>({});
+    const [msgViewMode, setMsgViewMode] = useState<Record<number, 'docs' | 'web'>>({});
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
     const [agentPickerOpen, setAgentPickerOpen] = useState(false);
     const agentPickerRef = useRef<HTMLDivElement>(null);
@@ -1484,6 +1551,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         return keys.length > 0 ? allTocHeadings[keys[keys.length - 1]] : [];
     })();
     const [activeTocId, setActiveTocId] = useState<string>('');
+    const tocVisibleMsgIdx = visibleTocIdx >= 0 ? visibleTocIdx : (() => {
+        const keys = Object.keys(allTocHeadings).map(Number);
+        return keys.length > 0 ? keys[keys.length - 1] : -1;
+    })();
+    const tocMsgInWebMode = tocVisibleMsgIdx >= 0 && msgViewMode[tocVisibleMsgIdx] === 'web';
+    const showToc = tocHeadings.length > 0 && !tocMsgInWebMode;
 
     // Scroll-spy: track which heading is currently in view + TOC position + which message's TOC to show
     const [tocTopPx, setTocTopPx] = useState(0);
@@ -1781,6 +1854,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
         };
 
+        const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
+            if (data.sessionId !== sessionId) return;
+            setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
+            setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
+        };
+
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
         socket.on('agent:chat:started', onStarted);
@@ -1793,6 +1872,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
         socket.on('agent:chat:quote', onQuote);
+        socket.on('agent:chat:html_ready', onHtmlReady);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -1807,6 +1887,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
             socket.off('agent:chat:quote', onQuote);
+            socket.off('agent:chat:html_ready', onHtmlReady);
         };
     }, [sessionId]);
 
@@ -2028,7 +2109,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             content: text,
             mode: chatMode,
             sessionId,
-            agentId: chatSelectedAgent
+            agentId: chatSelectedAgent,
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -2049,16 +2130,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         })),
                     );
                     const restoredThinking: Record<number, ThinkingFlow> = {};
+                    const restoredConsensus: Record<number, any> = {};
+                    const restoredQuotes: Record<number, any> = {};
+                    const restoredHtml: Record<number, string> = {};
+                    const restoredViewModes: Record<number, 'docs' | 'web'> = {};
                     history.forEach(
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     restoredThinking[idx] = {
                                         ...meta.thinkingFlow,
                                         isActive: false,
                                     };
+                                }
+                                if (meta.consensusResult) {
+                                    restoredConsensus[idx] = meta.consensusResult;
+                                }
+                                if (meta.quoteCard) {
+                                    restoredQuotes[idx] = meta.quoteCard;
+                                }
+                                if (meta.htmlReport) {
+                                    restoredHtml[idx] = meta.htmlReport;
+                                    restoredViewModes[idx] = 'web';
                                 }
                             } catch {
                                 /* ignore */
@@ -2066,6 +2161,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         },
                     );
                     setThinkingProcesses(restoredThinking);
+                    if (Object.keys(restoredConsensus).length > 0) {
+                        setConsensusResults(prev => ({ ...prev, ...restoredConsensus }));
+                    }
+                    if (Object.keys(restoredQuotes).length > 0) {
+                        setQuoteCards(prev => ({ ...prev, ...restoredQuotes }));
+                    }
+                    if (Object.keys(restoredHtml).length > 0) {
+                        setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
+                        setMsgViewMode(prev => ({ ...prev, ...restoredViewModes }));
+                    }
                     activeMsgIdxRef.current = history.length - 1;
                 }
             }).catch(console.error);
@@ -2194,7 +2299,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
                     {/* TOC floating panel */}
-                    {tocHeadings.length > 0 && (
+                    {showToc && (
                         <nav
                             ref={tocNavRef}
                             className="absolute left-3 z-30 hidden md:block transition-all duration-150"
@@ -2241,7 +2346,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         </nav>
                     )}
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
-                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${tocHeadings.length > 0 ? 'md:ml-[228px]' : ''}`}>
+                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${showToc ? 'md:ml-[228px]' : ''}`}>
                             {messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -2275,6 +2380,31 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         Roundtable
                                                     </button>
                                                 )}
+                                                {/* Per-message Docs / Web tab toggle */}
+                                                {msg.role === 'assistant' && htmlReports[i] && !msg.isStreaming && (
+                                                    <div className="flex items-center gap-0.5 mb-2 p-0.5 bg-gray-100 rounded-lg w-fit">
+                                                        <button
+                                                            onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
+                                                            className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
+                                                                (msgViewMode[i] || 'docs') === 'docs'
+                                                                    ? 'bg-white text-gray-900 shadow-sm'
+                                                                    : 'text-gray-500 hover:text-gray-700'
+                                                            }`}
+                                                        >
+                                                            Docs
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
+                                                            className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
+                                                                msgViewMode[i] === 'web'
+                                                                    ? 'bg-white text-gray-900 shadow-sm'
+                                                                    : 'text-gray-500 hover:text-gray-700'
+                                                            }`}
+                                                        >
+                                                            Web
+                                                        </button>
+                                                    </div>
+                                                )}
                                                 {msg.content === '__cancelled__' ? (() => {
                                                     const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
                                                     const isChinese = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
@@ -2288,6 +2418,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         ? extractQuoteSnapshot(bodyNoQuestions)
                                                         : { quote: null, body: bodyNoQuestions };
                                                     const liveQuote = quoteCards[i];
+                                                    const showWebView = msgViewMode[i] === 'web' && htmlReports[i];
                                                     return (
                                                         <>
                                                             {/* Live stock quote card from real-time data */}
@@ -2372,9 +2503,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             })()}
                                                             {/* Fallback: markdown-parsed quote card */}
                                                             {!liveQuote && quote && <QuoteCard quote={quote} />}
+                                                            {showWebView ? (
+                                                                <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
+                                                            ) : (
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
                                                                 {renderMarkdownContent(body, i)}
                                                             </div>
+                                                            )}
                                                         </>
                                                     );
                                                 })() : null}
