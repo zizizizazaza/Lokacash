@@ -451,6 +451,8 @@ def _build_status_banner(diag: dict) -> list[str]:
             active.append(f"X ({browser})")
         elif x_method == "env":
             active.append("X (env)")
+        elif x_method == "scrapecreators":
+            active.append("X (ScrapeCreators)")
         elif x_method == "api":
             active.append("X (xAI)")
         else:

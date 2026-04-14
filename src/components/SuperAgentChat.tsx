@@ -3,11 +3,13 @@
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
+import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCompression';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -97,8 +99,42 @@ interface Message {
     content: string;
     timestamp: string;
     isStreaming?: boolean;
+    images?: ChatImagePayload[];
     /** From DB; used to restore Thinking Process when reopening a session */
     metadata?: string | null;
+    /** Verified source URLs extracted from research data */
+    sources?: SearchSource[];
+}
+
+interface ChatImagePayload {
+    url: string;
+    mime?: string;
+    name?: string;
+}
+
+interface PendingChatImage extends ChatImagePayload {
+    id: string;
+    previewUrl: string;
+    status: 'uploading' | 'uploaded' | 'error';
+}
+
+function parseUserImagesFromMetadata(metadata?: string | null): ChatImagePayload[] {
+    if (!metadata) return [];
+    try {
+        const parsed = JSON.parse(metadata) as { images?: ChatImagePayload[]; archivedImages?: ChatImagePayload[] };
+        const raw = Array.isArray(parsed?.images) && parsed.images.length > 0
+            ? parsed.images
+            : (Array.isArray(parsed?.archivedImages) ? parsed.archivedImages : []);
+        return raw
+            .map(img => ({
+                url: typeof img?.url === 'string' ? img.url.trim() : '',
+                mime: typeof img?.mime === 'string' ? img.mime : undefined,
+                name: typeof img?.name === 'string' ? img.name : undefined,
+            }))
+            .filter(img => img.url.length > 0);
+    } catch {
+        return [];
+    }
 }
 
 interface SearchSource {
@@ -106,6 +142,7 @@ interface SearchSource {
     title: string;
     domain: string;
     url?: string;
+    snippet?: string;
 }
 
 interface DataProvider {
@@ -167,7 +204,7 @@ interface ConsensusModuleData {
 }
 
 interface ThinkingModule {
-    type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'done';
+    type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'web3' | 'done';
     status: 'pending' | 'active' | 'completed';
     data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | { duration?: number };
 }
@@ -402,6 +439,204 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
     };
 };
 
+// ─── Knowledge Graph Types ──────────────────────────────────
+interface KGNode {
+    id: string;
+    type: 'agent' | 'task' | 'stance';
+    label: string;
+    x: number;
+    y: number;
+    data?: Record<string, string>;
+}
+
+interface KGEdge {
+    id: string;
+    source: string;
+    target: string;
+    label: string;
+}
+
+interface KnowledgeGraphData {
+    nodes: KGNode[];
+    edges: KGEdge[];
+}
+
+const STATIC_KG_DATA: KnowledgeGraphData = {
+    nodes: [
+        { id: 'agent_0', type: 'agent', label: 'agent_0', x: 0, y: 0 },
+        { id: 'agent_1', type: 'agent', label: 'agent_1', x: 0, y: 0 },
+        { id: 'agent_2', type: 'agent', label: 'agent_2', x: 0, y: 0 },
+        { id: 'agent_3', type: 'agent', label: 'agent_3', x: 0, y: 0 },
+        { id: 'round_1', type: 'task', label: 'Round 1', x: 0, y: 0 },
+        { id: 'round_2', type: 'task', label: 'Round 2', x: 0, y: 0 },
+        { id: 'round_3', type: 'task', label: 'Round 3', x: 0, y: 0 },
+        { id: 'round_4', type: 'task', label: 'Round 4', x: 0, y: 0 },
+        { id: 'node_A', type: 'stance', label: 'A', x: 0, y: 0 },
+        { id: 'node_B', type: 'stance', label: 'B', x: 0, y: 0 },
+    ],
+    edges: [
+        { id: 'e1', source: 'agent_1', target: 'round_2', label: 'participates_in' },
+        { id: 'e2', source: 'agent_1', target: 'round_3', label: 'participates_in' },
+        { id: 'e3', source: 'agent_1', target: 'round_4', label: 'participates_in' },
+        { id: 'e4', source: 'agent_1', target: 'node_B', label: 'supports' },
+        { id: 'e5', source: 'agent_3', target: 'round_2', label: 'participates_in' },
+        { id: 'e6', source: 'agent_3', target: 'round_3', label: 'participates_in' },
+        { id: 'e7', source: 'agent_3', target: 'round_4', label: 'participates_in' },
+        { id: 'e8', source: 'agent_3', target: 'node_B', label: 'supports' },
+        { id: 'e9', source: 'agent_2', target: 'round_1', label: 'participates_in' },
+        { id: 'e10', source: 'agent_2', target: 'round_2', label: 'participates_in' },
+        { id: 'e11', source: 'agent_2', target: 'round_3', label: 'participates_in' },
+        { id: 'e12', source: 'agent_2', target: 'round_4', label: 'participates_in' },
+        { id: 'e13', source: 'agent_2', target: 'node_A', label: 'supports' },
+        { id: 'e14', source: 'agent_2', target: 'node_B', label: 'supports' },
+        { id: 'e15', source: 'agent_0', target: 'round_1', label: 'participates_in' },
+        { id: 'e16', source: 'agent_0', target: 'round_2', label: 'participates_in' },
+        { id: 'e17', source: 'agent_0', target: 'round_3', label: 'participates_in' },
+        { id: 'e18', source: 'agent_0', target: 'round_4', label: 'participates_in' },
+        { id: 'e19', source: 'agent_0', target: 'node_B', label: 'supports' },
+    ]
+};
+
+const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
+
+// ─── KnowledgeGraphView Component ──────────────────────────
+const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) => {
+    const svgRef = useRef<SVGSVGElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!svgRef.current || !data.nodes.length) return;
+
+        const svg = d3.select(svgRef.current);
+        const width = containerRef.current?.clientWidth || 400;
+        const height = containerRef.current?.clientHeight || 600;
+
+        svg.selectAll('*').remove();
+
+        const zoom = d3.zoom<SVGSVGElement, unknown>()
+            .scaleExtent([0.1, 4])
+            .on('zoom', (e) => {
+                g.attr('transform', e.transform);
+            });
+        
+        svg.call(zoom as any);
+
+        const g = svg.append('g');
+
+        svg.append('defs').append('marker')
+            .attr('id', 'arrow')
+            .attr('viewBox', '0 -5 10 10')
+            .attr('refX', 22)
+            .attr('refY', 0)
+            .attr('markerWidth', 5)
+            .attr('markerHeight', 5)
+            .attr('orient', 'auto')
+            .append('path')
+            .attr('fill', '#9ca3af')
+            .attr('d', 'M0,-4L8,0L0,4');
+
+        const nodes = data.nodes.map(d => ({ ...d }));
+        const edges = data.edges.map(d => ({ ...d }));
+
+        const simulation = d3.forceSimulation(nodes as any)
+            .force('link', d3.forceLink(edges).id((d: any) => d.id).distance(110))
+            .force('charge', d3.forceManyBody().strength(-400))
+            .force('center', d3.forceCenter(width / 2, height / 2))
+            .force('collide', d3.forceCollide().radius(40));
+
+        const link = g.append('g')
+            .attr('stroke', '#9ca3af')
+            .attr('stroke-opacity', 0.8)
+            .selectAll('line')
+            .data(edges)
+            .join('line')
+            .attr('stroke-width', 1.5)
+            .attr('marker-end', 'url(#arrow)');
+
+        const linkLabel = g.append('g')
+            .selectAll('text')
+            .data(edges)
+            .join('text')
+            .text((d: any) => d.label)
+            .attr('font-size', '8px')
+            .attr('fill', '#9ca3af')
+            .attr('text-anchor', 'middle');
+
+        const drag = d3.drag<SVGGElement, any>()
+            .on('start', (event, d) => {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            })
+            .on('drag', (event, d) => {
+                d.fx = event.x;
+                d.fy = event.y;
+            })
+            .on('end', (event, d) => {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            });
+
+        const node = g.append('g')
+            .selectAll('g')
+            .data(nodes)
+            .join('g')
+            .call(drag as any)
+            .style('cursor', 'grab');
+
+        node.append('circle')
+            .attr('r', (d: any) => d.type === 'agent' ? 18 : 14)
+            .attr('fill', (d: any) => d.type === 'agent' ? '#f3f4f6' : d.type === 'stance' ? '#f5f3ff' : '#eff6ff')
+            .attr('stroke', (d: any) => d.type === 'agent' ? '#6b7280' : d.type === 'stance' ? '#7c3aed' : '#3b82f6')
+            .attr('stroke-width', 1.5);
+
+        node.append('text')
+            .text((d: any) => {
+                const parts = d.label.split(' ');
+                return d.type === 'agent' ? parts[0] : (d.label.length > 15 ? d.label.slice(0, 13) + '…' : d.label);
+            })
+            .attr('y', 28)
+            .attr('font-size', '9px')
+            .attr('fill', (d: any) => d.type === 'agent' ? '#374151' : d.type === 'stance' ? '#5b21b6' : '#1d4ed8')
+            .attr('text-anchor', 'middle')
+            .attr('font-weight', '500');
+
+        simulation.on('tick', () => {
+            link
+                .attr('x1', (d: any) => d.source.x)
+                .attr('y1', (d: any) => d.source.y)
+                .attr('x2', (d: any) => d.target.x)
+                .attr('y2', (d: any) => d.target.y);
+
+            linkLabel
+                .attr('x', (d: any) => (d.source.x + d.target.x) / 2)
+                .attr('y', (d: any) => (d.source.y + d.target.y) / 2 - 4);
+
+            node
+                .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
+        });
+
+        return () => {
+            simulation.stop();
+        };
+    }, [data.nodes, data.edges]);
+
+    return (
+        <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white" style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
+            <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
+            <div className="absolute bottom-4 left-4 flex gap-4 z-10">
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f3f4f6] border border-[#6b7280]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Agent</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#eff6ff] border border-[#3b82f6]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Task</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f5f3ff] border border-[#7c3aed]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Stance</span></div>
+            </div>
+            <div className="absolute top-4 right-4 text-[10px] text-gray-500 font-mono text-right pointer-events-none">
+                scroll to zoom<br/>drag to pan
+            </div>
+        </div>
+    );
+};
+
 // ─── RoundtableView Component ──────────────────────────
 const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean }> = ({ data, isWaiting, isLive }) => {
     // Empty / waiting state: show the roundtable graphic with agents but no rounds
@@ -493,55 +728,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
         );
     }
 
-    const [expandedRound, setExpandedRound] = useState<number | null>(data.rounds.length > 0 ? data.rounds[data.rounds.length - 1].round : null);
-    // Always use all 4 agents for the graph, regardless of how many responded in data
-    const graphAgents = ROUNDTABLE_AGENTS;
-    const totalRounds = data.rounds.length;
-
-    type PlayPhase = 'discussing' | 'voted' | 'consensus';
-    const [playPhase, setPlayPhase] = useState<PlayPhase>('discussing');
-    const [playRoundIdx, setPlayRoundIdx] = useState(0);
-    const [visibleVotes, setVisibleVotes] = useState(0);
-
-    useEffect(() => {
-        // If not live (viewing past result), jump straight to final state — no animation
-        if (!isLive && totalRounds > 0) {
-            setPlayRoundIdx(totalRounds - 1);
-            setPlayPhase('consensus');
-            setVisibleVotes(graphAgents.length);
-            return;
-        }
-        const timers: ReturnType<typeof setTimeout>[] = [];
-        let t = 0;
-        for (let r = 0; r < totalRounds; r++) {
-            const rr = r;
-            timers.push(setTimeout(() => { setPlayRoundIdx(rr); setPlayPhase('discussing'); setVisibleVotes(0); }, t));
-            t += 2800;
-            timers.push(setTimeout(() => { setPlayPhase('voted'); setVisibleVotes(0); }, t));
-            const numAgents = graphAgents.length;
-            for (let a = 0; a < numAgents; a++) {
-                const aa = a;
-                timers.push(setTimeout(() => { setVisibleVotes(aa + 1); }, t + (aa + 1) * 300));
-            }
-            t += 300 * numAgents + 800;
-        }
-        timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(graphAgents.length); }, t));
-        return () => timers.forEach(clearTimeout);
-    }, [totalRounds, isLive]);
-
-    const isSpinning = playPhase === 'discussing';
-    const isConsensusReached = playPhase === 'consensus';
-    const currentRound = data.rounds[playRoundIdx];
-
-    const SIZE = 220;
-    const CTR = SIZE / 2;
-    const R = 72;
-    const agentPositions = graphAgents.map((_, i) => {
-        const a = (i / graphAgents.length) * 2 * Math.PI - Math.PI / 2;
-        return { x: CTR + R * Math.cos(a), y: CTR + R * Math.sin(a) };
-    });
-    const AVATAR = 38;
-    const HALF = AVATAR / 2;
+    const [expandedRound, setExpandedRound] = useState<number | null>(null);
 
     return (
         <div className="flex flex-col h-full bg-white">
@@ -550,119 +737,13 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                 <p className="text-[11px] text-gray-400 mt-0.5">{data.rounds.length} round{data.rounds.length > 1 ? 's' : ''} of discussion</p>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-                {/* Animated Roundtable Graphic */}
-                <div className="relative flex flex-col items-center pb-4 border-b border-gray-100">
-                    <style>{`
-                        @keyframes rt-ring-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-                        @keyframes rt-orbit { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-                        @keyframes rt-counter-orbit { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
-                        @keyframes rt-pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
-                        @keyframes rt-float-up { 0% { opacity: 1; transform: translateY(0) scale(1); } 60% { opacity: 1; transform: translateY(-16px) scale(1.15); } 100% { opacity: 0; transform: translateY(-24px) scale(0.8); } }
-                        .rt-ring-spin { animation: rt-ring-spin 5s linear infinite; }
-                        .rt-ring-spin.stopped { animation-play-state: paused; }
-                        .rt-orbit { animation: rt-orbit 12s linear infinite; }
-                        .rt-orbit.stopped { animation: none; }
-                        .rt-counter-orbit { animation: rt-counter-orbit 12s linear infinite; }
-                        .rt-counter-orbit.stopped { animation: none; }
-                        .rt-pulse-dot { animation: rt-pulse 1s ease-in-out infinite; }
-                        .rt-float-vote { animation: rt-float-up 1.2s ease-out both; }
-                    `}</style>
+            {/* Knowledge Graph — fills available space */}
+            <div className="flex-1 min-h-0 relative border-b border-gray-100">
+                <KnowledgeGraphView data={buildKnowledgeGraph()} />
+            </div>
 
-                    <div className="relative" style={{ width: SIZE, height: SIZE + 24 }}>
-                        <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: SIZE, height: SIZE }} viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
-                            <circle cx={CTR} cy={CTR} r={R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
-                            <circle cx={CTR} cy={CTR} r={R} fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4 4" />
-                            {agentPositions.map((p, i) => (
-                                <line key={i} x1={CTR} y1={CTR} x2={p.x} y2={p.y}
-                                    stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
-                            ))}
-                        </svg>
-
-                        <div className={`absolute rt-ring-spin ${!isSpinning ? 'stopped' : ''}`}
-                            style={{ left: 0, top: 0, width: SIZE, height: SIZE, pointerEvents: 'none' }}>
-                            <svg style={{ width: SIZE, height: SIZE }} viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
-                                <circle cx={CTR} cy={CTR} r={R + 12} fill="none"
-                                    stroke="url(#rtArcGrad)" strokeWidth="2.5"
-                                    strokeDasharray={`${Math.PI * (R + 12) * 0.35} ${Math.PI * (R + 12) * 1.65}`}
-                                    strokeLinecap="round" opacity={isSpinning ? 1 : 0}
-                                    style={{ transition: 'opacity 0.3s' }}
-                                />
-                                <defs>
-                                    <linearGradient id="rtArcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.7" />
-                                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0" />
-                                    </linearGradient>
-                                </defs>
-                            </svg>
-                        </div>
-
-                        <div className="absolute flex items-center justify-center"
-                            style={{ left: CTR - 26, top: CTR - 26, width: 52, height: 52 }}>
-                            <div className={`w-[52px] h-[52px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${isSpinning
-                                    ? 'bg-blue-50/80 border-2 border-blue-200'
-                                    : 'bg-gray-50 border-2 border-gray-200'
-                                }`}>
-                                {isSpinning ? (
-                                    <>
-                                        <div className="flex gap-[3px] mb-1">
-                                            {[0, 1, 2].map(i => (
-                                                <div key={i} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${i * 0.2}s` }} />
-                                            ))}
-                                        </div>
-                                        <span className="text-[9px] text-blue-500 font-bold">R{playRoundIdx + 1}</span>
-                                    </>
-                                ) : (
-                                    <span className="text-[11px] text-gray-500 font-bold">R{playRoundIdx + 1}</span>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className={`absolute rt-orbit ${!isSpinning ? 'stopped' : ''}`}
-                            style={{ left: 0, top: 0, width: SIZE, height: SIZE + 24, transformOrigin: `${CTR}px ${CTR}px` }}>
-                            {graphAgents.map((agent, i) => {
-                                const pos = agentPositions[i];
-                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                                const roundAgent = currentRound?.agents.find(a => a.agentId === agent.agentId);
-                                const hasResponse = !!roundAgent;
-                                const conf = roundAgent?.confidence ?? 0;
-                                const showVote = hasResponse && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
-                                const ringCls = isSpinning ? 'ring-2 ring-blue-200/60 ring-offset-1' : '';
-                                return (
-                                    <div key={agent.initials} className={`absolute flex flex-col items-center rt-counter-orbit ${!isSpinning ? 'stopped' : ''}`}
-                                        style={{ left: pos.x - HALF, top: pos.y - HALF, width: AVATAR, transformOrigin: `${HALF}px ${HALF}px` }}>
-                                        <div className="relative flex justify-center">
-                                            <div className={`rounded-full flex items-center justify-center text-white shadow-sm transition-all duration-300 ${ringCls}`}
-                                                style={{ backgroundColor: color, width: AVATAR, height: AVATAR }}>
-                                                {AGENT_ICON(agent.initials)}
-                                            </div>
-                                            {showVote && (
-                                                <div key={`${playRoundIdx}-${agent.initials}`}
-                                                    className="absolute -top-2 left-1/2 -translate-x-1/2 rt-float-vote pointer-events-none">
-                                                    <span className="text-[11px] font-bold bg-white/90 backdrop-blur rounded-full px-1.5 py-0.5 shadow-sm text-blue-600 border border-blue-100">{conf}%</span>
-                                                </div>
-                                            )}
-                                        </div>
-                                        <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                            {agent.name}
-                                        </span>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    <div className={`text-[12px] font-semibold transition-colors duration-300 ${isConsensusReached ? 'text-emerald-600' : isSpinning ? 'text-blue-500' : 'text-gray-500'
-                        }`}>
-                        {isConsensusReached
-                            ? '✓ Consensus Reached'
-                            : isSpinning
-                                ? `Round ${playRoundIdx + 1} — Discussing...`
-                                : `Round ${playRoundIdx + 1} — Votes In`}
-                    </div>
-                </div>
-
-                {/* Rounds */}
+            {/* Rounds — pinned to bottom, scrollable when expanded */}
+            <div className="max-h-[40%] overflow-y-auto px-5 py-4 space-y-4">
                 {data.rounds.map((round) => {
                     const isExpanded = expandedRound === round.round;
                     const isReached = round.status === 'reached';
@@ -1242,6 +1323,30 @@ const ThinkingProcessSidePanel: React.FC<{
         );
     };
 
+    // ── Web3 Module Renderer (CoinGecko MCP) ──
+    const Web3Module: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = (mod.data || {}) as { label?: string };
+        const provider = d.label || 'CoinGecko MCP';
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-3">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">Crypto</span>
+                </div>
+                <div className="ml-7 mb-3">
+                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${mod.status === 'completed'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : mod.status === 'active'
+                            ? 'bg-blue-50 text-blue-600 animate-pulse'
+                            : 'bg-gray-50 text-gray-300'
+                        }`}>
+                        {mod.status === 'completed' ? '✓' : mod.status === 'active' ? '⟳' : '·'} {provider}
+                    </span>
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="flex flex-col h-full bg-white">
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
@@ -1273,6 +1378,7 @@ const ThinkingProcessSidePanel: React.FC<{
                         case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
                         case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
                         case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
+                        case 'web3': return <Web3Module key="web3" mod={mod} />;
                         case 'done': return <DoneModule key="done" mod={mod} />;
                         default: return null;
                     }
@@ -1329,6 +1435,7 @@ function summarizeTitle(raw: string): string {
 // ═════════════════════════════════════════════════════════════
 interface SuperAgentChatProps {
     initialMessage: string;
+    initialImages?: ChatImagePayload[];
     onBack: () => void;
     agentCount?: number;
     selectedAgentId?: string;
@@ -1337,7 +1444,37 @@ interface SuperAgentChatProps {
     initialChatMode?: 'auto' | 'fast' | 'roundtable';
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
+/** Replace bare [Source Name] citations with [Source Name](url) using the sources list */
+function injectSourceUrls(text: string, sources?: SearchSource[]): string {
+    if (!sources || sources.length === 0) return text;
+    // Build lookup: lowercase title/domain → url
+    const lookup = new Map<string, string>();
+    for (const s of sources) {
+        if (s.url) {
+            lookup.set(s.title.toLowerCase(), s.url);
+            lookup.set(s.domain.toLowerCase(), s.url);
+            // Also match without trailing domain suffixes like ".com"
+            const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
+            if (short.length > 2) lookup.set(short, s.url);
+        }
+    }
+    // Match [text] NOT followed by ( — bare bracket citations
+    return text.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
+        const url = lookup.get(label.toLowerCase().trim());
+        if (url) return `[${label}](${url})`;
+        return match; // no match — leave as-is
+    });
+}
+
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
+    initialMessage,
+    initialImages = [],
+    onBack,
+    agentCount = 2,
+    selectedAgentId,
+    initialSessionId,
+    initialChatMode
+}) => {
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
         try {
@@ -1359,12 +1496,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const p = JSON.parse(raw) as {
                 sessionId?: string;
                 userContent?: string;
+                userImages?: ChatImagePayload[];
                 streaming?: boolean;
             };
             const sid = sessionStorage.getItem(SA_SID_KEY);
-            if (!p?.streaming || !p.userContent || p.sessionId !== sid) return [];
+            const pendingImages = Array.isArray(p.userImages) ? p.userImages : [];
+            if (!p?.streaming || (typeof p.userContent !== 'string' && pendingImages.length === 0) || p.sessionId !== sid) return [];
             return [
-                { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
+                { role: 'user', content: p.userContent || '', images: pendingImages, timestamp: new Date().toLocaleTimeString() },
                 {
                     role: 'assistant',
                     content: '',
@@ -1418,39 +1557,107 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [htmlReports, setHtmlReports] = useState<Record<number, string>>({});
     const [htmlGenerating, setHtmlGenerating] = useState<Record<number, boolean>>({});
     const [msgViewMode, setMsgViewMode] = useState<Record<number, 'docs' | 'web'>>({});
+    const [imagePreview, setImagePreview] = useState<{ images: ChatImagePayload[]; index: number } | null>(null);
+    const htmlPendingTimersRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
     const [agentPickerOpen, setAgentPickerOpen] = useState(false);
     const agentPickerRef = useRef<HTMLDivElement>(null);
     const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
     const voiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const [chatPastedImages, setChatPastedImages] = useState<string[]>([]);
+    const [chatImageAttachments, setChatImageAttachments] = useState<PendingChatImage[]>([]);
     const chatFileRef = useRef<HTMLInputElement>(null);
+    const chatImageAttachmentsRef = useRef<PendingChatImage[]>([]);
+
+    useEffect(() => {
+        chatImageAttachmentsRef.current = chatImageAttachments;
+    }, [chatImageAttachments]);
+
+    useEffect(() => {
+        return () => {
+            for (const img of chatImageAttachmentsRef.current) {
+                URL.revokeObjectURL(img.previewUrl);
+            }
+        };
+    }, []);
+
+    const enqueueChatImages = useCallback((incomingFiles: File[]) => {
+        const availableSlots = Math.max(0, MAX_IMAGES_PER_MESSAGE - chatImageAttachmentsRef.current.length);
+        if (availableSlots <= 0) return;
+        const imageFiles = incomingFiles.filter(file => file.type.startsWith('image/')).slice(0, availableSlots);
+        for (const file of imageFiles) {
+            const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const previewUrl = URL.createObjectURL(file);
+            setChatImageAttachments(prev => [...prev, {
+                id,
+                previewUrl,
+                status: 'uploading' as const,
+                url: '',
+                mime: file.type,
+                name: file.name,
+            }].slice(-MAX_IMAGES_PER_MESSAGE));
+
+            void (async () => {
+                const prepared = await prepareImageForUpload(file);
+                if (!prepared.file) {
+                    throw new Error(prepared.error || 'Image preprocessing failed');
+                }
+                const res = await api.uploadFile(prepared.file);
+                return { res, uploadFile: prepared.file };
+            })()
+                .then(({ res, uploadFile }) => {
+                    if (res.type !== 'image' || !res.url) throw new Error('Invalid image upload response');
+                    setChatImageAttachments(prev => prev.map(item => (
+                        item.id === id
+                            ? { ...item, status: 'uploaded', url: res.url, mime: uploadFile.type || file.type, name: file.name }
+                            : item
+                    )));
+                })
+                .catch(() => {
+                    setChatImageAttachments(prev => prev.map(item => (
+                        item.id === id ? { ...item, status: 'error' } : item
+                    )));
+                });
+        }
+    }, []);
+
+    const removeChatImage = useCallback((id: string) => {
+        setChatImageAttachments(prev => {
+            const target = prev.find(item => item.id === id);
+            if (target) URL.revokeObjectURL(target.previewUrl);
+            return prev.filter(item => item.id !== id);
+        });
+    }, []);
+
+    const clearChatImages = useCallback(() => {
+        setChatImageAttachments(prev => {
+            for (const item of prev) URL.revokeObjectURL(item.previewUrl);
+            return [];
+        });
+    }, []);
+
+    const openPendingImagePreview = useCallback((startIndex: number) => {
+        if (!chatImageAttachments.length) return;
+        const previewImages: ChatImagePayload[] = chatImageAttachments.map(item => ({
+            url: item.previewUrl,
+            name: item.name,
+            mime: item.mime,
+        }));
+        const nextIndex = Math.min(Math.max(startIndex, 0), previewImages.length - 1);
+        setImagePreview({ images: previewImages, index: nextIndex });
+    }, [chatImageAttachments]);
 
     const handleChatPaste = (e: React.ClipboardEvent) => {
         const items = Array.from(e.clipboardData.items);
         const imageItems = items.filter(it => it.type.startsWith('image/'));
         if (!imageItems.length) return;
         e.preventDefault();
-        imageItems.forEach(item => {
-            const file = item.getAsFile();
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = ev => {
-                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
-            };
-            reader.readAsDataURL(file);
-        });
+        const files = imageItems.map(item => item.getAsFile()).filter((f): f is File => Boolean(f));
+        enqueueChatImages(files);
     };
 
     const handleChatFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
-        files.forEach(file => {
-            const reader = new FileReader();
-            reader.onload = ev => {
-                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
-            };
-            reader.readAsDataURL(file);
-        });
+        enqueueChatImages(files);
         e.target.value = '';
     };
 
@@ -1516,6 +1723,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     };
     const [reactions, setReactions] = useState<Record<number, 'liked' | 'disliked' | null>>({});
     const [copied, setCopied] = useState<Record<number, boolean>>({});
+    const [sourcePanelData, setSourcePanelData] = useState<SearchSource[] | null>(null);
+
+    const closeImagePreview = useCallback(() => setImagePreview(null), []);
+    const moveImagePreview = useCallback((delta: number) => {
+        setImagePreview(prev => {
+            if (!prev || prev.images.length === 0) return prev;
+            const nextIndex = (prev.index + delta + prev.images.length) % prev.images.length;
+            return { ...prev, index: nextIndex };
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!imagePreview) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeImagePreview();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                moveImagePreview(-1);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                moveImagePreview(1);
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [imagePreview, closeImagePreview, moveImagePreview]);
 
     const handleCopy = (idx: number, content: string) => {
         navigator.clipboard.writeText(content).then(() => {
@@ -1790,7 +2025,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
-        const onStreamDone = (data: { sessionId: string; content?: string }) => {
+        const onStreamDone = (data: { sessionId: string; content?: string; sources?: SearchSource[] }) => {
             saLog('← agent:chat:stream_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             const msgIdx = activeMsgIdxRef.current;
@@ -1809,8 +2044,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     ...updated[msgIdx],
                     // Only use server content if we have nothing accumulated (e.g. reconnect)
                     content: updated[msgIdx].content || data.content || '',
-                    isStreaming: false,
-                    timestamp: new Date().toLocaleTimeString()
+                    isStreaming: false, 
+                    timestamp: new Date().toLocaleTimeString(),
+                    sources: data.sources,
                 };
                 return updated;
             });
@@ -1822,6 +2058,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
+        const normalizeAgentError = (raw: string) => {
+            const msg = String(raw || '').trim();
+            if (/do_request_failed|upstream error|AI API error \(500\)/i.test(msg)) {
+                return '上游模型服务暂时不稳定，已中断本次合成。你可以直接重试，或稍后再试。';
+            }
+            if (/timeout|timed out/i.test(msg)) {
+                return '本次处理超时。建议简化问题后重试，或稍后再试。';
+            }
+            return msg || '请求失败，请稍后重试。';
+        };
+
         const onError = (data: { sessionId: string; error: string }) => {
             saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
@@ -1830,14 +2077,31 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             } catch {
                 /* ignore */
             }
+            const msgIdx = activeMsgIdxRef.current;
+            const friendlyError = normalizeAgentError(data.error);
             setMessages(prev => {
                 const updated = [...prev];
-                const msgIdx = activeMsgIdxRef.current;
                 if (!updated[msgIdx]) return prev;
-                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + data.error, isStreaming: false };
+                updated[msgIdx] = {
+                    ...updated[msgIdx],
+                    content: `${updated[msgIdx].content}\n\n**提示：** ${friendlyError}`,
+                    isStreaming: false
+                };
                 return updated;
             });
             setIsStreaming(false);
+            setThinkingProcesses(prev => {
+                const flow = prev[msgIdx];
+                if (!flow) return prev;
+                const hasDone = flow.modules.some(m => m.type === 'done');
+                const modules = flow.modules.map(m =>
+                    m.status === 'active' ? { ...m, status: 'completed' as const } : m
+                );
+                if (!hasDone) {
+                    modules.push({ type: 'done', status: 'completed', data: { duration: 0 } });
+                }
+                return { ...prev, [msgIdx]: { ...flow, modules, isActive: false } };
+            });
         };
 
         const onThinkingLog = (data: { sessionId: string; line: string }) => {
@@ -1928,14 +2192,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
+            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; delete n[-1]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
             setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
+            const idx = data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
+            if (idx < 0) return;
+            setHtmlGenerating(prev => ({ ...prev, [idx]: true }));
+        };
+
+        const onHtmlFailed = (data: { sessionId: string; msgIdx?: number }) => {
+            if (data.sessionId !== sessionId) return;
+            const idx = data.msgIdx !== undefined && data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
+            setHtmlGenerating(prev => {
+                const n = { ...prev };
+                if (idx >= 0) delete n[idx];
+                delete n[-1];
+                return n;
+            });
         };
 
         socket.on('agent:chat:routing', onRouting);
@@ -1952,6 +2229,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:quote', onQuote);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
+        socket.on('agent:chat:html_failed', onHtmlFailed);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -1968,6 +2246,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:quote', onQuote);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
+            socket.off('agent:chat:html_failed', onHtmlFailed);
+            const timers = Object.values(htmlPendingTimersRef.current);
+            for (const t of timers) clearTimeout(t);
+            htmlPendingTimersRef.current = {};
         };
     }, [sessionId]);
 
@@ -2061,7 +2343,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     }
 
                     /** Server has no memory buffer (common during restart or never successfully started) and local still has SA_PENDING: resend agent:chat */
-                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; assistantMsgIdx?: number } | null = null;
+                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; userImages?: ChatImagePayload[]; assistantMsgIdx?: number } | null = null;
                     try {
                         const raw = sessionStorage.getItem(SA_PENDING_KEY);
                         pending = raw ? (JSON.parse(raw) as typeof pending) : null;
@@ -2071,8 +2353,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const canResend =
                         pending?.streaming &&
                         pending.sessionId === sessionId &&
-                        typeof pending.userContent === 'string' &&
-                        pending.userContent.length > 0 &&
+                        (typeof pending.userContent === 'string' || Array.isArray(pending.userImages)) &&
                         !replayRecoverAttemptedRef.current;
 
                     if (canResend) {
@@ -2086,7 +2367,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         }));
                         setIsStreaming(true);
                         socket.emit('agent:chat', {
-                            content: pending!.userContent!,
+                            content: pending!.userContent || '',
+                            images: pending!.userImages || [],
                             mode: chatMode,
                             sessionId,
                             agentId: chatSelectedAgent,
@@ -2141,13 +2423,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
     }, [sessionId, chatMode, chatSelectedAgent]);
 
-    const sendToAI = useCallback((text: string, existingMessages?: Message[]) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[], images?: ChatImagePayload[]) => {
         // Bump generation so stale events from a previous run are dropped
         chatGenRef.current += 1;
         activeChatGenRef.current = chatGenRef.current;
 
         saLog('sendToAI()', {
             textPreview: text.slice(0, 100),
+            imageCount: images?.length || 0,
             mode: chatMode,
             sessionId,
             gen: activeChatGenRef.current,
@@ -2177,6 +2460,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 JSON.stringify({
                     sessionId,
                     userContent: text,
+                    userImages: images || [],
                     assistantMsgIdx: msgIdx,
                     streaming: true,
                 }),
@@ -2187,6 +2471,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         socket.emit('agent:chat', {
             content: text,
+            images: images || [],
             mode: chatMode,
             sessionId,
             agentId: chatSelectedAgent,
@@ -2201,13 +2486,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
                 if (history && history.length > 0) {
                     setMessages(
-                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => ({
-                            role: m.role as 'user' | 'assistant',
-                            content: m.content || '',
-                            timestamp: new Date(m.createdAt).toLocaleTimeString(),
-                            isStreaming: false,
-                            metadata: m.metadata ?? null,
-                        })),
+                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
+                            let sources: SearchSource[] | undefined;
+                            if (m.metadata) {
+                                try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
+                            }
+                            return {
+                                role: m.role as 'user' | 'assistant',
+                                content: m.content || '',
+                                timestamp: new Date(m.createdAt).toLocaleTimeString(),
+                                isStreaming: false,
+                                metadata: m.metadata ?? null,
+                                sources,
+                            };
+                        }),
                     );
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
@@ -2218,7 +2510,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     restoredThinking[idx] = {
                                         ...meta.thinkingFlow,
@@ -2283,7 +2575,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             }));
             return;
         }
-        if (!initialMessage.trim()) return;
+        if (!initialMessage.trim() && initialImages.length === 0) return;
         hasSentInitial.current = true;
 
         // Broadcast new session for sidebar
@@ -2291,23 +2583,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             detail: { id: sessionId, title: summarizeTitle(initialMessage), agentId: chatSelectedAgent || 'auto' }
         }));
 
-        const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: initialMessage, images: initialImages, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 80); }, 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages, initialImages); setTimeout(scrollUserMsgToTop, 80); }, 50);
+    }, [initialMessage, initialImages, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSend = () => {
-        if (!inputText.trim() || isStreaming) return;
+        if (isStreaming) return;
+        const hasUploadingImages = chatImageAttachments.some(img => img.status === 'uploading');
+        if (hasUploadingImages) return;
+        const uploadedImages = chatImageAttachments
+            .filter(img => img.status === 'uploaded' && img.url)
+            .map(img => ({ url: img.url, mime: img.mime, name: img.name }));
+        if (!inputText.trim() && uploadedImages.length === 0) return;
         const text = inputText.trim();
         saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
-        const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: text, images: uploadedImages, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
         setInputText('');
-        sendToAI(text, newMessages);
+        sendToAI(text, newMessages, uploadedImages);
+        clearChatImages();
         // Scroll so the user’s question appears at the top
         setTimeout(scrollUserMsgToTop, 80);
     };
@@ -2449,8 +2748,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
-                                            <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm">
-                                                <p className="text-[13px] leading-relaxed">{msg.content}</p>
+                                            <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm space-y-2">
+                                                {!!msg.images?.length && (
+                                                    <div className={`grid gap-2 ${msg.images.length === 1 ? 'grid-cols-1 w-[170px]' : 'grid-cols-2'}`}>
+                                                        {msg.images.map((img, idx) => (
+                                                            <button
+                                                                key={`${img.url}-${idx}`}
+                                                                type="button"
+                                                                onClick={() => setImagePreview({ images: msg.images || [], index: idx })}
+                                                                className="group relative rounded-lg overflow-hidden border border-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+                                                            >
+                                                                <img
+                                                                    src={img.url}
+                                                                    alt={img.name || 'uploaded image'}
+                                                                    className={`rounded-lg object-cover cursor-zoom-in ${msg.images.length === 1 ? 'w-[170px] h-[170px]' : 'w-full max-h-36'}`}
+                                                                />
+                                                                <span className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {msg.content ? <p className="text-[13px] leading-relaxed">{msg.content}</p> : null}
                                                 <p className="text-[9px] text-gray-500 mt-1.5 text-right">{msg.timestamp}</p>
                                             </div>
                                         </div>
@@ -2469,7 +2787,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     />
                                                 )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && !msg.isStreaming && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                {msg.role === 'assistant' && (!msg.isStreaming || htmlReports[i]) && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className="flex items-center gap-1.5">
                                                         {(htmlReports[i] || htmlGenerating[i]) && (
@@ -2623,12 +2941,41 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 </div>
                                                             ) : (
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                                {renderMarkdownContent(body, i)}
+                                                                <SourcesProvider sources={msg.sources || []}>
+                                                                    {renderMarkdownContent(injectSourceUrls(body, msg.sources), i)}
+                                                                </SourcesProvider>
                                                             </div>
                                                             )}
                                                         </>
                                                     );
                                                 })() : null}
+                                                {/* Sources bar — click to open side panel */}
+                                                {!msg.isStreaming && msg.sources && msg.sources.length > 0 && (
+                                                    <div className="mt-4 pt-3 border-t border-gray-100">
+                                                        <button
+                                                            onClick={() => setSourcePanelData(msg.sources!)}
+                                                            className="flex items-center gap-2 group cursor-pointer hover:bg-gray-50 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
+                                                        >
+                                                            <div className="flex items-center gap-1.5">
+                                                                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                                                <span className="text-[12px] font-medium text-gray-500 group-hover:text-gray-700">{msg.sources.length} sources</span>
+                                                            </div>
+                                                            <div className="flex -space-x-1">
+                                                                {msg.sources.slice(0, 5).map((s, si) => (
+                                                                    <div key={si} className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center" title={s.title}>
+                                                                        <span className="text-[8px] text-gray-500 font-bold uppercase">{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
+                                                                    </div>
+                                                                ))}
+                                                                {msg.sources.length > 5 && (
+                                                                    <div className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center">
+                                                                        <span className="text-[8px] text-gray-400 font-medium">+{msg.sources.length - 5}</span>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                                                        </button>
+                                                    </div>
+                                                )}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
@@ -2767,13 +3114,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 {/* Hidden file input */}
                                 <input ref={chatFileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleChatFileChange} />
                                 {/* Image preview strip */}
-                                {chatPastedImages.length > 0 && voiceState === 'idle' && (
+                                {chatImageAttachments.length > 0 && voiceState === 'idle' && (
                                     <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
-                                        {chatPastedImages.map((src, idx) => (
-                                            <div key={idx} className="relative group shrink-0">
-                                                <img src={src} alt="" className="w-12 h-12 rounded-xl object-cover border border-gray-200 shadow-sm" />
+                                        {chatImageAttachments.map((img) => (
+                                            <div key={img.id} className="relative group shrink-0">
+                                                <img
+                                                    src={img.previewUrl}
+                                                    alt=""
+                                                    onClick={() => openPendingImagePreview(chatImageAttachments.findIndex(item => item.id === img.id))}
+                                                    className={`w-12 h-12 rounded-xl object-cover border shadow-sm cursor-zoom-in ${img.status === 'error' ? 'border-red-300' : 'border-gray-200'}`}
+                                                />
+                                                {img.status === 'uploading' && (
+                                                    <span className="absolute inset-0 rounded-xl bg-black/35 flex items-center justify-center">
+                                                        <span className="w-5 h-5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                                                    </span>
+                                                )}
+                                                {img.status === 'error' && (
+                                                    <span className="absolute inset-0 rounded-xl bg-red-500/50 flex items-center justify-center" title="Upload failed">
+                                                        <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8v5m0 3h.01M10.29 3.86L1.82 18a2 2 0 001.73 3h16.9a2 2 0 001.73-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                                                        </svg>
+                                                    </span>
+                                                )}
                                                 <button
-                                                    onClick={() => setChatPastedImages(prev => prev.filter((_, i) => i !== idx))}
+                                                    onClick={() => removeChatImage(img.id)}
                                                     className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                                                 >
                                                     <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -2867,10 +3231,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         </button>
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
-                                            disabled={!isStreaming && !inputText.trim()}
+                                            disabled={!isStreaming && (chatImageAttachments.some(img => img.status === 'uploading') || (!inputText.trim() && !chatImageAttachments.some(img => img.status === 'uploaded' && img.url)))}
                                             className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isStreaming
                                                     ? 'bg-gray-900 text-white hover:bg-gray-700'
-                                                    : inputText.trim()
+                                                    : (inputText.trim() || chatImageAttachments.some(img => img.status === 'uploaded' && img.url))
                                                         ? 'bg-gray-900 text-white hover:bg-gray-800'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                                                 }`}
@@ -2901,7 +3265,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
                 {/* Roundtable Consensus Panel */}
                 {showGraphPanel && !showThinkingPanel && (
-                    <div className="w-[400px] shrink-0 border-l border-gray-100 overflow-hidden relative">
+                    <div className="w-[520px] shrink-0 border-l border-gray-100 overflow-hidden relative">
                         <button
                             onClick={() => setShowGraphPanel(false)}
                             className="absolute top-2 right-2 z-20 w-7 h-7 rounded-lg bg-white/80 backdrop-blur border border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all shadow-sm"
@@ -2911,7 +3275,108 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && chatMode === 'roundtable'} />
                     </div>
                 )}
+
+                {/* Sources Side Panel */}
+                {sourcePanelData && (
+                    <div className="w-[380px] shrink-0 border-l border-gray-100 flex flex-col bg-white overflow-hidden">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
+                            <div className="flex items-center gap-2">
+                                <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                <span className="text-[13px] font-semibold text-gray-800">{sourcePanelData.length} Sources</span>
+                            </div>
+                            <button
+                                onClick={() => setSourcePanelData(null)}
+                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
+                            >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        {/* Source list */}
+                        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
+                            {sourcePanelData.map((s, si) => (
+                                <a
+                                    key={si}
+                                    href={s.url || '#'}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="block rounded-lg px-3 py-2.5 hover:bg-gray-50 border border-transparent hover:border-gray-100 transition-all group/src"
+                                >
+                                    <div className="flex items-start gap-2.5">
+                                        <div className="w-7 h-7 rounded-lg bg-gray-100 border border-gray-200/60 flex items-center justify-center shrink-0 mt-0.5">
+                                            {s.url ? (
+                                                <img
+                                                    src={`https://www.google.com/s2/favicons?domain=${s.domain}&sz=32`}
+                                                    alt=""
+                                                    className="w-4 h-4 rounded-sm"
+                                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling && ((e.target as HTMLImageElement).nextElementSibling as HTMLElement).style.removeProperty('display'); }}
+                                                />
+                                            ) : null}
+                                            <span className={`text-[9px] text-gray-500 font-bold uppercase ${s.url ? 'hidden' : ''}`}>{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <p className="text-[12.5px] font-medium text-gray-800 group-hover/src:text-blue-600 line-clamp-2 leading-snug">{s.title}</p>
+                                            {s.snippet && (
+                                                <p className="text-[11px] text-gray-500 mt-1 line-clamp-2 leading-relaxed">{s.snippet}</p>
+                                            )}
+                                            <div className="flex items-center gap-1.5 mt-1.5">
+                                                <span className="text-[10px] text-gray-400">{s.domain}</span>
+                                                <svg className="w-2.5 h-2.5 text-gray-300 group-hover/src:text-blue-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </a>
+                            ))}
+                        </div>
+                    </div>
+                )}
             </div>
+
+            {imagePreview && imagePreview.images.length > 0 && (
+                <div
+                    className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+                    onClick={closeImagePreview}
+                >
+                    <div className="relative max-w-[92vw] max-h-[92vh]" onClick={e => e.stopPropagation()}>
+                        <img
+                            src={imagePreview.images[imagePreview.index]?.url}
+                            alt={imagePreview.images[imagePreview.index]?.name || 'preview'}
+                            className="max-w-[92vw] max-h-[92vh] object-contain rounded-xl shadow-2xl"
+                        />
+                        <button
+                            type="button"
+                            onClick={closeImagePreview}
+                            className="absolute -top-3 -right-3 w-9 h-9 rounded-full bg-white text-gray-700 flex items-center justify-center shadow-lg hover:bg-gray-100"
+                            title="关闭"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                        {imagePreview.images.length > 1 && (
+                            <>
+                                <button
+                                    type="button"
+                                    onClick={() => moveImagePreview(-1)}
+                                    className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
+                                    title="上一张"
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => moveImagePreview(1)}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
+                                    title="下一张"
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
+                                </button>
+                                <div className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[12px] text-white/90">
+                                    {imagePreview.index + 1} / {imagePreview.images.length}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

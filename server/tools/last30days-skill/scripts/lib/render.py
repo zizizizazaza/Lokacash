@@ -115,7 +115,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
         lines.append("")
         lines.append("---")
         lines.append("**⚡ Want better results?** Add API keys to unlock Reddit, TikTok, Instagram & X data:")
-        lines.append("- `SCRAPECREATORS_API_KEY` → Reddit + TikTok + Instagram (one key, all three!) — 100 free calls, no CC — scrapecreators.com (no affiliation)")
+        lines.append("- `SCRAPECREATORS_API_KEY` → Reddit + TikTok + Instagram (X uses Bird/xAI, not this key) — 100 free calls, no CC — scrapecreators.com (no affiliation)")
         lines.append("- `XAI_API_KEY` → X posts with real likes & reposts")
         lines.append("- `OPENAI_API_KEY` (legacy) → Reddit threads (slower, higher cost)")
         lines.append("- Edit `~/.config/last30days/.env` to add keys")
@@ -143,7 +143,7 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
         lines.append("*💡 Tip: Add an xAI key (`XAI_API_KEY`) for X/Twitter data and better triangulation.*")
         lines.append("")
     elif report.mode == "x-only" and missing_keys in ("reddit", "none"):
-        lines.append("*💡 Tip: Add `SCRAPECREATORS_API_KEY` for Reddit + TikTok + Instagram data (one key, all three) — 100 free calls, no CC — scrapecreators.com (no affiliation)*")
+        lines.append("*💡 Tip: Add `SCRAPECREATORS_API_KEY` for Reddit + TikTok + Instagram (X: Bird or xAI) — 100 free calls, no CC — scrapecreators.com (no affiliation)*")
         lines.append("")
 
     # Reddit items

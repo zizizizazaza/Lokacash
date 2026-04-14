@@ -6,6 +6,7 @@ via Twitter's GraphQL API. No external `bird` CLI binary needed - just Node.js 2
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -15,6 +16,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .relevance import token_overlap_relevance as _compute_relevance
+
+# One @handle in the topic → prefer account timeline (from:), not global @mention search.
+_TOPIC_HANDLE_RE = re.compile(r"@([A-Za-z0-9_]{1,15})\b", re.I)
 
 # Path to the vendored bird-search wrapper
 _BIRD_SEARCH_MJS = Path(__file__).parent / "vendor" / "bird-search" / "bird-search.mjs"
@@ -238,6 +242,18 @@ def search_x(
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
     timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+
+    # Single @handle → X "from:" timeline (author's posts). Avoids mostly-@replies from others.
+    handles = _TOPIC_HANDLE_RE.findall(topic or "")
+    if len(handles) == 1:
+        handle = handles[0]
+        query = f"from:{handle} since:{from_date}"
+        _log(f"Single-handle topic: timeline query {query}")
+        response = _run_bird_search(query, count, timeout)
+        items = parse_bird_response(response, query=topic)
+        if items:
+            return response
+        _log(f"0 results for {query}, falling back to keyword search")
 
     # Extract core subject - X search is literal, not semantic
     core_topic = _extract_core_subject(topic)

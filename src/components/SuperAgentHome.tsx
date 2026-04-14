@@ -4,6 +4,21 @@ import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
 import { IFlytekStreamer } from '../services/iflytek';
+import { api } from '../services/api';
+import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCompression';
+
+interface ChatImagePayload {
+  url: string;
+  mime?: string;
+  name?: string;
+}
+
+interface PendingHomeImage extends ChatImagePayload {
+  id: string;
+  previewUrl: string;
+  status: 'uploading' | 'uploaded' | 'error';
+}
+
 const SuperAgentHome: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -14,21 +29,110 @@ const SuperAgentHome: React.FC = () => {
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const [chatMessage, setChatMessage] = useState<string | null>(null);
+  const [chatInitialImages, setChatInitialImages] = useState<ChatImagePayload[]>([]);
   const [phIdx, setPhIdx] = useState(0);
-  const [pastedImages, setPastedImages] = useState<string[]>([]);
+  const [homeImageAttachments, setHomeImageAttachments] = useState<PendingHomeImage[]>([]);
+  const [homeImagePreview, setHomeImagePreview] = useState<{ images: ChatImagePayload[]; index: number } | null>(null);
   const homeFileRef = useRef<HTMLInputElement>(null);
+  const homeImageAttachmentsRef = useRef<PendingHomeImage[]>([]);
   const [homeVoiceState, setHomeVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const homeVoiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevNewChatRef = useRef<number | null>(null);
   const iflytekRef = useRef<IFlytekStreamer | null>(null);
 
   useEffect(() => {
+    homeImageAttachmentsRef.current = homeImageAttachments;
+  }, [homeImageAttachments]);
+
+  useEffect(() => {
     return () => {
       if (iflytekRef.current) {
         iflytekRef.current.stop();
       }
+      for (const img of homeImageAttachmentsRef.current) {
+        URL.revokeObjectURL(img.previewUrl);
+      }
     };
   }, []);
+
+  const clearHomeImages = () => {
+    setHomeImageAttachments(prev => {
+      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
+      return [];
+    });
+  };
+
+  const removeHomeImage = (id: string) => {
+    setHomeImageAttachments(prev => {
+      const target = prev.find(item => item.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter(item => item.id !== id);
+    });
+  };
+
+  const moveHomeImagePreview = (delta: number) => {
+    setHomeImagePreview(prev => {
+      if (!prev || prev.images.length === 0) return prev;
+      const nextIndex = (prev.index + delta + prev.images.length) % prev.images.length;
+      return { ...prev, index: nextIndex };
+    });
+  };
+
+  useEffect(() => {
+    if (!homeImagePreview) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setHomeImagePreview(null);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        moveHomeImagePreview(-1);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        moveHomeImagePreview(1);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [homeImagePreview]);
+
+  const enqueueHomeImages = (incomingFiles: File[]) => {
+    const availableSlots = Math.max(0, MAX_IMAGES_PER_MESSAGE - homeImageAttachmentsRef.current.length);
+    if (availableSlots <= 0) return;
+    const imageFiles = incomingFiles.filter(file => file.type.startsWith('image/')).slice(0, availableSlots);
+    for (const file of imageFiles) {
+      const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const previewUrl = URL.createObjectURL(file);
+      setHomeImageAttachments(prev => [...prev, {
+        id,
+        previewUrl,
+        status: 'uploading' as const,
+        url: '',
+        mime: file.type,
+        name: file.name,
+      }].slice(-MAX_IMAGES_PER_MESSAGE));
+
+      void (async () => {
+        const prepared = await prepareImageForUpload(file);
+        if (!prepared.file) throw new Error(prepared.error || 'Image preprocessing failed');
+        const res = await api.uploadFile(prepared.file);
+        return { res, uploadFile: prepared.file };
+      })()
+        .then(({ res, uploadFile }) => {
+          if (res.type !== 'image' || !res.url) throw new Error('Invalid image upload response');
+          setHomeImageAttachments(prev => prev.map(item => (
+            item.id === id
+              ? { ...item, status: 'uploaded', url: res.url, mime: uploadFile.type || file.type, name: file.name }
+              : item
+          )));
+        })
+        .catch(() => {
+          setHomeImageAttachments(prev => prev.map(item => (
+            item.id === id ? { ...item, status: 'error' } : item
+          )));
+        });
+    }
+  };
 
   const stopHomeRecording = () => {
     if (iflytekRef.current) {
@@ -88,27 +192,28 @@ const SuperAgentHome: React.FC = () => {
     const imageItems = items.filter(it => it.type.startsWith('image/'));
     if (!imageItems.length) return;
     e.preventDefault();
-    imageItems.forEach(item => {
-      const file = item.getAsFile();
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = ev => {
-        if (ev.target?.result) setPastedImages(prev => [...prev, ev.target!.result as string]);
-      };
-      reader.readAsDataURL(file);
-    });
+    const files = imageItems.map(item => item.getAsFile()).filter((f): f is File => Boolean(f));
+    enqueueHomeImages(files);
   };
 
   const handleHomeFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = ev => {
-        if (ev.target?.result) setPastedImages(prev => [...prev, ev.target!.result as string]);
-      };
-      reader.readAsDataURL(file);
-    });
+    enqueueHomeImages(files);
     e.target.value = '';
+  };
+
+  const sendHomeMessage = () => {
+    const hasUploadingImages = homeImageAttachments.some(img => img.status === 'uploading');
+    if (hasUploadingImages) return;
+    const uploadedImages = homeImageAttachments
+      .filter(img => img.status === 'uploaded' && img.url)
+      .map(img => ({ url: img.url, mime: img.mime, name: img.name }));
+    const text = input.trim();
+    if (!text && uploadedImages.length === 0) return;
+    setChatInitialImages(uploadedImages);
+    setChatMessage(text);
+    setInput('');
+    clearHomeImages();
   };
 
   const PLACEHOLDERS = [
@@ -131,9 +236,11 @@ const SuperAgentHome: React.FC = () => {
     if (newChatTs && newChatTs !== prevNewChatRef.current) {
       prevNewChatRef.current = newChatTs;
       setChatMessage(null);
+      setChatInitialImages([]);
       setInput('');
       setSelectedAgent(null);
       setSelectedScenario(null);
+      clearHomeImages();
       setPhIdx(Math.floor(Math.random() * QUICK_ACTIONS.length));
     }
   }, [newChatTs]); // eslint-disable-line
@@ -165,16 +272,22 @@ const SuperAgentHome: React.FC = () => {
   // clicked, treat chatMessage as null so SuperAgentChat doesn't mount with
   // the stale value (the useEffect above will clear it for subsequent renders).
   const effectiveChatMessage = isNewChatReset ? null : chatMessage;
+  // Same for images: chatInitialImages is cleared in useEffect (after paint), so on the
+  // first render after "New chat" it can still hold the previous session's uploads.
+  // If we pass those stale images with empty text, SuperAgentChat auto-send fires
+  // (content '' + images: 1) and creates a phantom session.
+  const effectiveChatInitialImages = isNewChatReset ? [] : chatInitialImages;
 
-  if (effectiveChatMessage || sessionParam) {
+  if (effectiveChatMessage !== null || sessionParam || effectiveChatInitialImages.length > 0) {
     return (
       <SuperAgentChat
-        key={sessionParam || effectiveChatMessage || 'new'}
+        key={sessionParam || effectiveChatMessage || (effectiveChatInitialImages.length > 0 ? 'with-images' : 'new')}
         initialMessage={effectiveChatMessage || ''}
+        initialImages={sessionParam ? [] : effectiveChatInitialImages}
         initialSessionId={sessionParam || undefined}
         initialChatMode={sessionParam ? undefined : mode}
         selectedAgentId={selectedAgent || undefined}
-        onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
+        onBack={() => { setChatMessage(null); setChatInitialImages([]); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
       />
     );
   }
@@ -234,13 +347,36 @@ const SuperAgentHome: React.FC = () => {
             {/* Hidden file input */}
             <input ref={homeFileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleHomeFileChange} />
             {/* Image preview strip */}
-            {pastedImages.length > 0 && homeVoiceState === 'idle' && (
+            {homeImageAttachments.length > 0 && homeVoiceState === 'idle' && (
               <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
-                {pastedImages.map((src, idx) => (
-                  <div key={idx} className="relative group shrink-0">
-                    <img src={src} alt="" className="w-14 h-14 rounded-xl object-cover border border-gray-200 shadow-sm" />
+                {homeImageAttachments.map((img) => (
+                  <div key={img.id} className="relative group shrink-0">
+                    <img
+                      src={img.previewUrl}
+                      alt=""
+                      onClick={() => {
+                        const previewImages = homeImageAttachments.map(item => ({ url: item.previewUrl, name: item.name }));
+                        const idx = previewImages.findIndex(item => item.url === img.previewUrl);
+                        if (previewImages.length > 0) {
+                          setHomeImagePreview({ images: previewImages, index: idx >= 0 ? idx : 0 });
+                        }
+                      }}
+                      className={`w-14 h-14 rounded-xl object-cover border shadow-sm cursor-zoom-in ${img.status === 'error' ? 'border-red-300' : 'border-gray-200'}`}
+                    />
+                    {img.status === 'uploading' && (
+                      <span className="absolute inset-0 rounded-xl bg-black/35 flex items-center justify-center">
+                        <span className="w-5 h-5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                      </span>
+                    )}
+                    {img.status === 'error' && (
+                      <span className="absolute inset-0 rounded-xl bg-red-500/50 flex items-center justify-center" title="Upload failed">
+                        <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8v5m0 3h.01M10.29 3.86L1.82 18a2 2 0 001.73 3h16.9a2 2 0 001.73-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                        </svg>
+                      </span>
+                    )}
                     <button
-                      onClick={() => setPastedImages(prev => prev.filter((_, i) => i !== idx))}
+                      onClick={() => removeHomeImage(img.id)}
                       className="absolute -top-1.5 -right-1.5 w-4.5 h-4.5 w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                     >
                       <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -255,9 +391,9 @@ const SuperAgentHome: React.FC = () => {
               onChange={e => setInput(e.target.value)}
               onPaste={handleHomePaste}
               onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
+                if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
-                  setChatMessage(input.trim());
+                  sendHomeMessage();
                 }
               }}
               placeholder={homeVoiceState !== 'idle' ? '' : PLACEHOLDERS[phIdx]}
@@ -348,9 +484,9 @@ const SuperAgentHome: React.FC = () => {
                 </button>
                 <button
                   onClick={() => {
-                    setChatMessage(input.trim());
+                    sendHomeMessage();
                   }}
-                  className={`send-btn-active w-8 h-8 rounded-lg flex items-center justify-center transition-all ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                  className={`send-btn-active w-8 h-8 rounded-lg flex items-center justify-center transition-all ${(input.trim() || homeImageAttachments.some(img => img.status === 'uploaded')) ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                     }`}>
                   <I.Send />
                 </button>
@@ -416,10 +552,12 @@ const SuperAgentHome: React.FC = () => {
                       if ((a as any).agentId) {
                         setSelectedAgent((a as any).agentId);
                         setSelectedScenario(null);
+                          setChatInitialImages([]);
                         if (a.prompt) setChatMessage(a.prompt);
                       } else if (a.route) {
                         navigate(a.route);
                       } else if (a.prompt) {
+                          setChatInitialImages([]);
                         setChatMessage(a.prompt);
                       }
                     }}
@@ -445,7 +583,7 @@ const SuperAgentHome: React.FC = () => {
             {USE_CASES.map(uc => (
               <button
                 key={uc.id}
-                onClick={() => setChatMessage(uc.prompt)}
+                onClick={() => { setChatInitialImages([]); setChatMessage(uc.prompt); }}
                 className="usecase-card group text-left bg-white border border-gray-100 rounded-xl p-3 cursor-pointer"
               >
                 <div className="w-6 h-6 rounded-md bg-gray-50 flex items-center justify-center text-gray-400 mb-2">{UseCaseIcons[uc.id] ? React.createElement(UseCaseIcons[uc.id]) : null}</div>
@@ -462,8 +600,8 @@ const SuperAgentHome: React.FC = () => {
         </div>
       )}
 
-      {/* ── Featured Groups — only on top-level ── */}
-      {!selectedAgent && (() => {
+      {/* ── Featured Groups — hidden for now ── */}
+      {false && !selectedAgent && (() => {
         const avatarColors = ['bg-blue-400', 'bg-emerald-400', 'bg-violet-400', 'bg-amber-400', 'bg-rose-400', 'bg-cyan-400', 'bg-indigo-400'];
         return (
           <div className="pb-12 px-4 max-w-[640px] w-full mx-auto">
@@ -519,6 +657,46 @@ const SuperAgentHome: React.FC = () => {
           </div>
         );
       })()}
+
+      {homeImagePreview && homeImagePreview.images.length > 0 && (
+        <div className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setHomeImagePreview(null)}>
+          <div className="relative max-w-[92vw] max-h-[92vh]" onClick={e => e.stopPropagation()}>
+            <img
+              src={homeImagePreview.images[homeImagePreview.index]?.url}
+              alt={homeImagePreview.images[homeImagePreview.index]?.name || 'preview'}
+              className="max-w-[92vw] max-h-[92vh] object-contain rounded-xl shadow-2xl"
+            />
+            <button
+              type="button"
+              onClick={() => setHomeImagePreview(null)}
+              className="absolute -top-3 -right-3 w-9 h-9 rounded-full bg-white text-gray-700 flex items-center justify-center shadow-lg hover:bg-gray-100"
+              title="Close"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            {homeImagePreview.images.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => moveHomeImagePreview(-1)}
+                  className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
+                  title="Previous"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveHomeImagePreview(1)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
+                  title="Next"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
     </div>
   );

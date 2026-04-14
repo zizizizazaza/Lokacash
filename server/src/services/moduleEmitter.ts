@@ -15,8 +15,8 @@ export function createModuleEmitter(userId: string, sessionId: string) {
       emitToUser(userId, 'agent:chat:progress', { sessionId, content });
     },
 
-    emitStreamDone(content: string) {
-      emitToUser(userId, 'agent:chat:stream_done', { sessionId, content });
+    emitStreamDone(content: string, extra?: Record<string, unknown>) {
+      emitToUser(userId, 'agent:chat:stream_done', { sessionId, content, ...extra });
     },
 
     emitStarted(mode: string, route: string, hidden?: boolean) {
