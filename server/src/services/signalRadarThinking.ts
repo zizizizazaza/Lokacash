@@ -8,6 +8,7 @@ export type SignalSearchSource = {
   title: string;
   domain: string;
   url?: string;
+  snippet?: string;
 };
 
 function hostKey(url: string): string {
@@ -114,6 +115,25 @@ function pickTitleForCompactUrl(lines: string[], urlIndex: number): string {
   return '';
 }
 
+/** Grab nearby non-noise lines as a snippet (up to ~200 chars). */
+function pickSnippetForCompactUrl(lines: string[], urlIndex: number, title: string): string {
+  const parts: string[] = [];
+  const maxLookback = 8;
+  for (let j = urlIndex - 1; j >= 0 && j >= urlIndex - maxLookback; j--) {
+    const trimmed = lines[j].trim();
+    if (!trimmed) continue;
+    if (isNoisePrevLine(trimmed)) continue;
+    if (isResearchItemHeaderLine(trimmed)) continue;
+    if (polymarketOutcomeLine(trimmed)) continue;
+    const cleaned = cleanCompactTitle(trimmed);
+    if (cleaned.length < 3) continue;
+    if (cleaned === title) continue; // skip title itself
+    parts.unshift(cleaned);
+    if (parts.join(' ').length > 200) break;
+  }
+  return parts.join(' ').slice(0, 250);
+}
+
 /**
  * Extract real post/page URLs from last30days.py compact stdout (render_compact).
  * Each item prints title/snippet lines then a bare `https://...` line.
@@ -137,12 +157,14 @@ export function sourcesFromLast30DaysCompact(raw: string, max = 25): SignalSearc
     const host = hostKey(url);
     if (!host) continue;
 
+    const snippet = pickSnippetForCompactUrl(lines, i, title);
     seen.add(url);
     out.push({
       favicon: faviconForHost(host),
       title: title || host.replace(/^www\./, ''),
       domain: host.replace(/^www\./, ''),
       url,
+      snippet: snippet || undefined,
     });
     if (out.length >= max) break;
   }

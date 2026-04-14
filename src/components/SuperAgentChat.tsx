@@ -3,9 +3,10 @@
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 
@@ -99,6 +100,8 @@ interface Message {
     isStreaming?: boolean;
     /** From DB; used to restore Thinking Process when reopening a session */
     metadata?: string | null;
+    /** Verified source URLs extracted from research data */
+    sources?: SearchSource[];
 }
 
 interface SearchSource {
@@ -106,6 +109,7 @@ interface SearchSource {
     title: string;
     domain: string;
     url?: string;
+    snippet?: string;
 }
 
 interface DataProvider {
@@ -402,6 +406,204 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
     };
 };
 
+// ─── Knowledge Graph Types ──────────────────────────────────
+interface KGNode {
+    id: string;
+    type: 'agent' | 'task' | 'stance';
+    label: string;
+    x: number;
+    y: number;
+    data?: Record<string, string>;
+}
+
+interface KGEdge {
+    id: string;
+    source: string;
+    target: string;
+    label: string;
+}
+
+interface KnowledgeGraphData {
+    nodes: KGNode[];
+    edges: KGEdge[];
+}
+
+const STATIC_KG_DATA: KnowledgeGraphData = {
+    nodes: [
+        { id: 'agent_0', type: 'agent', label: 'agent_0', x: 0, y: 0 },
+        { id: 'agent_1', type: 'agent', label: 'agent_1', x: 0, y: 0 },
+        { id: 'agent_2', type: 'agent', label: 'agent_2', x: 0, y: 0 },
+        { id: 'agent_3', type: 'agent', label: 'agent_3', x: 0, y: 0 },
+        { id: 'round_1', type: 'task', label: 'Round 1', x: 0, y: 0 },
+        { id: 'round_2', type: 'task', label: 'Round 2', x: 0, y: 0 },
+        { id: 'round_3', type: 'task', label: 'Round 3', x: 0, y: 0 },
+        { id: 'round_4', type: 'task', label: 'Round 4', x: 0, y: 0 },
+        { id: 'node_A', type: 'stance', label: 'A', x: 0, y: 0 },
+        { id: 'node_B', type: 'stance', label: 'B', x: 0, y: 0 },
+    ],
+    edges: [
+        { id: 'e1', source: 'agent_1', target: 'round_2', label: 'participates_in' },
+        { id: 'e2', source: 'agent_1', target: 'round_3', label: 'participates_in' },
+        { id: 'e3', source: 'agent_1', target: 'round_4', label: 'participates_in' },
+        { id: 'e4', source: 'agent_1', target: 'node_B', label: 'supports' },
+        { id: 'e5', source: 'agent_3', target: 'round_2', label: 'participates_in' },
+        { id: 'e6', source: 'agent_3', target: 'round_3', label: 'participates_in' },
+        { id: 'e7', source: 'agent_3', target: 'round_4', label: 'participates_in' },
+        { id: 'e8', source: 'agent_3', target: 'node_B', label: 'supports' },
+        { id: 'e9', source: 'agent_2', target: 'round_1', label: 'participates_in' },
+        { id: 'e10', source: 'agent_2', target: 'round_2', label: 'participates_in' },
+        { id: 'e11', source: 'agent_2', target: 'round_3', label: 'participates_in' },
+        { id: 'e12', source: 'agent_2', target: 'round_4', label: 'participates_in' },
+        { id: 'e13', source: 'agent_2', target: 'node_A', label: 'supports' },
+        { id: 'e14', source: 'agent_2', target: 'node_B', label: 'supports' },
+        { id: 'e15', source: 'agent_0', target: 'round_1', label: 'participates_in' },
+        { id: 'e16', source: 'agent_0', target: 'round_2', label: 'participates_in' },
+        { id: 'e17', source: 'agent_0', target: 'round_3', label: 'participates_in' },
+        { id: 'e18', source: 'agent_0', target: 'round_4', label: 'participates_in' },
+        { id: 'e19', source: 'agent_0', target: 'node_B', label: 'supports' },
+    ]
+};
+
+const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
+
+// ─── KnowledgeGraphView Component ──────────────────────────
+const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) => {
+    const svgRef = useRef<SVGSVGElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!svgRef.current || !data.nodes.length) return;
+
+        const svg = d3.select(svgRef.current);
+        const width = containerRef.current?.clientWidth || 400;
+        const height = containerRef.current?.clientHeight || 600;
+
+        svg.selectAll('*').remove();
+
+        const zoom = d3.zoom<SVGSVGElement, unknown>()
+            .scaleExtent([0.1, 4])
+            .on('zoom', (e) => {
+                g.attr('transform', e.transform);
+            });
+        
+        svg.call(zoom as any);
+
+        const g = svg.append('g');
+
+        svg.append('defs').append('marker')
+            .attr('id', 'arrow')
+            .attr('viewBox', '0 -5 10 10')
+            .attr('refX', 22)
+            .attr('refY', 0)
+            .attr('markerWidth', 5)
+            .attr('markerHeight', 5)
+            .attr('orient', 'auto')
+            .append('path')
+            .attr('fill', '#9ca3af')
+            .attr('d', 'M0,-4L8,0L0,4');
+
+        const nodes = data.nodes.map(d => ({ ...d }));
+        const edges = data.edges.map(d => ({ ...d }));
+
+        const simulation = d3.forceSimulation(nodes as any)
+            .force('link', d3.forceLink(edges).id((d: any) => d.id).distance(110))
+            .force('charge', d3.forceManyBody().strength(-400))
+            .force('center', d3.forceCenter(width / 2, height / 2))
+            .force('collide', d3.forceCollide().radius(40));
+
+        const link = g.append('g')
+            .attr('stroke', '#9ca3af')
+            .attr('stroke-opacity', 0.8)
+            .selectAll('line')
+            .data(edges)
+            .join('line')
+            .attr('stroke-width', 1.5)
+            .attr('marker-end', 'url(#arrow)');
+
+        const linkLabel = g.append('g')
+            .selectAll('text')
+            .data(edges)
+            .join('text')
+            .text((d: any) => d.label)
+            .attr('font-size', '8px')
+            .attr('fill', '#9ca3af')
+            .attr('text-anchor', 'middle');
+
+        const drag = d3.drag<SVGGElement, any>()
+            .on('start', (event, d) => {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            })
+            .on('drag', (event, d) => {
+                d.fx = event.x;
+                d.fy = event.y;
+            })
+            .on('end', (event, d) => {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            });
+
+        const node = g.append('g')
+            .selectAll('g')
+            .data(nodes)
+            .join('g')
+            .call(drag as any)
+            .style('cursor', 'grab');
+
+        node.append('circle')
+            .attr('r', (d: any) => d.type === 'agent' ? 18 : 14)
+            .attr('fill', (d: any) => d.type === 'agent' ? '#f3f4f6' : d.type === 'stance' ? '#f5f3ff' : '#eff6ff')
+            .attr('stroke', (d: any) => d.type === 'agent' ? '#6b7280' : d.type === 'stance' ? '#7c3aed' : '#3b82f6')
+            .attr('stroke-width', 1.5);
+
+        node.append('text')
+            .text((d: any) => {
+                const parts = d.label.split(' ');
+                return d.type === 'agent' ? parts[0] : (d.label.length > 15 ? d.label.slice(0, 13) + '…' : d.label);
+            })
+            .attr('y', 28)
+            .attr('font-size', '9px')
+            .attr('fill', (d: any) => d.type === 'agent' ? '#374151' : d.type === 'stance' ? '#5b21b6' : '#1d4ed8')
+            .attr('text-anchor', 'middle')
+            .attr('font-weight', '500');
+
+        simulation.on('tick', () => {
+            link
+                .attr('x1', (d: any) => d.source.x)
+                .attr('y1', (d: any) => d.source.y)
+                .attr('x2', (d: any) => d.target.x)
+                .attr('y2', (d: any) => d.target.y);
+
+            linkLabel
+                .attr('x', (d: any) => (d.source.x + d.target.x) / 2)
+                .attr('y', (d: any) => (d.source.y + d.target.y) / 2 - 4);
+
+            node
+                .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
+        });
+
+        return () => {
+            simulation.stop();
+        };
+    }, [data.nodes, data.edges]);
+
+    return (
+        <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white" style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
+            <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
+            <div className="absolute bottom-4 left-4 flex gap-4 z-10">
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f3f4f6] border border-[#6b7280]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Agent</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#eff6ff] border border-[#3b82f6]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Task</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f5f3ff] border border-[#7c3aed]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Stance</span></div>
+            </div>
+            <div className="absolute top-4 right-4 text-[10px] text-gray-500 font-mono text-right pointer-events-none">
+                scroll to zoom<br/>drag to pan
+            </div>
+        </div>
+    );
+};
+
 // ─── RoundtableView Component ──────────────────────────
 const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean }> = ({ data, isWaiting, isLive }) => {
     // Empty / waiting state: show the roundtable graphic with agents but no rounds
@@ -493,55 +695,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
         );
     }
 
-    const [expandedRound, setExpandedRound] = useState<number | null>(data.rounds.length > 0 ? data.rounds[data.rounds.length - 1].round : null);
-    // Always use all 4 agents for the graph, regardless of how many responded in data
-    const graphAgents = ROUNDTABLE_AGENTS;
-    const totalRounds = data.rounds.length;
-
-    type PlayPhase = 'discussing' | 'voted' | 'consensus';
-    const [playPhase, setPlayPhase] = useState<PlayPhase>('discussing');
-    const [playRoundIdx, setPlayRoundIdx] = useState(0);
-    const [visibleVotes, setVisibleVotes] = useState(0);
-
-    useEffect(() => {
-        // If not live (viewing past result), jump straight to final state — no animation
-        if (!isLive && totalRounds > 0) {
-            setPlayRoundIdx(totalRounds - 1);
-            setPlayPhase('consensus');
-            setVisibleVotes(graphAgents.length);
-            return;
-        }
-        const timers: ReturnType<typeof setTimeout>[] = [];
-        let t = 0;
-        for (let r = 0; r < totalRounds; r++) {
-            const rr = r;
-            timers.push(setTimeout(() => { setPlayRoundIdx(rr); setPlayPhase('discussing'); setVisibleVotes(0); }, t));
-            t += 2800;
-            timers.push(setTimeout(() => { setPlayPhase('voted'); setVisibleVotes(0); }, t));
-            const numAgents = graphAgents.length;
-            for (let a = 0; a < numAgents; a++) {
-                const aa = a;
-                timers.push(setTimeout(() => { setVisibleVotes(aa + 1); }, t + (aa + 1) * 300));
-            }
-            t += 300 * numAgents + 800;
-        }
-        timers.push(setTimeout(() => { setPlayPhase('consensus'); setVisibleVotes(graphAgents.length); }, t));
-        return () => timers.forEach(clearTimeout);
-    }, [totalRounds, isLive]);
-
-    const isSpinning = playPhase === 'discussing';
-    const isConsensusReached = playPhase === 'consensus';
-    const currentRound = data.rounds[playRoundIdx];
-
-    const SIZE = 220;
-    const CTR = SIZE / 2;
-    const R = 72;
-    const agentPositions = graphAgents.map((_, i) => {
-        const a = (i / graphAgents.length) * 2 * Math.PI - Math.PI / 2;
-        return { x: CTR + R * Math.cos(a), y: CTR + R * Math.sin(a) };
-    });
-    const AVATAR = 38;
-    const HALF = AVATAR / 2;
+    const [expandedRound, setExpandedRound] = useState<number | null>(null);
 
     return (
         <div className="flex flex-col h-full bg-white">
@@ -550,119 +704,13 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                 <p className="text-[11px] text-gray-400 mt-0.5">{data.rounds.length} round{data.rounds.length > 1 ? 's' : ''} of discussion</p>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-                {/* Animated Roundtable Graphic */}
-                <div className="relative flex flex-col items-center pb-4 border-b border-gray-100">
-                    <style>{`
-                        @keyframes rt-ring-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-                        @keyframes rt-orbit { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-                        @keyframes rt-counter-orbit { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
-                        @keyframes rt-pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
-                        @keyframes rt-float-up { 0% { opacity: 1; transform: translateY(0) scale(1); } 60% { opacity: 1; transform: translateY(-16px) scale(1.15); } 100% { opacity: 0; transform: translateY(-24px) scale(0.8); } }
-                        .rt-ring-spin { animation: rt-ring-spin 5s linear infinite; }
-                        .rt-ring-spin.stopped { animation-play-state: paused; }
-                        .rt-orbit { animation: rt-orbit 12s linear infinite; }
-                        .rt-orbit.stopped { animation: none; }
-                        .rt-counter-orbit { animation: rt-counter-orbit 12s linear infinite; }
-                        .rt-counter-orbit.stopped { animation: none; }
-                        .rt-pulse-dot { animation: rt-pulse 1s ease-in-out infinite; }
-                        .rt-float-vote { animation: rt-float-up 1.2s ease-out both; }
-                    `}</style>
+            {/* Knowledge Graph — fills available space */}
+            <div className="flex-1 min-h-0 relative border-b border-gray-100">
+                <KnowledgeGraphView data={buildKnowledgeGraph()} />
+            </div>
 
-                    <div className="relative" style={{ width: SIZE, height: SIZE + 24 }}>
-                        <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: SIZE, height: SIZE }} viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
-                            <circle cx={CTR} cy={CTR} r={R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
-                            <circle cx={CTR} cy={CTR} r={R} fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4 4" />
-                            {agentPositions.map((p, i) => (
-                                <line key={i} x1={CTR} y1={CTR} x2={p.x} y2={p.y}
-                                    stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
-                            ))}
-                        </svg>
-
-                        <div className={`absolute rt-ring-spin ${!isSpinning ? 'stopped' : ''}`}
-                            style={{ left: 0, top: 0, width: SIZE, height: SIZE, pointerEvents: 'none' }}>
-                            <svg style={{ width: SIZE, height: SIZE }} viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
-                                <circle cx={CTR} cy={CTR} r={R + 12} fill="none"
-                                    stroke="url(#rtArcGrad)" strokeWidth="2.5"
-                                    strokeDasharray={`${Math.PI * (R + 12) * 0.35} ${Math.PI * (R + 12) * 1.65}`}
-                                    strokeLinecap="round" opacity={isSpinning ? 1 : 0}
-                                    style={{ transition: 'opacity 0.3s' }}
-                                />
-                                <defs>
-                                    <linearGradient id="rtArcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.7" />
-                                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0" />
-                                    </linearGradient>
-                                </defs>
-                            </svg>
-                        </div>
-
-                        <div className="absolute flex items-center justify-center"
-                            style={{ left: CTR - 26, top: CTR - 26, width: 52, height: 52 }}>
-                            <div className={`w-[52px] h-[52px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${isSpinning
-                                    ? 'bg-blue-50/80 border-2 border-blue-200'
-                                    : 'bg-gray-50 border-2 border-gray-200'
-                                }`}>
-                                {isSpinning ? (
-                                    <>
-                                        <div className="flex gap-[3px] mb-1">
-                                            {[0, 1, 2].map(i => (
-                                                <div key={i} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${i * 0.2}s` }} />
-                                            ))}
-                                        </div>
-                                        <span className="text-[9px] text-blue-500 font-bold">R{playRoundIdx + 1}</span>
-                                    </>
-                                ) : (
-                                    <span className="text-[11px] text-gray-500 font-bold">R{playRoundIdx + 1}</span>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className={`absolute rt-orbit ${!isSpinning ? 'stopped' : ''}`}
-                            style={{ left: 0, top: 0, width: SIZE, height: SIZE + 24, transformOrigin: `${CTR}px ${CTR}px` }}>
-                            {graphAgents.map((agent, i) => {
-                                const pos = agentPositions[i];
-                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                                const roundAgent = currentRound?.agents.find(a => a.agentId === agent.agentId);
-                                const hasResponse = !!roundAgent;
-                                const conf = roundAgent?.confidence ?? 0;
-                                const showVote = hasResponse && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
-                                const ringCls = isSpinning ? 'ring-2 ring-blue-200/60 ring-offset-1' : '';
-                                return (
-                                    <div key={agent.initials} className={`absolute flex flex-col items-center rt-counter-orbit ${!isSpinning ? 'stopped' : ''}`}
-                                        style={{ left: pos.x - HALF, top: pos.y - HALF, width: AVATAR, transformOrigin: `${HALF}px ${HALF}px` }}>
-                                        <div className="relative flex justify-center">
-                                            <div className={`rounded-full flex items-center justify-center text-white shadow-sm transition-all duration-300 ${ringCls}`}
-                                                style={{ backgroundColor: color, width: AVATAR, height: AVATAR }}>
-                                                {AGENT_ICON(agent.initials)}
-                                            </div>
-                                            {showVote && (
-                                                <div key={`${playRoundIdx}-${agent.initials}`}
-                                                    className="absolute -top-2 left-1/2 -translate-x-1/2 rt-float-vote pointer-events-none">
-                                                    <span className="text-[11px] font-bold bg-white/90 backdrop-blur rounded-full px-1.5 py-0.5 shadow-sm text-blue-600 border border-blue-100">{conf}%</span>
-                                                </div>
-                                            )}
-                                        </div>
-                                        <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                            {agent.name}
-                                        </span>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    <div className={`text-[12px] font-semibold transition-colors duration-300 ${isConsensusReached ? 'text-emerald-600' : isSpinning ? 'text-blue-500' : 'text-gray-500'
-                        }`}>
-                        {isConsensusReached
-                            ? '✓ Consensus Reached'
-                            : isSpinning
-                                ? `Round ${playRoundIdx + 1} — Discussing...`
-                                : `Round ${playRoundIdx + 1} — Votes In`}
-                    </div>
-                </div>
-
-                {/* Rounds */}
+            {/* Rounds — pinned to bottom, scrollable when expanded */}
+            <div className="max-h-[40%] overflow-y-auto px-5 py-4 space-y-4">
                 {data.rounds.map((round) => {
                     const isExpanded = expandedRound === round.round;
                     const isReached = round.status === 'reached';
@@ -1337,6 +1385,28 @@ interface SuperAgentChatProps {
     initialChatMode?: 'auto' | 'fast' | 'roundtable';
 }
 
+/** Replace bare [Source Name] citations with [Source Name](url) using the sources list */
+function injectSourceUrls(text: string, sources?: SearchSource[]): string {
+    if (!sources || sources.length === 0) return text;
+    // Build lookup: lowercase title/domain → url
+    const lookup = new Map<string, string>();
+    for (const s of sources) {
+        if (s.url) {
+            lookup.set(s.title.toLowerCase(), s.url);
+            lookup.set(s.domain.toLowerCase(), s.url);
+            // Also match without trailing domain suffixes like ".com"
+            const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
+            if (short.length > 2) lookup.set(short, s.url);
+        }
+    }
+    // Match [text] NOT followed by ( — bare bracket citations
+    return text.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
+        const url = lookup.get(label.toLowerCase().trim());
+        if (url) return `[${label}](${url})`;
+        return match; // no match — leave as-is
+    });
+}
+
 const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
@@ -1516,6 +1586,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     };
     const [reactions, setReactions] = useState<Record<number, 'liked' | 'disliked' | null>>({});
     const [copied, setCopied] = useState<Record<number, boolean>>({});
+    const [sourcePanelData, setSourcePanelData] = useState<SearchSource[] | null>(null);
 
     const handleCopy = (idx: number, content: string) => {
         navigator.clipboard.writeText(content).then(() => {
@@ -1790,7 +1861,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
-        const onStreamDone = (data: { sessionId: string; content?: string }) => {
+        const onStreamDone = (data: { sessionId: string; content?: string; sources?: SearchSource[] }) => {
             saLog('← agent:chat:stream_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             const msgIdx = activeMsgIdxRef.current;
@@ -1809,8 +1880,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     ...updated[msgIdx],
                     // Only use server content if we have nothing accumulated (e.g. reconnect)
                     content: updated[msgIdx].content || data.content || '',
-                    isStreaming: false,
-                    timestamp: new Date().toLocaleTimeString()
+                    isStreaming: false, 
+                    timestamp: new Date().toLocaleTimeString(),
+                    sources: data.sources,
                 };
                 return updated;
             });
@@ -1928,16 +2000,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; delete n[-1]; return n; });
+            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
             setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
             if (data.sessionId !== sessionId) return;
-            const idx = data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
-            if (idx < 0) return;
-            setHtmlGenerating(prev => ({ ...prev, [idx]: true }));
+            setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
         };
 
         socket.on('agent:chat:routing', onRouting);
@@ -2203,13 +2273,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
                 if (history && history.length > 0) {
                     setMessages(
-                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => ({
-                            role: m.role as 'user' | 'assistant',
-                            content: m.content || '',
-                            timestamp: new Date(m.createdAt).toLocaleTimeString(),
-                            isStreaming: false,
-                            metadata: m.metadata ?? null,
-                        })),
+                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
+                            let sources: SearchSource[] | undefined;
+                            if (m.metadata) {
+                                try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
+                            }
+                            return {
+                                role: m.role as 'user' | 'assistant',
+                                content: m.content || '',
+                                timestamp: new Date(m.createdAt).toLocaleTimeString(),
+                                isStreaming: false,
+                                metadata: m.metadata ?? null,
+                                sources,
+                            };
+                        }),
                     );
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
@@ -2220,7 +2297,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     restoredThinking[idx] = {
                                         ...meta.thinkingFlow,
@@ -2471,7 +2548,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     />
                                                 )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && (!msg.isStreaming || htmlReports[i]) && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                {msg.role === 'assistant' && !msg.isStreaming && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className="flex items-center gap-1.5">
                                                         {(htmlReports[i] || htmlGenerating[i]) && (
@@ -2625,12 +2702,41 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 </div>
                                                             ) : (
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                                {renderMarkdownContent(body, i)}
+                                                                <SourcesProvider sources={msg.sources || []}>
+                                                                    {renderMarkdownContent(injectSourceUrls(body, msg.sources), i)}
+                                                                </SourcesProvider>
                                                             </div>
                                                             )}
                                                         </>
                                                     );
                                                 })() : null}
+                                                {/* Sources bar — click to open side panel */}
+                                                {!msg.isStreaming && msg.sources && msg.sources.length > 0 && (
+                                                    <div className="mt-4 pt-3 border-t border-gray-100">
+                                                        <button
+                                                            onClick={() => setSourcePanelData(msg.sources!)}
+                                                            className="flex items-center gap-2 group cursor-pointer hover:bg-gray-50 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
+                                                        >
+                                                            <div className="flex items-center gap-1.5">
+                                                                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                                                <span className="text-[12px] font-medium text-gray-500 group-hover:text-gray-700">{msg.sources.length} sources</span>
+                                                            </div>
+                                                            <div className="flex -space-x-1">
+                                                                {msg.sources.slice(0, 5).map((s, si) => (
+                                                                    <div key={si} className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center" title={s.title}>
+                                                                        <span className="text-[8px] text-gray-500 font-bold uppercase">{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
+                                                                    </div>
+                                                                ))}
+                                                                {msg.sources.length > 5 && (
+                                                                    <div className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center">
+                                                                        <span className="text-[8px] text-gray-400 font-medium">+{msg.sources.length - 5}</span>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                                                        </button>
+                                                    </div>
+                                                )}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
@@ -2903,7 +3009,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
                 {/* Roundtable Consensus Panel */}
                 {showGraphPanel && !showThinkingPanel && (
-                    <div className="w-[400px] shrink-0 border-l border-gray-100 overflow-hidden relative">
+                    <div className="w-[520px] shrink-0 border-l border-gray-100 overflow-hidden relative">
                         <button
                             onClick={() => setShowGraphPanel(false)}
                             className="absolute top-2 right-2 z-20 w-7 h-7 rounded-lg bg-white/80 backdrop-blur border border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all shadow-sm"
@@ -2911,6 +3017,61 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
                         <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && chatMode === 'roundtable'} />
+                    </div>
+                )}
+
+                {/* Sources Side Panel */}
+                {sourcePanelData && (
+                    <div className="w-[380px] shrink-0 border-l border-gray-100 flex flex-col bg-white overflow-hidden">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
+                            <div className="flex items-center gap-2">
+                                <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                <span className="text-[13px] font-semibold text-gray-800">{sourcePanelData.length} Sources</span>
+                            </div>
+                            <button
+                                onClick={() => setSourcePanelData(null)}
+                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
+                            >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        {/* Source list */}
+                        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
+                            {sourcePanelData.map((s, si) => (
+                                <a
+                                    key={si}
+                                    href={s.url || '#'}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="block rounded-lg px-3 py-2.5 hover:bg-gray-50 border border-transparent hover:border-gray-100 transition-all group/src"
+                                >
+                                    <div className="flex items-start gap-2.5">
+                                        <div className="w-7 h-7 rounded-lg bg-gray-100 border border-gray-200/60 flex items-center justify-center shrink-0 mt-0.5">
+                                            {s.url ? (
+                                                <img
+                                                    src={`https://www.google.com/s2/favicons?domain=${s.domain}&sz=32`}
+                                                    alt=""
+                                                    className="w-4 h-4 rounded-sm"
+                                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling && ((e.target as HTMLImageElement).nextElementSibling as HTMLElement).style.removeProperty('display'); }}
+                                                />
+                                            ) : null}
+                                            <span className={`text-[9px] text-gray-500 font-bold uppercase ${s.url ? 'hidden' : ''}`}>{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <p className="text-[12.5px] font-medium text-gray-800 group-hover/src:text-blue-600 line-clamp-2 leading-snug">{s.title}</p>
+                                            {s.snippet && (
+                                                <p className="text-[11px] text-gray-500 mt-1 line-clamp-2 leading-relaxed">{s.snippet}</p>
+                                            )}
+                                            <div className="flex items-center gap-1.5 mt-1.5">
+                                                <span className="text-[10px] text-gray-400">{s.domain}</span>
+                                                <svg className="w-2.5 h-2.5 text-gray-300 group-hover/src:text-blue-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </a>
+                            ))}
+                        </div>
                     </div>
                 )}
             </div>

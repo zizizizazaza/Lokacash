@@ -18,6 +18,7 @@ import {
   mergeSignalSources,
   sourcesFromSignalRadarLogLine,
   sourcesFromSignalRadarSummary,
+  sourcesFromLast30DaysCompact,
   type SignalSearchSource,
 } from '../services/signalRadarThinking.js';
 
@@ -663,8 +664,16 @@ Text: "${query}"`;
             }
           ).then(res => {
             const PANEL_MAX = 20;
-            let socialSources = mergeSignalSources([], res.extractedSources ?? [], PANEL_MAX);
-            socialSources = mergeSignalSources(socialSources, sourcesFromSignalRadarSummary(res.summary, PANEL_MAX), PANEL_MAX);
+            // Extract structured sources from raw Python stdout (has bare URLs per item)
+            console.log(`[sources] rawStdout length: ${res.rawStdout?.length || 0}, has URLs: ${(res.rawStdout?.match(/https?:\/\//g) || []).length}`);
+            let socialSources = sourcesFromLast30DaysCompact(res.rawStdout, PANEL_MAX);
+            console.log(`[sources] compact extraction: ${socialSources.length} sources, snippets: ${socialSources.filter(s => s.snippet).length}`);
+            // Fallback: try URLs from synthesized summary
+            if (socialSources.length === 0) {
+              socialSources = sourcesFromSignalRadarSummary(res.summary, PANEL_MAX);
+              console.log(`[sources] summary fallback: ${socialSources.length} sources`);
+            }
+            // Fallback: log-based platform hints
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
 
             finalSocialSources = socialSources;
@@ -676,7 +685,7 @@ Text: "${query}"`;
                 { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
               ]
             });
-            return { type: 'SEARCH', data: res.summary };
+            return { type: 'SEARCH', data: res.summary, sources: socialSources };
           }).catch(e => {
             emitter.emitModule('search', 'completed', {});
             return { type: 'SEARCH', data: 'Error: ' + e.message };
@@ -910,6 +919,15 @@ Text: "${query}"`;
         }
       });
 
+      // Append structured source URLs so the report LLM can produce inline citations
+      if (finalSocialSources.length > 0) {
+        contextString += "【VERIFIED SOURCE URLs — USE THESE FOR INLINE CITATIONS】\n";
+        finalSocialSources.forEach((s, i) => {
+          contextString += `[${i + 1}] ${s.title} — ${s.url || s.domain}\n`;
+        });
+        contextString += "\n";
+      }
+
       const isDeepResearch = data.mode === 'roundtable';
 
       const buildDeepResearchPrompt = (inputContext: string) => getGlobalTimeContext() + `You are a senior research director at a top-tier investment research firm.
@@ -1080,7 +1098,7 @@ Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
 2. Section titles MUST be specific and analytical — not generic. Create proper research section titles (e.g. "收入放缓与利润弹性的博弈", "估值锚定：DCF vs 可比公司的分歧").
 3. Synthesize evidence across ALL data sources. Highlight where different data dimensions agree (conviction) and where they conflict (uncertainty).
 4. Never fabricate data. If exact numbers aren't available, state the directional finding and name the missing metric.
-5. INLINE CITATIONS: Retain all URLs from raw data as clickable Markdown links.
+5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end.
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text, metrics. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 3000-6000 words. This is a deep research product — completeness and depth are expected. But every sentence must add analytical value. No filler.
 8. End with "Key Monitoring Dashboard" — this MUST be the absolute last section. Nothing after it.
@@ -1214,7 +1232,7 @@ Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Fundamental Analysis", "Valuation", "Financial Health", "Signal vs Noise", "Positioning", "Stress Test" etc. — these are internal labels, not output headings. Create engaging, specific headings (e.g. "广告引擎点火，但游戏拖了后腿", "23倍PE：贵还是便宜？", "多空交锋：谁在买？谁在跑？").
 3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
 4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
-5. INLINE CITATIONS: Retain URLs from search reports as clickable Markdown links, e.g. ([Bloomberg](https://...)).
+5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end.
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 1500-3500 words. Depth over brevity, but no padding. Every sentence must earn its place. Cover ALL analysis dimensions — fundamental, valuation, financial, technical, and actionable trade setup.
 8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
@@ -1292,7 +1310,7 @@ Questions to Watch (LAST SECTION)
 2. Section titles MUST be specific and engaging, not generic labels.
 3. Synthesize across sources. Surface contradictions and emergent patterns.
 4. Never fabricate data. Use qualitative discussion when numbers are unavailable.
-5. INLINE CITATIONS: Retain URLs as clickable Markdown links.
+5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...)). Place inline after the relevant sentence or paragraph.
 6. LANGUAGE: Match user's language entirely. Chinese query = all Chinese. English = all English.
 7. Length: 1500-3000 words. Depth over breadth.
 8. Tables for comparisons, bullet lists for key points, narrative for analysis.
@@ -2063,12 +2081,15 @@ Research context:\n${synFullContent}${langInstruction}`;
               },
               consensusResult: savedConsensusResult ?? undefined,
               quoteCard: savedQuoteCard ?? undefined,
+              sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
             })
           }
         });
 
         emitter.emitModule('done', 'completed', { duration: dur });
-        emitter.emitStreamDone(finalDbContent);
+        emitter.emitStreamDone(finalDbContent, {
+          sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
+        });
 
         // --- HTML report: await parallel result or generate sequentially for roundtable ---
         if (parallelHtmlPromise) {

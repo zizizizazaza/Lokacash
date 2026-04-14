@@ -1,4 +1,20 @@
-import React from 'react';
+import React, { createContext, useContext } from 'react';
+
+// ─── Source Context for inline citation tooltips ────────────────
+export interface CitationSource {
+  favicon: string;
+  title: string;
+  domain: string;
+  url?: string;
+  snippet?: string;
+}
+
+const SourcesContext = createContext<CitationSource[]>([]);
+
+/** Wrap markdown rendering to provide sources for citation tooltips */
+export function SourcesProvider({ sources, children }: { sources: CitationSource[]; children: React.ReactNode }) {
+  return <SourcesContext.Provider value={sources}>{children}</SourcesContext.Provider>;
+}
 
 // ─── Quote Snapshot Card ────────────────────────────────────────
 
@@ -188,8 +204,11 @@ const LINK_CHIP =
   'text-indigo-700 bg-indigo-50/90 hover:bg-indigo-100 border border-indigo-200/70 shadow-sm ' +
   'transition-colors cursor-pointer no-underline hover:no-underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50';
 
-const LINK_MD =
-  'text-indigo-700 hover:text-indigo-900 underline underline-offset-2 decoration-indigo-300/80 font-medium';
+/** Citation tag style — small inline badge with source name */
+const CITE_TAG =
+  'group/cite relative inline-flex items-center align-middle gap-1 mx-0.5 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight ' +
+  'text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200/60 ' +
+  'transition-all cursor-pointer no-underline hover:no-underline';
 
 function safeHttpUrl(href: string): string | null {
   const t = href.trim();
@@ -210,6 +229,15 @@ function urlChipLabel(href: string): string {
   }
 }
 
+/** Extract domain for tooltip */
+function urlDomain(href: string): string {
+  try {
+    return new URL(href).hostname.replace(/^www\./i, '');
+  } catch {
+    return '';
+  }
+}
+
 function ExternalGlyph() {
   return (
     <svg className="w-3 h-3 shrink-0 opacity-75" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden>
@@ -227,19 +255,62 @@ function InlineCitation({
   label: string;
   variant: 'chip' | 'markdown';
 }) {
+  const sources = useContext(SourcesContext);
   const safe = safeHttpUrl(href);
   if (!safe) return <span className="text-gray-600">{label}</span>;
   const show = label.trim() && label !== href ? label : urlChipLabel(safe);
+  const domain = urlDomain(safe);
+
+  // Look up source from context for rich tooltip
+  const matchedSource = sources.find(s => {
+    if (s.url && s.url === safe) return true;
+    if (s.url && domain && s.domain && domain.includes(s.domain)) return true;
+    if (s.domain && domain && s.domain === domain) return true;
+    const labelLower = label.toLowerCase().trim();
+    if (s.title && s.title.toLowerCase() === labelLower) return true;
+    if (s.domain && s.domain.toLowerCase().replace(/\.\w+$/, '') === labelLower.replace(/\s+/g, '')) return true;
+    return false;
+  });
+
+  // Citation tag style: small rounded badge with hover tooltip
   if (variant === 'markdown') {
+    const snippetText = matchedSource?.snippet;
+    const titleText = matchedSource?.title || show;
     return (
       <a
         href={safe}
         target="_blank"
         rel="noopener noreferrer"
-        title={safe}
-        className={LINK_MD}
+        className={CITE_TAG}
       >
-        {show}
+        <svg className="w-2.5 h-2.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+        </svg>
+        <span className="truncate max-w-[8rem]">{show}</span>
+        {/* Rich hover tooltip */}
+        <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
+          {/* Row 1: favicon + domain */}
+          <span className="flex items-center gap-1.5">
+            <img
+              src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
+              alt=""
+              className="w-3.5 h-3.5 rounded-sm shrink-0"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <span className="text-[10px] text-gray-400 truncate">{domain}</span>
+          </span>
+          {/* Row 2: title */}
+          <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
+            {titleText}
+          </span>
+          {/* Row 3: snippet */}
+          {snippetText && (
+            <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
+              {snippetText}
+            </span>
+          )}
+          <span className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-gray-900" />
+        </span>
       </a>
     );
   }

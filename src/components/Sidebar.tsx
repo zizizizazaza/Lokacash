@@ -369,7 +369,7 @@ export const Sidebar: React.FC<{
   /* ── Collapsed: 56px icon rail with hover tooltips ── */
   if (!expanded) return (
     <>
-      <nav className={`hidden md:flex w-14 border-r flex-col items-center pt-3 pb-4 shrink-0 ${bg}`}>
+      <nav className={`hidden md:flex w-14 flex-col items-center pt-3 pb-4 shrink-0 ${bg}`}>
         <button onClick={onToggle} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
           <I.Panel /><span className="rail-tip">Expand</span>
         </button>
@@ -401,7 +401,7 @@ export const Sidebar: React.FC<{
   /* ── Expanded: 256px full sidebar ── */
   return (
     <>
-      <aside className={`hidden md:flex w-64 border-r flex-col shrink-0 ${bg}`}>
+      <aside className={`hidden md:flex w-64 flex-col shrink-0 ${bg}`}>
         {/* Header */}
         <div className="flex items-center justify-between pl-5 pr-2 pt-5 pb-3">
           <span className={`text-[15px] font-bold tracking-tight ${textPrimary} cursor-default select-none`}>Loka</span>
