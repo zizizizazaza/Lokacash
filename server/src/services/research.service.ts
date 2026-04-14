@@ -145,6 +145,7 @@ export const researchService = {
       topic: string;
       timestamp: string;
       extractedSources: SignalSearchSource[];
+      rawStdout: string;
     }>((resolve, reject) => {
       const runStartedAt = Date.now();
       const spawnStartedAt = Date.now();
@@ -434,6 +435,7 @@ ${finalSummary}`,
           topic,
           timestamp: new Date().toISOString(),
           extractedSources,
+          rawStdout: stdoutData,
         });
       });
       
