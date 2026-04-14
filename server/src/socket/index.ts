@@ -6,7 +6,7 @@ import prisma from '../db.js';
 import { researchService } from '../services/research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
-import { LokaAIService } from '../services/ai.service.js';
+import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
 import {
   formatConsensusAgentLabel,
   runConsensusEngine,
@@ -32,6 +32,8 @@ const activeStockAnalysisSessions = new Set<string>();
 const activeChatSessions = new Map<string, string>();
 /** Abort controllers keyed by sessionId — used to cancel a previous agent:chat run when a new one arrives */
 const chatAbortControllers = new Map<string, AbortController>();
+/** Dedup map keyed by sessionId::content — prevents duplicate messages from queue flush + direct emit race */
+const chatDedupMap = new Map<string, number>();
 
 export function setupSocket(server: HttpServer) {
   io = new Server(server, {
@@ -211,7 +213,7 @@ Text: "${query}"`;
               processedTickers = extracted.split(',').map(s => s.trim());
               emitToUser(userId, 'agent:hedgefund:progress', { sessionId, log: `[NameResolver] AI Extracted: ${processedTickers.join(', ')}` });
             }
-          } catch(e) {
+          } catch (e) {
             console.error('AI Extraction failed', e);
           }
         }
@@ -412,6 +414,22 @@ Text: "${query}"`;
 
       const sessionId = data.sessionId || crypto.randomUUID();
 
+      // ── Dedup guard: skip identical content for the same session within 3s ──
+      const dedupKey = `${sessionId}::${data.content}`;
+      const now = Date.now();
+      const lastSeen = chatDedupMap.get(dedupKey);
+      if (lastSeen && now - lastSeen < 3000) {
+        console.log(`[agent:chat] Dedup: skipping duplicate message for session ${sessionId}`);
+        return;
+      }
+      chatDedupMap.set(dedupKey, now);
+      // Prune old entries periodically
+      if (chatDedupMap.size > 100) {
+        for (const [k, v] of chatDedupMap) {
+          if (now - v > 10000) chatDedupMap.delete(k);
+        }
+      }
+
       // ── Cancel any previous in-flight run for the same session ──
       const prevAbort = chatAbortControllers.get(sessionId);
       if (prevAbort) {
@@ -434,8 +452,33 @@ Text: "${query}"`;
           await prisma.chatMessage.create({
             data: { userId, sessionId, role: 'user', content: data.content, agentId: 'superagent' }
           });
-        } catch (dbErr) {}
+        } catch (dbErr) { }
       }
+
+      // ── Query session history for multi-turn context ──
+      const MAX_HISTORY_FOR_ROUTING = 6;
+      const MAX_HISTORY_FOR_SYNTHESIS = 8;
+      const ASSISTANT_CONTENT_CAP = 300;
+
+      const sessionHistory = await prisma.chatMessage.findMany({
+        where: { userId, sessionId },
+        orderBy: { createdAt: 'asc' },
+        take: MAX_HISTORY_FOR_SYNTHESIS,
+        select: { role: true, content: true },
+      });
+
+      const formatHistory = (messages: { role: string; content: string }[], limit: number): string => {
+        return messages
+          .slice(-limit)
+          .map(m => {
+            const label = m.role === 'user' ? 'User' : 'Assistant';
+            const text = m.role === 'assistant' && m.content.length > ASSISTANT_CONTENT_CAP
+              ? m.content.slice(0, ASSISTANT_CONTENT_CAP) + '...(truncated)'
+              : m.content;
+            return `[${label}]: ${text}`;
+          })
+          .join('\n');
+      };
 
       activeChatSessions.set(sessionId, 'running');
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
@@ -443,14 +486,18 @@ Text: "${query}"`;
 
       let plan: any;
       try {
-        plan = await aiService.evaluateRouting(data.content);
+        const routingHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_ROUTING);
+        const routingQuery = routingHistory
+          ? `【Conversation Context】\n${routingHistory}\n\n【Latest User Message】\n${data.content}`
+          : data.content;
+        plan = await aiService.evaluateRouting(routingQuery);
       } catch (routingErr: any) {
         console.error('evaluateRouting failed:', routingErr.message);
         plan = { isSimpleChat: true, queryType: 'general', capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
       }
-      
+
       if (data.mode === 'roundtable') {
-        plan.isSimpleChat = false; 
+        plan.isSimpleChat = false;
       }
 
       // Guru Council mode: always trigger simulation
@@ -512,7 +559,7 @@ Text: "${query}"`;
           const mappedContext = context.map(m => ({ role: m.role, content: m.content, agentId: m.agentId }));
           const stream = await aiService.chatStream(mappedContext, 'superagent', undefined, 2560);
           emitter.emitModule('search', 'completed');
-        
+
           const reader = stream.getReader();
           const decoder = new TextDecoder();
           let fullContent = '';
@@ -523,7 +570,7 @@ Text: "${query}"`;
             if (done || isAborted()) break;
             streamBuffer += decoder.decode(value, { stream: true });
             const lines = streamBuffer.split('\n');
-            streamBuffer = lines.pop() || ''; 
+            streamBuffer = lines.pop() || '';
             for (const line of lines) {
               const trimmed = line.trim();
               if (trimmed.startsWith('data: ')) {
@@ -536,11 +583,11 @@ Text: "${query}"`;
                     fullContent += delta;
                     streamToChat(delta);
                   }
-                } catch (e) {}
+                } catch (e) { }
               }
             }
           }
-        
+
           const simpleFlow = {
             modules: [
               { type: 'search', status: 'completed', data: { variant: 'data_providers', providers: [] } },
@@ -560,7 +607,7 @@ Text: "${query}"`;
             await prisma.chatMessage.create({
               data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
             });
-          } catch (e) {}
+          } catch (e) { }
           emitter.emitModule('done', 'completed', { duration: simpleDur });
           emitter.emitStreamDone(fullContent);
         } catch (streamErr: any) {
@@ -584,12 +631,12 @@ Text: "${query}"`;
       let savedQuoteCard: any = null;
 
       if (plan.capabilities.search.needed) {
-        emitter.emitModule('search', 'active', { 
-          variant: 'social', 
+        emitter.emitModule('search', 'active', {
+          variant: 'social',
           sources: [],
           providers: [
-            {name: 'Yahoo Finance'}, {name: 'Bloomberg API'}, {name: 'Alpha Vantage'}, 
-            {name: 'Polygon.io'}, {name: 'CoinGecko'}, {name: 'TradingView'}
+            { name: 'Yahoo Finance' }, { name: 'Bloomberg API' }, { name: 'Alpha Vantage' },
+            { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
           ]
         });
         const signalResearchLogLines: string[] = [];
@@ -612,21 +659,21 @@ Text: "${query}"`;
                   });
                 }
               },
-              onSynthesisToken: () => {},
+              onSynthesisToken: () => { },
             }
           ).then(res => {
             const PANEL_MAX = 20;
             let socialSources = mergeSignalSources([], res.extractedSources ?? [], PANEL_MAX);
             socialSources = mergeSignalSources(socialSources, sourcesFromSignalRadarSummary(res.summary, PANEL_MAX), PANEL_MAX);
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
-            
+
             finalSocialSources = socialSources;
             emitter.emitModule('search', 'completed', {
               variant: 'social',
               sources: socialSources,
               providers: [
-                {name: 'Yahoo Finance'}, {name: 'Bloomberg API'}, {name: 'Alpha Vantage'}, 
-                {name: 'Polygon.io'}, {name: 'CoinGecko'}, {name: 'TradingView'}
+                { name: 'Yahoo Finance' }, { name: 'Bloomberg API' }, { name: 'Alpha Vantage' },
+                { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
               ]
             });
             return { type: 'SEARCH', data: res.summary };
@@ -640,9 +687,9 @@ Text: "${query}"`;
       if (plan.capabilities.analysis.needed) {
         let activeSections = [{ id: 'data_providers', label: 'Fetching market data', status: 'pending', providers: [] }];
         let analysisStages = [
-          {id: 'fundamental', label: 'Fundamental analysis', status: 'pending', result: [] as any[]},
-          {id: 'technical', label: 'Technical analysis', status: 'pending', result: [] as any[]},
-          {id: 'sentiment', label: 'Sentiment analysis', status: 'pending'}
+          { id: 'fundamental', label: 'Fundamental analysis', status: 'pending', result: [] as any[] },
+          { id: 'technical', label: 'Technical analysis', status: 'pending', result: [] as any[] },
+          { id: 'sentiment', label: 'Sentiment analysis', status: 'pending' }
         ];
         emitter.emitModule('analysis', 'active', { stages: analysisStages });
 
@@ -785,7 +832,7 @@ Text: "${query}"`;
                       });
                       } // end !isNaN(numPrice)
                     }
-                  } catch(e){}
+                  } catch (e) { }
                 }
               },
               (report) => {
@@ -849,7 +896,14 @@ Text: "${query}"`;
         return;
       }
       console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
-      let contextString = "【User Original Request】\n" + data.content + "\n\n";
+      
+      const synthHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_SYNTHESIS);
+      let contextString = "";
+      if (synthHistory) {
+        contextString += "【CONVERSATION HISTORY — for continuity, do NOT repeat old findings】\n" + synthHistory + "\n\n";
+      }
+      contextString += "【User Original Request】\n" + data.content + "\n\n";
+      
       results.forEach(r => {
         if (r.status === 'fulfilled') {
           contextString += `【${r.value.type} REPORT】\n${r.value.data}\n\n`;
@@ -858,7 +912,7 @@ Text: "${query}"`;
 
       const isDeepResearch = data.mode === 'roundtable';
 
-      const buildDeepResearchPrompt = (inputContext: string) => `You are a senior research director at a top-tier investment research firm.
+      const buildDeepResearchPrompt = (inputContext: string) => getGlobalTimeContext() + `You are a senior research director at a top-tier investment research firm.
 
 Your task is to produce a professional-grade DEEP RESEARCH REPORT — the kind that institutional investors, fund managers, and sophisticated traders actually pay for and act on.
 
@@ -1051,7 +1105,7 @@ Before writing, build your internal thesis:
 Do NOT output this reasoning. Begin the report directly.
 `;
 
-      const traderMemoPrompt = `You are a top-tier macro + equity research analyst with strong opinions.
+      const traderMemoPrompt = getGlobalTimeContext() + `You are a top-tier macro + equity research analyst with strong opinions.
 
 Your job is NOT to summarize information.
 Your job is to form a clear, tradeable view and guide decision-making — grounded in rigorous fundamental, valuation, financial, and technical analysis.
@@ -1787,7 +1841,7 @@ The HTML must:
         const synDecoder = new TextDecoder();
         let synFullContent = '';
         let synBuffer = '';
-        
+
         while (true) {
           const { done, value } = await synReader.read();
           if (done || isAborted()) {
@@ -1796,13 +1850,13 @@ The HTML must:
                 const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
                 const delta = parsed.choices?.[0]?.delta?.content || '';
                 if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
-              } catch(e) {}
+              } catch (e) { }
             }
             break;
           }
           synBuffer += synDecoder.decode(value, { stream: true });
           const lines = synBuffer.split('\n');
-          synBuffer = lines.pop() || ''; 
+          synBuffer = lines.pop() || '';
           for (const line of lines) {
             const trimmed = line.trim();
             if (trimmed.startsWith('data: ')) {
@@ -1812,7 +1866,7 @@ The HTML must:
                 const parsed = JSON.parse(sseData);
                 const delta = parsed.choices?.[0]?.delta?.content || '';
                 if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
-              } catch (e) {}
+              } catch (e) { }
             }
           }
         }
@@ -1825,7 +1879,7 @@ The HTML must:
         }
 
         const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
-        
+
         const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
         if (plan.capabilities.search.needed) flowModules.push({ type: 'search', status: 'completed', data: { variant: 'social', sources: finalSocialSources } });
         if (plan.capabilities.analysis.needed) flowModules.push({ type: 'analysis', status: 'completed', data: { stages: finalAnalysisStages } });
@@ -1867,7 +1921,7 @@ Research context:\n${synFullContent}${langInstruction}`;
             savedConsensusResult = consensusResult;
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
-            
+
             // Collect individual expert perspectives with structured debate context
             let expertDebateContext = '';
             const agentResponses = consensusResult.consensus?.agentResponses || [];
@@ -1943,7 +1997,7 @@ Research context:\n${synFullContent}${langInstruction}`;
                     const parsed = JSON.parse(deepBuffer.trim().slice(6).trim());
                     const delta = parsed.choices?.[0]?.delta?.content || '';
                     if (delta) { deepFullContent += delta; }
-                  } catch(e) {}
+                  } catch (e) { }
                 }
                 break;
               }
@@ -1962,13 +2016,13 @@ Research context:\n${synFullContent}${langInstruction}`;
                     // Stream directly — initial draft was never shown to user
                     streamToChat(delta);
                   }
-                } catch (e) {}
+                } catch (e) { }
               }
             }
 
             // Use the deep research output as final content
             finalDbContent = deepFullContent;
-            
+
             if (consensusResult.consensus) {
               consensusResult.consensus.finalAnswer = finalDbContent;
             }
@@ -1995,11 +2049,11 @@ Research context:\n${synFullContent}${langInstruction}`;
         flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
 
         await prisma.chatMessage.create({
-          data: { 
-            userId, 
-            sessionId, 
-            role: 'assistant', 
-            content: finalDbContent, 
+          data: {
+            userId,
+            sessionId,
+            role: 'assistant',
+            content: finalDbContent,
             agentId: 'superagent',
             metadata: JSON.stringify({
               thinkingFlow: {
@@ -2012,7 +2066,7 @@ Research context:\n${synFullContent}${langInstruction}`;
             })
           }
         });
-        
+
         emitter.emitModule('done', 'completed', { duration: dur });
         emitter.emitStreamDone(finalDbContent);
 
@@ -2094,4 +2148,3 @@ export function joinSocketRoom(userId: string, room: string) {
 export function getOnlineUserIds(): string[] {
   return Array.from(onlineUsers);
 }
-

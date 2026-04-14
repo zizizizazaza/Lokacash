@@ -1,0 +1,76 @@
+services:
+  # ── Aegean API Server ─────────────────────────────────────────────
+  aegean:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: aegean-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - AEGEAN_HOST=0.0.0.0
+      - AEGEAN_PORT=8000
+      - AEGEAN_RELOAD=false
+      # Storage: use 'memory' for quick demo, 'postgresql' for persistent test env
+      - KNOWLEDGE_BACKEND=${KNOWLEDGE_BACKEND:-memory}
+      - EXPERIENCE_BACKEND=${EXPERIENCE_BACKEND:-memory}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - SETU_DB_URL=${SETU_DB_URL:-sqlite:////app/data/setu_tasks.db}
+    volumes:
+      - ./src:/app/src:ro
+      - aegean_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - aegean-net
+
+  # ── PostgreSQL (persistent experience base) ───────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: aegean-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: aegean
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegean_secret}
+      POSTGRES_DB: aegean
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegean"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aegean-net
+
+  # ── Optional: Milvus (production vector DB, uncomment when needed) ─
+  # milvus:
+  #   image: milvusdb/milvus:v2.3.3
+  #   container_name: aegean-milvus
+  #   ports:
+  #     - "19530:19530"
+  #   volumes:
+  #     - milvus_data:/var/lib/milvus
+  #   networks:
+  #     - aegean-net
+
+volumes:
+  aegean_data:
+  postgres_data:
+  # milvus_data:
+
+networks:
+  aegean-net:
+    driver: bridge

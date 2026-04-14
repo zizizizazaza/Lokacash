@@ -3,7 +3,7 @@ import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
-
+import { IFlytekStreamer } from '../services/iflytek';
 const SuperAgentHome: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -19,29 +19,65 @@ const SuperAgentHome: React.FC = () => {
   const homeFileRef = useRef<HTMLInputElement>(null);
   const [homeVoiceState, setHomeVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const homeVoiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevNewChatRef = useRef<number | null>(null);
+  const iflytekRef = useRef<IFlytekStreamer | null>(null);
 
-  const HOME_MOCK_TRANSCRIPTIONS = [
-    'Is NVIDIA still a strong buy after Q4 earnings?',
-    'Compare Bitcoin and Ethereum momentum over the past 30 days',
-    'Which AI infrastructure companies have the strongest moat?',
-    'Build me a diversified portfolio for a 3-year horizon',
-    'Show me the latest market sentiment analysis on Tesla',
-  ];
+  useEffect(() => {
+    return () => {
+      if (iflytekRef.current) {
+        iflytekRef.current.stop();
+      }
+    };
+  }, []);
 
   const stopHomeRecording = () => {
-    if (homeVoiceTimerRef.current) clearTimeout(homeVoiceTimerRef.current);
+    if (iflytekRef.current) {
+      iflytekRef.current.stop();
+      iflytekRef.current = null;
+    }
     setHomeVoiceState('transcribing');
-    homeVoiceTimerRef.current = setTimeout(() => {
-      const t = HOME_MOCK_TRANSCRIPTIONS[Math.floor(Math.random() * HOME_MOCK_TRANSCRIPTIONS.length)];
-      setInput(t);
-      setHomeVoiceState('idle');
-    }, 1800);
+    // Usually iFlytek returns isFinal on stop which resets to idle, 
+    // but just as a fallback timeout:
+    setTimeout(() => {
+      setHomeVoiceState(prev => prev === 'transcribing' ? 'idle' : prev);
+    }, 1000);
   };
 
-  const handleHomeVoiceClick = () => {
+  const handleHomeVoiceClick = async () => {
     if (homeVoiceState === 'idle') {
       setHomeVoiceState('recording');
-      homeVoiceTimerRef.current = setTimeout(stopHomeRecording, 8000);
+      
+      const streamer = new IFlytekStreamer();
+      iflytekRef.current = streamer;
+
+      streamer.onResult((res) => {
+        if (res.text) {
+          setInput(res.text);
+        }
+        if (res.isFinal) {
+          setHomeVoiceState('idle');
+          iflytekRef.current = null;
+        }
+      });
+
+      streamer.onError((err) => {
+        console.error("iFlytek error:", err);
+        setHomeVoiceState('idle');
+        iflytekRef.current = null;
+      });
+
+      streamer.onStop(() => {
+        setHomeVoiceState('idle');
+        iflytekRef.current = null;
+      });
+
+      try {
+        await streamer.start();
+      } catch (err) {
+        console.error("Failed to start iFlytek", err);
+        setHomeVoiceState('idle');
+        iflytekRef.current = null;
+      }
     } else if (homeVoiceState === 'recording') {
       stopHomeRecording();
     }
@@ -83,15 +119,24 @@ const SuperAgentHome: React.FC = () => {
     'Build me a diversified portfolio for a 3-year horizon',
   ];
 
-  // Reset to home when sidebar "New Chat" is clicked
+  // ── Synchronous "New Chat" detection ─────────────────────
+  // Detect new-chat navigation DURING RENDER (before SuperAgentChat can mount).
+  // This prevents the one-render gap where the stale chatMessage would cause
+  // a phantom auto-send.
+  const newChatTs = (location.state as any)?.newChat as number | undefined;
+  const isNewChatReset = !!(newChatTs && newChatTs !== prevNewChatRef.current);
+
+  // Deferred state cleanup — runs after render to actually clear state & update ref
   useEffect(() => {
-    if ((location.state as any)?.newChat) {
+    if (newChatTs && newChatTs !== prevNewChatRef.current) {
+      prevNewChatRef.current = newChatTs;
       setChatMessage(null);
       setInput('');
       setSelectedAgent(null);
       setSelectedScenario(null);
+      setPhIdx(Math.floor(Math.random() * QUICK_ACTIONS.length));
     }
-  }, [(location.state as any)?.newChat]); // eslint-disable-line
+  }, [newChatTs]); // eslint-disable-line
 
   useEffect(() => {
     if (input) return;
@@ -116,11 +161,16 @@ const SuperAgentHome: React.FC = () => {
     return () => document.removeEventListener('mousedown', h);
   }, [modeOpen]);
 
-  if (chatMessage || sessionParam) {
+  // Derive effective chat message: during the render where New Chat was just
+  // clicked, treat chatMessage as null so SuperAgentChat doesn't mount with
+  // the stale value (the useEffect above will clear it for subsequent renders).
+  const effectiveChatMessage = isNewChatReset ? null : chatMessage;
+
+  if (effectiveChatMessage || sessionParam) {
     return (
       <SuperAgentChat
-        key={sessionParam || chatMessage || 'new'}
-        initialMessage={chatMessage || ''}
+        key={sessionParam || effectiveChatMessage || 'new'}
+        initialMessage={effectiveChatMessage || ''}
         initialSessionId={sessionParam || undefined}
         initialChatMode={sessionParam ? undefined : mode}
         selectedAgentId={selectedAgent || undefined}

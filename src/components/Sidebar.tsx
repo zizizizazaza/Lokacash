@@ -77,11 +77,11 @@ const UserMenu: React.FC<{
           if (!item) return <div key={i} className={`my-1 h-px ${dividerColor}`} />;
           const Ic = item.icon;
           return (
-            <button key={i} onClick={() => { 
-                item.action(); 
-                if (!item.label.includes('Mode')) onClose(); 
-                if (onItemClick) onItemClick();
-              }}
+            <button key={i} onClick={() => {
+              item.action();
+              if (!item.label.includes('Mode')) onClose();
+              if (onItemClick) onItemClick();
+            }}
               className={`w-full flex items-center gap-3 px-3.5 py-2 text-[13px] transition-colors ${item.danger ? dangerColor : itemColor
                 }`}>
               <Ic />{item.label}
@@ -194,7 +194,7 @@ export const Sidebar: React.FC<{
       fetchConversations();
     };
     window.addEventListener('loka-profile-updated', handleAuthReady);
-    
+
     return () => {
       window.removeEventListener('loka-profile-updated', handleAuthReady);
     };
@@ -267,7 +267,7 @@ export const Sidebar: React.FC<{
       {/* Drawer panel */}
       <div className="relative z-[2] w-[280px] max-w-[80vw] h-full bg-white flex flex-col shadow-2xl"
         style={{ animation: 'drawerSlideIn 0.25s cubic-bezier(0.16,1,0.3,1)' }}>
-        
+
         {/* Drawer Header */}
         <div className="flex items-center justify-between px-5 pt-5 pb-3" style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 20px)' }}>
           <span className="text-[15px] font-bold tracking-tight text-gray-900 select-none">Loka</span>
@@ -280,6 +280,8 @@ export const Sidebar: React.FC<{
         <div className="px-3 pb-1">
           <SideLink icon={I.Plus} label="New chat" onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} isDark={false} />
         </div>
+
+        <div className="mx-4 my-2 h-px bg-gray-100" />
 
         {/* Nav items */}
         <div className="px-3 space-y-px">
@@ -367,32 +369,32 @@ export const Sidebar: React.FC<{
   /* ── Collapsed: 56px icon rail with hover tooltips ── */
   if (!expanded) return (
     <>
-    <nav className={`hidden md:flex w-14 border-r flex-col items-center pt-3 pb-4 shrink-0 ${bg}`}>
-      <button onClick={onToggle} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
-        <I.Panel /><span className="rail-tip">Expand</span>
-      </button>
-      <button onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
-        <I.Plus /><span className="rail-tip">New chat</span>
-      </button>
-      <button className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-3`}>
-        <I.Search /><span className="rail-tip">Search</span>
-      </button>
-      <div className="flex flex-col gap-0.5 flex-1 w-full px-2">
-        {navItems.map(({ key, icon: Icon, label, anim }) => (
-          <button key={key} onClick={() => go(key)}
-            className={`rail-btn ${anim} relative w-full h-9 rounded-lg flex items-center justify-center transition-all ${page === key ? activeBg : `${textSecondary} ${hoverBg}`
-              }`}>
-            <div className="nav-icon-wrap"><Icon /></div>
-            <span className="rail-tip">{label}</span>
-          </button>
-        ))}
-      </div>
-      <div className="relative">
-        <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`w-8 h-8 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:ring-2 hover:ring-gray-300 transition-all overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
-        <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} position="right" isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
-      </div>
-    </nav>
-    {mobileOverlay}
+      <nav className={`hidden md:flex w-14 border-r flex-col items-center pt-3 pb-4 shrink-0 ${bg}`}>
+        <button onClick={onToggle} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
+          <I.Panel /><span className="rail-tip">Expand</span>
+        </button>
+        <button onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
+          <I.Plus /><span className="rail-tip">New chat</span>
+        </button>
+        <button className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-3`}>
+          <I.Search /><span className="rail-tip">Search</span>
+        </button>
+        <div className="flex flex-col gap-0.5 flex-1 w-full px-2">
+          {navItems.map(({ key, icon: Icon, label, anim }) => (
+            <button key={key} onClick={() => go(key)}
+              className={`rail-btn ${anim} relative w-full h-9 rounded-lg flex items-center justify-center transition-all ${page === key ? activeBg : `${textSecondary} ${hoverBg}`
+                }`}>
+              <div className="nav-icon-wrap"><Icon /></div>
+              <span className="rail-tip">{label}</span>
+            </button>
+          ))}
+        </div>
+        <div className="relative">
+          <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`w-8 h-8 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:ring-2 hover:ring-gray-300 transition-all overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+          <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} position="right" isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
+        </div>
+      </nav>
+      {mobileOverlay}
     </>
   );
 
@@ -401,127 +403,129 @@ export const Sidebar: React.FC<{
     <>
       <aside className={`hidden md:flex w-64 border-r flex-col shrink-0 ${bg}`}>
         {/* Header */}
-      <div className="flex items-center justify-between pl-5 pr-2 pt-5 pb-3">
-        <span className={`text-[15px] font-bold tracking-tight ${textPrimary} cursor-default select-none`}>Loka</span>
-        <div className="flex items-center gap-0.5">
-          <button className={`w-7 h-7 rounded-md flex items-center justify-center ${textMuted} ${hoverBg} transition-all`} title="Search"><I.Search /></button>
-          <button onClick={onToggle} className={`w-7 h-7 rounded-md flex items-center justify-center ${textMuted} ${hoverBg} transition-all`} title="Collapse sidebar"><I.Panel /></button>
-        </div>
-      </div>
-
-      {/* New chat */}
-      <div className="px-3 pb-1">
-        <SideLink icon={I.Plus} label="New chat" onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} isDark={isDark} />
-      </div>
-
-      {/* Nav */}
-      <div className="px-3 space-y-px">
-        {navItems.map(({ key, icon, label, anim }) => (
-          <SideLink key={key} icon={icon} label={label} active={page === key} anim={anim}
-            onClick={() => go(key)} isDark={isDark} />
-        ))}
-      </div>
-
-      <div className={`mx-4 my-3 h-px ${divider}`} />
-
-      {/* Recents */}
-      <div className="px-3 flex-1 overflow-y-auto min-h-0">
-        {isLoggedIn && (
-          <>
-            <p className={`px-2 pb-2 text-[11px] font-medium ${textMuted} select-none`}>Recents</p>
-            {sortedConversations.length > 0 ? (
-              sortedConversations.map((c) => (
-                <div key={c.id} className="relative group/recent">
-                  {renamingId === c.id ? (
-                    <div className="px-2 py-1">
-                      <input
-                        ref={renameInputRef}
-                        value={renameValue}
-                        onChange={e => setRenameValue(e.target.value)}
-                        onBlur={confirmRename}
-                        onKeyDown={e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') setRenamingId(null); }}
-                        className={`w-full text-[13px] ${isDark ? 'text-gray-200 bg-white/10 border-white/20 focus:border-blue-400' : 'text-gray-700 bg-gray-50 border-gray-200 focus:border-blue-400'} border rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-blue-100`}
-                      />
-                    </div>
-                  ) : (
-                    <>
-                      <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (window.innerWidth < 768) onToggle(); }} title={c.title} className={`w-full text-left flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[13px] ${textSecondary} hover:${textPrimary} ${hoverBg} transition-all`}>
-                        {c.pinned && <svg className={`w-3 h-3 ${textMuted} shrink-0`} fill="currentColor" viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>}
-                        <span className="truncate flex-1">{c.title}</span>
-                        {activeSessions.has(c.id) && (
-                          <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                        )}
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setMoreMenuId(moreMenuId === c.id ? null : c.id); }}
-                        className={`absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/recent:opacity-100 ${hoverBg} ${textMuted} hover:text-gray-600 transition-all ${isDark ? 'bg-[#1a1a1a]' : 'bg-white'}`}
-                      >
-                        <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" /></svg>
-                      </button>
-                      {moreMenuId === c.id && (
-                        <div ref={moreMenuRef} className={`absolute right-0 top-full mt-1 z-50 w-36 ${isDark ? 'bg-[#1e1e1e] border-white/10' : 'bg-white border-gray-200'} border rounded-lg shadow-lg py-1`} style={{ animation: 'menu-pop 0.12s ease-out' }}>
-                          <button onClick={() => { togglePin(c.id); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-gray-300 hover:bg-white/8' : 'text-gray-600 hover:bg-gray-50'} transition-colors`}>
-                            <svg className="w-3.5 h-3.5" fill={c.pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
-                            {c.pinned ? 'Unpin' : 'Pin'}
-                          </button>
-                          <button onClick={() => { setMoreMenuId(null); startRename(c); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-gray-300 hover:bg-white/8' : 'text-gray-600 hover:bg-gray-50'} transition-colors`}>
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                            Rename
-                          </button>
-                          <button onClick={() => { setMoreMenuId(null); setDeleteConfirm({ id: c.id, title: c.title }); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'} transition-colors`}>
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                            Delete
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              ))
-            ) : (
-              <p className={`px-2 text-[12px] ${textMuted}`}>No recent chats</p>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* User */}
-      <div className="px-3 py-3 relative">
-        <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`flex items-center gap-2.5 px-2 py-2 rounded-lg ${hoverBg} transition-all cursor-pointer group/user`}>
-          <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
-          <span className={`flex-1 text-[13px] font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'} truncate`}>{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
-          <div className={`opacity-0 group-hover/user:opacity-100 transition-opacity ${textMuted}`}><I.Dots /></div>
-        </div>
-        <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
-      </div>
-
-      {/* Custom Delete Confirmation Modal */}
-      {deleteConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 pt-10 pb-20">
-          <div className={`${isDark ? 'bg-[#1e1e1e] border-white/10' : 'bg-white border-gray-200'} border shadow-2xl rounded-2xl w-full max-w-sm overflow-hidden`} style={{ animation: 'menu-pop 0.15s ease-out' }}>
-            <div className={`px-5 pt-5 pb-4 border-b ${isDark ? 'border-white/10' : 'border-gray-100'}`}>
-              <h3 className={`text-[16px] font-bold ${isDark ? 'text-white' : 'text-gray-900'} mb-1.5`}>Delete Conversation</h3>
-              <p className={`text-[13px] leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                Are you sure you want to delete <strong className={isDark ? 'text-gray-200' : 'text-gray-700'}>"{deleteConfirm.title}"</strong>? This action cannot be undone.
-              </p>
-            </div>
-            <div className={`px-5 py-3.5 ${isDark ? 'bg-black/20' : 'bg-gray-50'} flex items-center justify-end gap-2.5`}>
-              <button 
-                onClick={() => setDeleteConfirm(null)}
-                className={`px-4 py-2 text-[13px] font-medium rounded-lg transition-colors ${isDark ? 'text-gray-300 hover:bg-white/10' : 'text-gray-700 hover:bg-gray-200'}`}
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={confirmDelete}
-                className="px-4 py-2 text-[13px] font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors shadow-sm"
-              >
-                Delete
-              </button>
-            </div>
+        <div className="flex items-center justify-between pl-5 pr-2 pt-5 pb-3">
+          <span className={`text-[15px] font-bold tracking-tight ${textPrimary} cursor-default select-none`}>Loka</span>
+          <div className="flex items-center gap-0.5">
+            <button className={`w-7 h-7 rounded-md flex items-center justify-center ${textMuted} ${hoverBg} transition-all`} title="Search"><I.Search /></button>
+            <button onClick={onToggle} className={`w-7 h-7 rounded-md flex items-center justify-center ${textMuted} ${hoverBg} transition-all`} title="Collapse sidebar"><I.Panel /></button>
           </div>
         </div>
-      )}
+
+        {/* New chat */}
+        <div className="px-3 pb-1">
+          <SideLink icon={I.Plus} label="New chat" onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} isDark={isDark} />
+        </div>
+
+        <div className={`mx-4 my-2 h-px ${divider}`} />
+
+        {/* Nav */}
+        <div className="px-3 space-y-px">
+          {navItems.map(({ key, icon, label, anim }) => (
+            <SideLink key={key} icon={icon} label={label} active={page === key} anim={anim}
+              onClick={() => go(key)} isDark={isDark} />
+          ))}
+        </div>
+
+        <div className={`mx-4 my-3 h-px ${divider}`} />
+
+        {/* Recents */}
+        <div className="px-3 flex-1 overflow-y-auto min-h-0">
+          {isLoggedIn && (
+            <>
+              <p className={`px-2 pb-2 text-[11px] font-medium ${textMuted} select-none`}>Recents</p>
+              {sortedConversations.length > 0 ? (
+                sortedConversations.map((c) => (
+                  <div key={c.id} className="relative group/recent">
+                    {renamingId === c.id ? (
+                      <div className="px-2 py-1">
+                        <input
+                          ref={renameInputRef}
+                          value={renameValue}
+                          onChange={e => setRenameValue(e.target.value)}
+                          onBlur={confirmRename}
+                          onKeyDown={e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') setRenamingId(null); }}
+                          className={`w-full text-[13px] ${isDark ? 'text-gray-200 bg-white/10 border-white/20 focus:border-blue-400' : 'text-gray-700 bg-gray-50 border-gray-200 focus:border-blue-400'} border rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-blue-100`}
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <button onClick={() => { navigate(c.agentId === 'research' ? `/signal-radar?session=${c.id}` : `/?session=${c.id}`); if (window.innerWidth < 768) onToggle(); }} title={c.title} className={`w-full text-left flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[13px] ${textSecondary} hover:${textPrimary} ${hoverBg} transition-all`}>
+                          {c.pinned && <svg className={`w-3 h-3 ${textMuted} shrink-0`} fill="currentColor" viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>}
+                          <span className="truncate flex-1">{c.title}</span>
+                          {activeSessions.has(c.id) && (
+                            <svg className="w-3.5 h-3.5 animate-spin text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                          )}
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setMoreMenuId(moreMenuId === c.id ? null : c.id); }}
+                          className={`absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/recent:opacity-100 ${hoverBg} ${textMuted} hover:text-gray-600 transition-all ${isDark ? 'bg-[#1a1a1a]' : 'bg-white'}`}
+                        >
+                          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" /></svg>
+                        </button>
+                        {moreMenuId === c.id && (
+                          <div ref={moreMenuRef} className={`absolute right-0 top-full mt-1 z-50 w-36 ${isDark ? 'bg-[#1e1e1e] border-white/10' : 'bg-white border-gray-200'} border rounded-lg shadow-lg py-1`} style={{ animation: 'menu-pop 0.12s ease-out' }}>
+                            <button onClick={() => { togglePin(c.id); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-gray-300 hover:bg-white/8' : 'text-gray-600 hover:bg-gray-50'} transition-colors`}>
+                              <svg className="w-3.5 h-3.5" fill={c.pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
+                              {c.pinned ? 'Unpin' : 'Pin'}
+                            </button>
+                            <button onClick={() => { setMoreMenuId(null); startRename(c); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-gray-300 hover:bg-white/8' : 'text-gray-600 hover:bg-gray-50'} transition-colors`}>
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                              Rename
+                            </button>
+                            <button onClick={() => { setMoreMenuId(null); setDeleteConfirm({ id: c.id, title: c.title }); }} className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'} transition-colors`}>
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p className={`px-2 text-[12px] ${textMuted}`}>No recent chats</p>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* User */}
+        <div className="px-3 py-3 relative">
+          <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`flex items-center gap-2.5 px-2 py-2 rounded-lg ${hoverBg} transition-all cursor-pointer group/user`}>
+            <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+            <span className={`flex-1 text-[13px] font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'} truncate`}>{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
+            <div className={`opacity-0 group-hover/user:opacity-100 transition-opacity ${textMuted}`}><I.Dots /></div>
+          </div>
+          <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
+        </div>
+
+        {/* Custom Delete Confirmation Modal */}
+        {deleteConfirm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 pt-10 pb-20">
+            <div className={`${isDark ? 'bg-[#1e1e1e] border-white/10' : 'bg-white border-gray-200'} border shadow-2xl rounded-2xl w-full max-w-sm overflow-hidden`} style={{ animation: 'menu-pop 0.15s ease-out' }}>
+              <div className={`px-5 pt-5 pb-4 border-b ${isDark ? 'border-white/10' : 'border-gray-100'}`}>
+                <h3 className={`text-[16px] font-bold ${isDark ? 'text-white' : 'text-gray-900'} mb-1.5`}>Delete Conversation</h3>
+                <p className={`text-[13px] leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                  Are you sure you want to delete <strong className={isDark ? 'text-gray-200' : 'text-gray-700'}>"{deleteConfirm.title}"</strong>? This action cannot be undone.
+                </p>
+              </div>
+              <div className={`px-5 py-3.5 ${isDark ? 'bg-black/20' : 'bg-gray-50'} flex items-center justify-end gap-2.5`}>
+                <button
+                  onClick={() => setDeleteConfirm(null)}
+                  className={`px-4 py-2 text-[13px] font-medium rounded-lg transition-colors ${isDark ? 'text-gray-300 hover:bg-white/10' : 'text-gray-700 hover:bg-gray-200'}`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="px-4 py-2 text-[13px] font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors shadow-sm"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </aside>
 
       {mobileOverlay}

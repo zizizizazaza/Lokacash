@@ -7,8 +7,8 @@ import { mkdirSync, copyFileSync } from 'fs';
 import { join } from 'path';
 
 const ANDROID_RES = './android/app/src/main/res';
-const ICON_SRC = 'C:/Users/A/.gemini/antigravity/brain/1ce45a59-2a97-4153-ad57-3b4fb730981d/loka_app_icon_1773732636956.png';
-const SPLASH_SRC = 'C:/Users/A/.gemini/antigravity/brain/1ce45a59-2a97-4153-ad57-3b4fb730981d/loka_splash_screen_1773732652822.png';
+const ICON_SRC = './public/image.png';
+const SPLASH_SRC = './public/image.png';
 
 // Android icon sizes (density → pixel size)
 const ICON_SIZES = {
@@ -54,20 +54,26 @@ async function generateIcons() {
 
     // ic_launcher.png
     await sharp(ICON_SRC)
+      .trim()
       .resize(size, size, { fit: 'cover' })
       .png()
       .toFile(join(outDir, 'ic_launcher.png'));
 
     // ic_launcher_round.png (same image, OS applies circle mask)
     await sharp(ICON_SRC)
+      .trim()
       .resize(size, size, { fit: 'cover' })
       .png()
       .toFile(join(outDir, 'ic_launcher_round.png'));
 
     // ic_launcher_foreground.png (for adaptive icons)
     const fgSize = FOREGROUND_SIZES[dir];
+    const innerSize = Math.round(fgSize * 0.75); // 75% of fg size to make it bigger overall
+    const pad = Math.round((fgSize - innerSize) / 2);
     await sharp(ICON_SRC)
-      .resize(fgSize, fgSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .trim()
+      .resize(innerSize, innerSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .extend({ top: pad, bottom: pad, left: pad, right: pad, background: { r: 0, g: 0, b: 0, alpha: 0 } })
       .png()
       .toFile(join(outDir, 'ic_launcher_foreground.png'));
 
@@ -80,7 +86,8 @@ async function generateSplashScreens() {
 
   // Default drawable splash
   await sharp(SPLASH_SRC)
-    .resize(480, 480, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+    .trim()
+    .resize(480, 480, { fit: 'contain', background: { r: 13, g: 27, b: 37, alpha: 1 } })
     .png()
     .toFile(join(ANDROID_RES, 'drawable', 'splash.png'));
   console.log('  ✓ drawable/splash.png');
@@ -90,7 +97,8 @@ async function generateSplashScreens() {
     const outDir = join(ANDROID_RES, dir);
     mkdirSync(outDir, { recursive: true });
     await sharp(SPLASH_SRC)
-      .resize(w, h, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+      .trim()
+      .resize(w, h, { fit: 'contain', background: { r: 13, g: 27, b: 37, alpha: 1 } })
       .png()
       .toFile(join(outDir, 'splash.png'));
     console.log(`  ✓ ${dir} (${w}×${h})`);
@@ -101,7 +109,8 @@ async function generateSplashScreens() {
     const outDir = join(ANDROID_RES, dir);
     mkdirSync(outDir, { recursive: true });
     await sharp(SPLASH_SRC)
-      .resize(w, h, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+      .trim()
+      .resize(w, h, { fit: 'contain', background: { r: 13, g: 27, b: 37, alpha: 1 } })
       .png()
       .toFile(join(outDir, 'splash.png'));
     console.log(`  ✓ ${dir} (${w}×${h})`);

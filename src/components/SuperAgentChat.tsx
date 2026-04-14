@@ -7,7 +7,7 @@ import { socket } from '../services/socket';
 import { api } from '../services/api';
 import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
-
+import { IFlytekStreamer } from '../services/iflytek';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -16,9 +16,9 @@ function saLog(...args: unknown[]) {
 // ─── Types and Interfaces ────────────────────────────────────
 
 const InputIcons = {
-  Attach: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>,
-  Mic: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" /><path d="M19 10v2a7 7 0 01-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>,
-  Image: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+    Attach: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>,
+    Mic: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" /><path d="M19 10v2a7 7 0 01-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>,
+    Image: () => <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
 };
 
 
@@ -87,9 +87,9 @@ li { margin-bottom: 4px; }
 };
 
 const CHAT_MODES = [
-  { id: 'auto' as const,        label: 'Auto',        desc: 'Smart auto-routing to the optimal pipeline', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
-  { id: 'fast' as const,        label: 'Fast',        desc: 'Direct response, minimal orchestration',    icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-  { id: 'roundtable' as const,  label: 'Roundtable',  desc: 'Multi-agent debate with iterative consensus', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
+    { id: 'auto' as const, label: 'Auto', desc: 'Smart auto-routing to the optimal pipeline', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
+    { id: 'fast' as const, label: 'Fast', desc: 'Direct response, minimal orchestration', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
+    { id: 'roundtable' as const, label: 'Roundtable', desc: 'Multi-agent debate with iterative consensus', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
 ];
 
 interface Message {
@@ -599,11 +599,10 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
 
                         <div className="absolute flex items-center justify-center"
                             style={{ left: CTR - 26, top: CTR - 26, width: 52, height: 52 }}>
-                            <div className={`w-[52px] h-[52px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${
-                                isSpinning
+                            <div className={`w-[52px] h-[52px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${isSpinning
                                     ? 'bg-blue-50/80 border-2 border-blue-200'
                                     : 'bg-gray-50 border-2 border-gray-200'
-                            }`}>
+                                }`}>
                                 {isSpinning ? (
                                     <>
                                         <div className="flex gap-[3px] mb-1">
@@ -621,41 +620,40 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
 
                         <div className={`absolute rt-orbit ${!isSpinning ? 'stopped' : ''}`}
                             style={{ left: 0, top: 0, width: SIZE, height: SIZE + 24, transformOrigin: `${CTR}px ${CTR}px` }}>
-                        {graphAgents.map((agent, i) => {
-                            const pos = agentPositions[i];
-                            const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                            const roundAgent = currentRound?.agents.find(a => a.agentId === agent.agentId);
-                            const hasResponse = !!roundAgent;
-                            const conf = roundAgent?.confidence ?? 0;
-                            const showVote = hasResponse && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
-                            const ringCls = isSpinning ? 'ring-2 ring-blue-200/60 ring-offset-1' : '';
-                            return (
-                                <div key={agent.initials} className={`absolute flex flex-col items-center rt-counter-orbit ${!isSpinning ? 'stopped' : ''}`}
-                                    style={{ left: pos.x - HALF, top: pos.y - HALF, width: AVATAR, transformOrigin: `${HALF}px ${HALF}px` }}>
-                                    <div className="relative flex justify-center">
-                                        <div className={`rounded-full flex items-center justify-center text-white shadow-sm transition-all duration-300 ${ringCls}`}
-                                            style={{ backgroundColor: color, width: AVATAR, height: AVATAR }}>
-                                            {AGENT_ICON(agent.initials)}
-                                        </div>
-                                        {showVote && (
-                                            <div key={`${playRoundIdx}-${agent.initials}`}
-                                                className="absolute -top-2 left-1/2 -translate-x-1/2 rt-float-vote pointer-events-none">
-                                                <span className="text-[11px] font-bold bg-white/90 backdrop-blur rounded-full px-1.5 py-0.5 shadow-sm text-blue-600 border border-blue-100">{conf}%</span>
+                            {graphAgents.map((agent, i) => {
+                                const pos = agentPositions[i];
+                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
+                                const roundAgent = currentRound?.agents.find(a => a.agentId === agent.agentId);
+                                const hasResponse = !!roundAgent;
+                                const conf = roundAgent?.confidence ?? 0;
+                                const showVote = hasResponse && (playPhase === 'voted' || playPhase === 'consensus') && i < visibleVotes;
+                                const ringCls = isSpinning ? 'ring-2 ring-blue-200/60 ring-offset-1' : '';
+                                return (
+                                    <div key={agent.initials} className={`absolute flex flex-col items-center rt-counter-orbit ${!isSpinning ? 'stopped' : ''}`}
+                                        style={{ left: pos.x - HALF, top: pos.y - HALF, width: AVATAR, transformOrigin: `${HALF}px ${HALF}px` }}>
+                                        <div className="relative flex justify-center">
+                                            <div className={`rounded-full flex items-center justify-center text-white shadow-sm transition-all duration-300 ${ringCls}`}
+                                                style={{ backgroundColor: color, width: AVATAR, height: AVATAR }}>
+                                                {AGENT_ICON(agent.initials)}
                                             </div>
-                                        )}
+                                            {showVote && (
+                                                <div key={`${playRoundIdx}-${agent.initials}`}
+                                                    className="absolute -top-2 left-1/2 -translate-x-1/2 rt-float-vote pointer-events-none">
+                                                    <span className="text-[11px] font-bold bg-white/90 backdrop-blur rounded-full px-1.5 py-0.5 shadow-sm text-blue-600 border border-blue-100">{conf}%</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                        <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
+                                            {agent.name}
+                                        </span>
                                     </div>
-                                    <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                        {agent.name}
-                                    </span>
-                                </div>
-                            );
-                        })}
+                                );
+                            })}
                         </div>
                     </div>
 
-                    <div className={`text-[12px] font-semibold transition-colors duration-300 ${
-                        isConsensusReached ? 'text-emerald-600' : isSpinning ? 'text-blue-500' : 'text-gray-500'
-                    }`}>
+                    <div className={`text-[12px] font-semibold transition-colors duration-300 ${isConsensusReached ? 'text-emerald-600' : isSpinning ? 'text-blue-500' : 'text-gray-500'
+                        }`}>
                         {isConsensusReached
                             ? '✓ Consensus Reached'
                             : isSpinning
@@ -679,9 +677,8 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                                 onClick={() => setExpandedRound(isExpanded ? null : round.round)}
                                 className="flex items-center gap-3 w-full text-left group"
                             >
-                                <div className={`w-[30px] h-[30px] rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold ${
-                                    isReached ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
-                                }`}>
+                                <div className={`w-[30px] h-[30px] rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold ${isReached ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
+                                    }`}>
                                     R{round.round}
                                 </div>
                                 <div className="flex-1 min-w-0">
@@ -900,15 +897,15 @@ const StatusIcon: React.FC<{ status: string; size?: 'sm' | 'md' }> = ({ status, 
 const PlatformLogo: React.FC<{ platform: string }> = ({ platform }) => {
     const s = 'w-4 h-4 shrink-0';
     switch (platform) {
-        case 'reddit': return <svg className={s} viewBox="0 0 24 24" fill="#FF4500"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 13.23c.04.24.06.48.06.72 0 3.22-3.53 5.82-7.88 5.82S1.31 17.17 1.31 13.95c0-.26.02-.51.06-.78-.74-.39-1.24-1.17-1.24-2.07 0-1.29 1.04-2.33 2.33-2.33.59 0 1.13.22 1.54.58 1.56-1.03 3.6-1.66 5.84-1.72l1.17-5.21.03-.01 3.7.87c.25-.58.83-.99 1.51-.99a1.67 1.67 0 0 1 0 3.33c-.88 0-1.6-.68-1.66-1.55l-3.18-.75-.95 4.22c2.15.09 4.1.72 5.62 1.72.41-.36.95-.57 1.54-.57 1.29 0 2.33 1.04 2.33 2.33 0 .88-.49 1.65-1.21 2.04z"/></svg>;
-        case 'x': return <svg className={s} viewBox="0 0 24 24" fill="#000"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>;
-        case 'youtube': return <svg className={s} viewBox="0 0 24 24" fill="#FF0000"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>;
-        case 'telegram': return <svg className={s} viewBox="0 0 24 24" fill="#26A5E4"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.656 8.153c-.184 1.937-1.003 6.636-1.418 8.806-.176.918-.522 1.226-.856 1.256-.727.067-1.28-.48-1.984-.942-1.103-.722-1.726-1.173-2.797-1.878-1.238-.815-.435-1.264.27-1.997.185-.19 3.394-3.112 3.456-3.376.008-.033.015-.157-.058-.223-.074-.065-.182-.043-.261-.025-.112.025-1.9 1.207-5.36 3.545-.507.348-.966.518-1.378.509-.454-.01-1.326-.257-1.974-.468-.794-.258-1.426-.395-1.37-.834.028-.228.335-.463.92-.704 3.6-1.568 6-2.603 7.2-3.104 3.432-1.427 4.145-1.675 4.61-1.683.102-.002.332.024.48.144a.52.52 0 0 1 .175.334c.016.094.035.308.02.475z"/></svg>;
-        case 'discord': return <svg className={s} viewBox="0 0 24 24" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.12-.098.246-.198.373-.292a.074.074 0 0 1 .078.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078-.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>;
-        case 'hackernews': return <svg className={s} viewBox="0 0 24 24" fill="#F0652F"><path d="M0 0v24h24V0H0zm12.8 14.4V20h-1.6v-5.6L7 4h1.8l3.2 6.4L15.2 4H17l-4.2 10.4z"/></svg>;
-        case 'weibo': return <svg className={s} viewBox="0 0 24 24" fill="#E6162D"><path d="M10.098 20.323c-3.977.391-7.414-1.406-7.672-4.02-.259-2.609 2.759-5.047 6.74-5.441 3.979-.394 7.413 1.404 7.671 4.018.259 2.6-2.759 5.049-6.739 5.443z"/></svg>;
-        case 'wechat': return <svg className={s} viewBox="0 0 24 24" fill="#07C160"><path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.078.285-.022.58.143.802a.77.77 0 0 0 .63.326.687.687 0 0 0 .355-.096l1.862-1.095a.735.735 0 0 1 .563-.082 10.2 10.2 0 0 0 2.313.27c.236 0 .47-.012.7-.031a6.395 6.395 0 0 1-.236-1.709c0-3.605 3.36-6.53 7.499-6.53.254 0 .504.013.75.035C16.805 4.707 13.082 2.188 8.691 2.188z"/></svg>;
-        default: return <svg className={s} viewBox="0 0 24 24" fill="#6B7280"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>;
+        case 'reddit': return <svg className={s} viewBox="0 0 24 24" fill="#FF4500"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 13.23c.04.24.06.48.06.72 0 3.22-3.53 5.82-7.88 5.82S1.31 17.17 1.31 13.95c0-.26.02-.51.06-.78-.74-.39-1.24-1.17-1.24-2.07 0-1.29 1.04-2.33 2.33-2.33.59 0 1.13.22 1.54.58 1.56-1.03 3.6-1.66 5.84-1.72l1.17-5.21.03-.01 3.7.87c.25-.58.83-.99 1.51-.99a1.67 1.67 0 0 1 0 3.33c-.88 0-1.6-.68-1.66-1.55l-3.18-.75-.95 4.22c2.15.09 4.1.72 5.62 1.72.41-.36.95-.57 1.54-.57 1.29 0 2.33 1.04 2.33 2.33 0 .88-.49 1.65-1.21 2.04z" /></svg>;
+        case 'x': return <svg className={s} viewBox="0 0 24 24" fill="#000"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" /></svg>;
+        case 'youtube': return <svg className={s} viewBox="0 0 24 24" fill="#FF0000"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" /></svg>;
+        case 'telegram': return <svg className={s} viewBox="0 0 24 24" fill="#26A5E4"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.656 8.153c-.184 1.937-1.003 6.636-1.418 8.806-.176.918-.522 1.226-.856 1.256-.727.067-1.28-.48-1.984-.942-1.103-.722-1.726-1.173-2.797-1.878-1.238-.815-.435-1.264.27-1.997.185-.19 3.394-3.112 3.456-3.376.008-.033.015-.157-.058-.223-.074-.065-.182-.043-.261-.025-.112.025-1.9 1.207-5.36 3.545-.507.348-.966.518-1.378.509-.454-.01-1.326-.257-1.974-.468-.794-.258-1.426-.395-1.37-.834.028-.228.335-.463.92-.704 3.6-1.568 6-2.603 7.2-3.104 3.432-1.427 4.145-1.675 4.61-1.683.102-.002.332.024.48.144a.52.52 0 0 1 .175.334c.016.094.035.308.02.475z" /></svg>;
+        case 'discord': return <svg className={s} viewBox="0 0 24 24" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.12-.098.246-.198.373-.292a.074.074 0 0 1 .078.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078-.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" /></svg>;
+        case 'hackernews': return <svg className={s} viewBox="0 0 24 24" fill="#F0652F"><path d="M0 0v24h24V0H0zm12.8 14.4V20h-1.6v-5.6L7 4h1.8l3.2 6.4L15.2 4H17l-4.2 10.4z" /></svg>;
+        case 'weibo': return <svg className={s} viewBox="0 0 24 24" fill="#E6162D"><path d="M10.098 20.323c-3.977.391-7.414-1.406-7.672-4.02-.259-2.609 2.759-5.047 6.74-5.441 3.979-.394 7.413 1.404 7.671 4.018.259 2.6-2.759 5.049-6.739 5.443z" /></svg>;
+        case 'wechat': return <svg className={s} viewBox="0 0 24 24" fill="#07C160"><path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.078.285-.022.58.143.802a.77.77 0 0 0 .63.326.687.687 0 0 0 .355-.096l1.862-1.095a.735.735 0 0 1 .563-.082 10.2 10.2 0 0 0 2.313.27c.236 0 .47-.012.7-.031a6.395 6.395 0 0 1-.236-1.709c0-3.605 3.36-6.53 7.499-6.53.254 0 .504.013.75.035C16.805 4.707 13.082 2.188 8.691 2.188z" /></svg>;
+        default: return <svg className={s} viewBox="0 0 24 24" fill="#6B7280"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none" /><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>;
     }
 };
 
@@ -921,7 +918,7 @@ const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
         </>
     );
     const className = "flex items-center gap-2.5 px-3 py-2 hover:bg-gray-50 rounded-lg transition-colors cursor-pointer group";
-    
+
     if (source.url) {
         return (
             <a href={source.url} target="_blank" rel="noreferrer" className={className} title={source.title}>
@@ -929,7 +926,7 @@ const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
             </a>
         );
     }
-    
+
     return (
         <div className={className} title={source.title}>
             {content}
@@ -947,12 +944,10 @@ const ThinkingProcessSidePanel: React.FC<{
     const SocialSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
         <div>
             <div className="flex items-center gap-2 mb-2">
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                    section.status === 'done' ? 'bg-emerald-500' : section.status === 'active' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300'
-                }`} />
-                <span className={`text-[12px] font-semibold ${
-                    section.status === 'done' ? 'text-gray-700' : section.status === 'active' ? 'text-blue-600' : 'text-gray-300'
-                }`}>{section.label}</span>
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${section.status === 'done' ? 'bg-emerald-500' : section.status === 'active' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300'
+                    }`} />
+                <span className={`text-[12px] font-semibold ${section.status === 'done' ? 'text-gray-700' : section.status === 'active' ? 'text-blue-600' : 'text-gray-300'
+                    }`}>{section.label}</span>
                 {section.status === 'done' && section.totalFound && (
                     <span className="text-[10px] text-emerald-600 font-medium">{section.totalFound} sources</span>
                 )}
@@ -968,12 +963,10 @@ const ThinkingProcessSidePanel: React.FC<{
     const DataProvidersSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
         <div>
             <div className="flex items-center gap-2 mb-2">
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                    section.status === 'done' ? 'bg-emerald-500' : section.status === 'active' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300'
-                }`} />
-                <span className={`text-[12px] font-semibold ${
-                    section.status === 'done' ? 'text-gray-700' : section.status === 'active' ? 'text-blue-600' : 'text-gray-300'
-                }`}>{section.label}</span>
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${section.status === 'done' ? 'bg-emerald-500' : section.status === 'active' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300'
+                    }`} />
+                <span className={`text-[12px] font-semibold ${section.status === 'done' ? 'text-gray-700' : section.status === 'active' ? 'text-blue-600' : 'text-gray-300'
+                    }`}>{section.label}</span>
                 {section.status === 'done' && section.totalFound && (
                     <span className="text-[10px] text-emerald-600 font-medium">{section.totalFound} connected</span>
                 )}
@@ -981,11 +974,10 @@ const ThinkingProcessSidePanel: React.FC<{
             {section.providers && (
                 <div className="ml-4 flex flex-wrap gap-1.5 mb-2">
                     {section.providers.map((p, i) => (
-                        <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
-                            p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                        <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
                             p.status === 'active' ? 'bg-blue-50 text-blue-600 animate-pulse' :
-                            'bg-gray-50 text-gray-300'
-                        }`}>
+                                'bg-gray-50 text-gray-300'
+                            }`}>
                             {p.status === 'done' ? '✓' : p.status === 'active' ? '⟳' : '·'} {p.name}
                         </span>
                     ))}
@@ -1014,12 +1006,11 @@ const ThinkingProcessSidePanel: React.FC<{
                     {hasToolTrace && (
                         <div className="flex flex-wrap gap-1.5">
                             {toolTrace.map((t, i) => (
-                                <span key={`${t.tool}-${i}`} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
-                                    t.status === 'running' ? 'bg-blue-50 text-blue-600 animate-pulse' :
+                                <span key={`${t.tool}-${i}`} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${t.status === 'running' ? 'bg-blue-50 text-blue-600 animate-pulse' :
                                     t.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
-                                    t.status === 'error' ? 'bg-red-50 text-red-600' :
-                                    'bg-gray-50 text-gray-400'
-                                }`}>
+                                        t.status === 'error' ? 'bg-red-50 text-red-600' :
+                                            'bg-gray-50 text-gray-400'
+                                    }`}>
                                     {t.status === 'running' ? '⟳' : t.status === 'done' ? '✓' : t.status === 'error' ? '✗' : '·'}
                                     {t.displayName}
                                     {t.status === 'done' && t.durationSec != null && (
@@ -1049,11 +1040,10 @@ const ThinkingProcessSidePanel: React.FC<{
                             return (
                                 <div className="flex flex-wrap gap-1.5">
                                     {d.providers.map((p, i) => (
-                                        <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
-                                            p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                                        <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${p.status === 'done' ? 'bg-emerald-50 text-emerald-700' :
                                             p.status === 'active' ? 'bg-blue-50 text-blue-600 animate-pulse' :
-                                            'bg-gray-50 text-gray-300'
-                                        }`}>
+                                                'bg-gray-50 text-gray-300'
+                                            }`}>
                                             {p.status === 'done' ? '✓' : p.status === 'active' ? '⟳' : '·'} {p.name}
                                         </span>
                                     ))}
@@ -1092,17 +1082,15 @@ const ThinkingProcessSidePanel: React.FC<{
                         const hasResults = stage.status === 'done' && stage.result && stage.result.length > 0;
                         const icon = stageIcons[stage.id || ''] || '🔍';
                         return (
-                            <div key={stage.id || stage.label} className={`rounded-xl border transition-all duration-300 overflow-hidden ${
-                                stage.status === 'done' ? 'border-gray-100 bg-gray-50/50' :
+                            <div key={stage.id || stage.label} className={`rounded-xl border transition-all duration-300 overflow-hidden ${stage.status === 'done' ? 'border-gray-100 bg-gray-50/50' :
                                 stage.status === 'active' ? 'border-blue-100 bg-blue-50/30' :
-                                'border-gray-100 bg-white'
-                            }`}>
+                                    'border-gray-100 bg-white'
+                                }`}>
                                 <div className="flex items-center gap-2 px-3 py-2">
                                     <span className="text-[13px]">{icon}</span>
-                                    <span className={`text-[12px] font-medium flex-1 ${
-                                        stage.status === 'done' ? 'text-gray-700' :
+                                    <span className={`text-[12px] font-medium flex-1 ${stage.status === 'done' ? 'text-gray-700' :
                                         stage.status === 'active' ? 'text-blue-600' : 'text-gray-400'
-                                    }`}>{stage.label}</span>
+                                        }`}>{stage.label}</span>
                                     <StatusIcon status={stage.status} size="sm" />
                                 </div>
                                 {hasResults && (
@@ -1295,7 +1283,7 @@ const ThinkingProcessSidePanel: React.FC<{
 };
 
 // ─── Summarize user question into a short topic title ──────
-const STOP_WORDS = new Set(['THE','AND','FOR','NOT','ARE','BUT','HOW','WHY','CAN','YOU','HAS','WAS','HIS','HER','ALL','ANY','WHO','ITS','GET','LET','MAY','OUR','SAY','SHE','TOO','USE','WAY','NOW']);
+const STOP_WORDS = new Set(['THE', 'AND', 'FOR', 'NOT', 'ARE', 'BUT', 'HOW', 'WHY', 'CAN', 'YOU', 'HAS', 'WAS', 'HIS', 'HER', 'ALL', 'ANY', 'WHO', 'ITS', 'GET', 'LET', 'MAY', 'OUR', 'SAY', 'SHE', 'TOO', 'USE', 'WAY', 'NOW']);
 function summarizeTitle(raw: string): string {
     if (!raw) return 'New Chat';
     const q = raw.replace(/[？?！!。]+$/g, '').trim();
@@ -1305,7 +1293,7 @@ function summarizeTitle(raw: string): string {
     if (cmpMatch) return `${cmpMatch[1].trim()} vs ${cmpMatch[2].trim().replace(/\s*(fundamentals|for|的|基本面).*/i, '')} Comparison`;
 
     const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,30}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况).*)?$/i);
-    if (analyzeMatch) return `${analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/,'').trim()} Analysis`;
+    if (analyzeMatch) return `${analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim()} Analysis`;
 
     const buyMatch = q.match(/(?:is|should|are|值得|适合|能不能|可以)\s+(.{2,20}?)\s+(?:still\s+)?(?:a\s+)?(?:buy|worth|invest|入手|买入|购买)/i);
     if (buyMatch) return `${buyMatch[1].replace(/^(i|we)\s+/i, '').trim()} Investment Outlook`;
@@ -1319,7 +1307,7 @@ function summarizeTitle(raw: string): string {
     }
     if (/demand|市场|landscape|competitive|竞品|行业/.test(q)) {
         const topicMatch = q.match(/(?:demand|市场|landscape|competitive|行业)\s*(?:for|of|about|关于)?\s*(.{2,25})/i);
-        return topicMatch ? `${topicMatch[1].replace(/[？?]$/,'').trim()} Market Research` : 'Market Research';
+        return topicMatch ? `${topicMatch[1].replace(/[？?]$/, '').trim()} Market Research` : 'Market Research';
     }
     if (/^(which|what|哪些|哪个|推荐)/i.test(q)) {
         const topicMatch = q.match(/(?:which|what|哪些|哪个)\s+(.{2,30}?)(?:\s+(?:have|has|are|is|worth|best|最好|right now))/i);
@@ -1466,28 +1454,62 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         e.target.value = '';
     };
 
-    const MOCK_TRANSCRIPTIONS = [
-        'What is the current risk profile of NVIDIA for Q2 2026?',
-        'Compare Bitcoin and Ethereum momentum over the past 30 days',
-        'Which AI infrastructure companies have the strongest moat?',
-        'Show me the latest market sentiment analysis on Tesla',
-        'Build me a diversified portfolio for a 3-year horizon',
-    ];
+    const iflytekRef = useRef<IFlytekStreamer | null>(null);
+
+    useEffect(() => {
+        return () => {
+            if (iflytekRef.current) {
+                iflytekRef.current.stop();
+            }
+        };
+    }, []);
 
     const stopRecording = () => {
-        if (voiceTimerRef.current) clearTimeout(voiceTimerRef.current);
+        if (iflytekRef.current) {
+            iflytekRef.current.stop();
+            iflytekRef.current = null;
+        }
         setVoiceState('transcribing');
-        voiceTimerRef.current = setTimeout(() => {
-            const t = MOCK_TRANSCRIPTIONS[Math.floor(Math.random() * MOCK_TRANSCRIPTIONS.length)];
-            setInputText(t);
-            setVoiceState('idle');
-        }, 1800);
+        setTimeout(() => {
+            setVoiceState(prev => prev === 'transcribing' ? 'idle' : prev);
+        }, 1000);
     };
 
-    const handleVoiceClick = () => {
+    const handleVoiceClick = async () => {
         if (voiceState === 'idle') {
             setVoiceState('recording');
-            voiceTimerRef.current = setTimeout(stopRecording, 8000);
+
+            const streamer = new IFlytekStreamer();
+            iflytekRef.current = streamer;
+
+            streamer.onResult((res) => {
+                if (res.text) {
+                    setInputText(res.text);
+                }
+                if (res.isFinal) {
+                    setVoiceState('idle');
+                    iflytekRef.current = null;
+                }
+            });
+
+            streamer.onError((err) => {
+                console.error("iFlytek error:", err);
+                setVoiceState('idle');
+                iflytekRef.current = null;
+            });
+
+            streamer.onStop(() => {
+                setVoiceState('idle');
+                iflytekRef.current = null;
+            });
+
+            try {
+                await streamer.start();
+            } catch (err) {
+                console.error("Failed to start iFlytek", err);
+                setVoiceState('idle');
+                iflytekRef.current = null;
+            }
         } else if (voiceState === 'recording') {
             stopRecording();
         }
@@ -1713,20 +1735,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const onStarted = (data: { sessionId: string; mode: string; route: string }) => {
             saLog('← agent:chat:started', { expect: sessionId, got: data?.sessionId, route: data?.route, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
-             setThinkingProcesses(prev => ({
-                 ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: data.route }
-             }));
+            setThinkingProcesses(prev => ({
+                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: data.route }
+            }));
         };
 
         const onModule = (data: { sessionId: string; moduleType: string; status: string; data?: any }) => {
             saLog('← agent:chat:module', { expect: sessionId, got: data?.sessionId, moduleType: data?.moduleType, status: data?.status, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
-            
+
             setThinkingProcesses(prev => {
                 const msgIdx = activeMsgIdxRef.current;
                 const flow = prev[msgIdx] || { modules: [], isActive: true, route: 'Loka Agent' };
                 const mods = [...flow.modules];
-                
+
                 let modIdx = mods.findIndex(m => m.type === data.moduleType);
                 if (modIdx === -1) {
                     mods.push({ type: data.moduleType as any, status: data.status as any, data: data.data });
@@ -1743,7 +1765,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         mods[modIdx].data = { ...(mods[modIdx].data || {}), ...data.data };
                     }
                 }
-                
+
                 return { ...prev, [msgIdx]: { ...flow, modules: mods } };
             });
         };
@@ -1783,12 +1805,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 // Guard: if this message is no longer streaming (previous run already finished
                 // or a new run already took over), ignore stale stream_done
                 if (!updated[msgIdx].isStreaming) return prev;
-                updated[msgIdx] = { 
-                    ...updated[msgIdx], 
+                updated[msgIdx] = {
+                    ...updated[msgIdx],
                     // Only use server content if we have nothing accumulated (e.g. reconnect)
                     content: updated[msgIdx].content || data.content || '',
-                    isStreaming: false, 
-                    timestamp: new Date().toLocaleTimeString() 
+                    isStreaming: false,
+                    timestamp: new Date().toLocaleTimeString()
                 };
                 return updated;
             });
@@ -2142,7 +2164,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         activeMsgIdxRef.current = msgIdx;
 
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
-        
+
         setActiveGraphMsgIdx(msgIdx);
         // Keep graph panel open in roundtable mode so user sees the waiting state
         if (chatMode !== 'roundtable') setShowGraphPanel(false);
@@ -2265,7 +2287,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         }
         if (!initialMessage.trim()) return;
         hasSentInitial.current = true;
-        
+
         // Broadcast new session for sidebar
         window.dispatchEvent(new CustomEvent('session-started', {
             detail: { id: sessionId, title: summarizeTitle(initialMessage), agentId: chatSelectedAgent || 'auto' }
@@ -2341,9 +2363,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             return !p;
                         });
                     }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                        showGraphPanel ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
-                    }`}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${showGraphPanel ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
+                        }`}
                 >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                         <circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="5" r="2.5" /><circle cx="19" cy="19" r="2.5" />
@@ -2614,17 +2635,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
                                                         {msg.content !== '__cancelled__' && (
-                                                        <button
-                                                            onClick={() => handleCopy(i, msg.content)}
-                                                            title="Copy markdown"
-                                                            className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-all"
-                                                        >
-                                                            {copied[i] ? (
-                                                                <svg className="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                                                            ) : (
-                                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2} /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" strokeWidth={2} /></svg>
-                                                            )}
-                                                        </button>
+                                                            <button
+                                                                onClick={() => handleCopy(i, msg.content)}
+                                                                title="Copy markdown"
+                                                                className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-all"
+                                                            >
+                                                                {copied[i] ? (
+                                                                    <svg className="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                                                                ) : (
+                                                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2} /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" strokeWidth={2} /></svg>
+                                                                )}
+                                                            </button>
                                                         )}
                                                         {/* Retry */}
                                                         <button
@@ -2651,9 +2672,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         <button
                                                             onClick={() => handleReaction(i, 'liked')}
                                                             title="Like"
-                                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${
-                                                                reactions[i] === 'liked' ? 'text-blue-500 bg-blue-50' : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100'
-                                                            }`}
+                                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${reactions[i] === 'liked' ? 'text-blue-500 bg-blue-50' : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100'
+                                                                }`}
                                                         >
                                                             <svg className="w-3.5 h-3.5" fill={reactions[i] === 'liked' ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z" /><path d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3" /></svg>
                                                         </button>
@@ -2661,9 +2681,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         <button
                                                             onClick={() => handleReaction(i, 'disliked')}
                                                             title="Dislike"
-                                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${
-                                                                reactions[i] === 'disliked' ? 'text-red-400 bg-red-50' : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100'
-                                                            }`}
+                                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${reactions[i] === 'disliked' ? 'text-red-400 bg-red-50' : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100'
+                                                                }`}
                                                         >
                                                             <svg className="w-3.5 h-3.5" fill={reactions[i] === 'disliked' ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z" /><path d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17" /></svg>
                                                         </button>
@@ -2721,9 +2740,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
                                             <div className="flex items-end gap-[3px] h-4">
                                                 {[
-                                                    { delay: '0s',    dur: '1.8s' },
-                                                    { delay: '0.3s',  dur: '1.2s' },
-                                                    { delay: '0.6s',  dur: '2.1s' },
+                                                    { delay: '0s', dur: '1.8s' },
+                                                    { delay: '0.3s', dur: '1.2s' },
+                                                    { delay: '0.6s', dur: '2.1s' },
                                                     { delay: '0.15s', dur: '1.5s' },
                                                     { delay: '0.45s', dur: '1.9s' },
                                                 ].map(({ delay, dur }, i) => (
@@ -2834,13 +2853,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         <button
                                             onClick={handleVoiceClick}
                                             title={voiceState === 'recording' ? 'Stop recording' : 'Voice input'}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${
-                                                voiceState === 'recording'
-                                                    ? 'text-red-500 bg-red-50 hover:bg-red-100'
-                                                    : voiceState === 'transcribing'
+                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${voiceState === 'recording'
+                                                ? 'text-red-500 bg-red-50 hover:bg-red-100'
+                                                : voiceState === 'transcribing'
                                                     ? 'text-gray-300 cursor-not-allowed'
                                                     : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
-                                            }`}
+                                                }`}
                                             disabled={voiceState === 'transcribing'}
                                         >
                                             {voiceState === 'recording' ? (
@@ -2852,13 +2870,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
                                             disabled={!isStreaming && !inputText.trim()}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${
-                                                isStreaming
+                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isStreaming
                                                     ? 'bg-gray-900 text-white hover:bg-gray-700'
                                                     : inputText.trim()
                                                         ? 'bg-gray-900 text-white hover:bg-gray-800'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
-                                            }`}
+                                                }`}
                                         >
                                             {isStreaming ? (
                                                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>

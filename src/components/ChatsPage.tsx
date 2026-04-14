@@ -731,7 +731,7 @@ const ChatsPage: React.FC = () => {
             Please sign in to access your private chats and community groups.
           </p>
           <button
-            onClick={() => chatsLogin()}
+            onClick={() => window.dispatchEvent(new Event('show-auth-modal'))}
             className="px-8 py-3 bg-black text-white rounded-full text-xs font-bold tracking-widest hover:bg-gray-800 transition-all shadow-lg hover:shadow-xl active:scale-95"
           >
             Sign In
