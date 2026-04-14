@@ -1181,10 +1181,17 @@ Text: "${query}"`;
         if (plan.specificGurus?.length > 0) {
           analysisOptions.analysts = plan.specificGurus;
         }
+        console.log(
+          `[agent:chat:simulation] planned_requested=${analysisOptions.analysts?.join(',') || '(tool_default)'} tickers=${tickers.join(',')} sessionId=${sessionId}`,
+        );
 
         promises.push(
           hedgefundService.runAnalysis(analysisOptions, () => {})
             .then(hfResult => {
+              const toDisplayName = (name: string) => name.replace(/_agent$/i, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+              const plannedAnalysts = (hfResult.analysts || []).map(toDisplayName);
+              const producedAnalysts = Object.keys(hfResult.analyst_signals || {});
+              const missingAnalysts = plannedAnalysts.filter((name) => !producedAnalysts.includes(name));
               const panelists = Object.keys(hfResult.analyst_signals || {}).map(p => ({
                 name: p,
                 avatar: 'L',
@@ -1193,6 +1200,12 @@ Text: "${query}"`;
                 confidence: Object.values(hfResult.analyst_signals[p] || {})[0]?.confidence || 0,
                 group: GENERIC_ANALYST_KEYS.has(p) ? 'analyst' : 'guru'
               }));
+              console.log(
+                `[agent:chat:simulation] planned_effective=${plannedAnalysts.join(',') || '(none)'} produced=${producedAnalysts.join(',') || '(none)'} missing=${missingAnalysts.join(',') || '(none)'} sessionId=${sessionId}`,
+              );
+              console.log(
+                `[agent:chat:simulation] frontend_panelists=${panelists.map((x) => x.name).join(',') || '(none)'} count=${panelists.length} sessionId=${sessionId}`,
+              );
               finalPanelists = panelists;
               emitter.emitModule('simulation', 'completed', { panelists });
               const isGuruCouncil = plan.queryType === 'guru-council';
