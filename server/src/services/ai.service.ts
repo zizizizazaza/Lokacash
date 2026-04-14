@@ -426,7 +426,7 @@ ${userText || '(empty)'}`;
     }
   }
 
-  async chat(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext): Promise<AIResponse> {
+  async chat(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext, modelOverride?: string): Promise<AIResponse> {
     if (!this.isConfigured) {
       return {
         content: '🔧 Loka AI is not yet configured. Please set LOKA_AI_API_KEY and LOKA_AI_BASE_URL in the server .env file.',
@@ -443,6 +443,7 @@ ${userText || '(empty)'}`;
       })),
     ];
 
+    const selectedModel = modelOverride?.trim() || this.model;
     const response = await fetch(this.baseUrl, {
       method: 'POST',
       headers: {
@@ -450,7 +451,7 @@ ${userText || '(empty)'}`;
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
-        model: this.model,
+        model: selectedModel,
         messages: apiMessages,
         max_tokens: 2048,
         temperature: 0.5,
@@ -476,7 +477,7 @@ ${userText || '(empty)'}`;
   }
 
   /** Streaming chat — returns a ReadableStream for SSE */
-  async chatStream(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext, maxTokens?: number): Promise<ReadableStream<Uint8Array>> {
+  async chatStream(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext, maxTokens?: number, modelOverride?: string): Promise<ReadableStream<Uint8Array>> {
     if (!this.isConfigured) {
       const encoder = new TextEncoder();
       return new ReadableStream({
@@ -497,14 +498,15 @@ ${userText || '(empty)'}`;
       })),
     ];
 
+    const selectedModel = modelOverride?.trim() || this.model;
     const requestBody = {
-        model: this.model,
+        model: selectedModel,
         messages: apiMessages,
         max_tokens: maxTokens || 2048,
         temperature: 0.5,
         stream: true,
       };
-    console.log(`[AI chatStream] model=${this.model}, max_tokens=${requestBody.max_tokens}, messages=${apiMessages.length}, inputLen=${JSON.stringify(apiMessages).length}`);
+    console.log(`[AI chatStream] model=${selectedModel}, max_tokens=${requestBody.max_tokens}, messages=${apiMessages.length}, inputLen=${JSON.stringify(apiMessages).length}`);
 
     const response = await fetch(this.baseUrl, {
       method: 'POST',
