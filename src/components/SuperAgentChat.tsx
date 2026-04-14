@@ -1906,14 +1906,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
+            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; delete n[-1]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
             setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
+            const idx = data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
+            if (idx < 0) return;
+            setHtmlGenerating(prev => ({ ...prev, [idx]: true }));
         };
 
         socket.on('agent:chat:routing', onRouting);
@@ -2448,7 +2450,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     />
                                                 )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && !msg.isStreaming && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                {msg.role === 'assistant' && (!msg.isStreaming || htmlReports[i]) && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className="flex items-center gap-1.5">
                                                         {(htmlReports[i] || htmlGenerating[i]) && (

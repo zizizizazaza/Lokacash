@@ -412,8 +412,8 @@ const SuperAgentHome: React.FC = () => {
         </div>
       )}
 
-      {/* ── Featured Groups — only on top-level ── */}
-      {!selectedAgent && (() => {
+      {/* ── Featured Groups — hidden for now ── */}
+      {false && !selectedAgent && (() => {
         const avatarColors = ['bg-blue-400', 'bg-emerald-400', 'bg-violet-400', 'bg-amber-400', 'bg-rose-400', 'bg-cyan-400', 'bg-indigo-400'];
         return (
           <div className="pb-12 px-4 max-w-[640px] w-full mx-auto">

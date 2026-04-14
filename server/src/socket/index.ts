@@ -1695,6 +1695,90 @@ The HTML must:
       }
       const synthesisMaxTokens = queryType === 'market-brief' ? 4096 : 8192;
 
+      // ── Helper: run HTML generation stream and return the result ──
+      const runHtmlGeneration = async (htmlInput: string): Promise<string> => {
+        const htmlPrompt = queryType === 'guru-council'
+          ? buildGuruCouncilHtmlPrompt(htmlInput)
+          : buildWebReportPrompt(htmlInput);
+        const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 16384);
+        const htmlReader = htmlStream.getReader();
+        const htmlDecoder = new TextDecoder();
+        let htmlContent = '';
+        let htmlBuf = '';
+        let chunkCount = 0;
+        while (true) {
+          const { done, value } = await htmlReader.read();
+          if (done) {
+            if (htmlBuf.trim()) {
+              for (const line of htmlBuf.split('\n')) {
+                const t = line.trim();
+                if (t.startsWith('data: ')) {
+                  const d = t.slice(6).trim();
+                  if (d === '[DONE]') continue;
+                  try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+                }
+              }
+            }
+            break;
+          }
+          chunkCount++;
+          htmlBuf += htmlDecoder.decode(value, { stream: true });
+          const htmlLines = htmlBuf.split('\n');
+          htmlBuf = htmlLines.pop() || '';
+          for (const line of htmlLines) {
+            const t = line.trim();
+            if (t.startsWith('data: ')) {
+              const d = t.slice(6).trim();
+              if (d === '[DONE]') continue;
+              try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+            }
+          }
+        }
+        console.log(`[agent:chat:html] Stream finished. chunks=${chunkCount}, htmlLength=${htmlContent.length}`);
+        // Sanitize: strip LLM preamble/postamble and markdown fences
+        let s = htmlContent.trim();
+        s = s.replace(/^```html\s*/i, '').replace(/^```\s*/, '');
+        const firstTag = Math.min(
+          s.indexOf('<style') >= 0 ? s.indexOf('<style') : Infinity,
+          s.indexOf('<div')   >= 0 ? s.indexOf('<div')   : Infinity,
+        );
+        if (firstTag > 0 && firstTag < Infinity) s = s.slice(firstTag);
+        s = s.replace(/\n?```\s*$/, '').trim();
+        return s;
+      };
+
+      // ── Emit HTML result to frontend + persist to DB ──
+      const emitHtmlResult = async (htmlContent: string) => {
+        if (htmlContent.length <= 100) {
+          console.log(`[agent:chat:html] ⚠️ HTML content too short (${htmlContent.length}), skipping`);
+          return;
+        }
+        const msgCount = await prisma.chatMessage.count({ where: { sessionId } });
+        const msgIdx = msgCount - 1;
+        console.log(`[agent:chat:html] msgCount=${msgCount}, msgIdx=${msgIdx}`);
+        const lastMsg = await prisma.chatMessage.findFirst({ where: { sessionId, role: 'assistant' }, orderBy: { createdAt: 'desc' } });
+        if (lastMsg) {
+          const existingMeta = lastMsg.metadata ? JSON.parse(lastMsg.metadata as string) : {};
+          existingMeta.htmlReport = htmlContent;
+          await prisma.chatMessage.update({ where: { id: lastMsg.id }, data: { metadata: JSON.stringify(existingMeta) } });
+          console.log(`[agent:chat:html] DB updated with htmlReport`);
+        }
+        emitToUser(userId, 'agent:chat:html_ready', { sessionId, msgIdx, html: htmlContent });
+        console.log(`[agent:chat:html] ✅ HTML report emitted for session ${sessionId}, msgIdx=${msgIdx}, length=${htmlContent.length}`);
+      };
+
+      // ── Start parallel HTML generation for non-roundtable eligible queries ──
+      const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+      let parallelHtmlPromise: Promise<string> | null = null;
+      if (htmlEligible && !isDeepResearch && contextString.length > 200) {
+        console.log(`[agent:chat:html] Starting PARALLEL HTML generation (queryType=${queryType}), contextString length=${contextString.length}`);
+        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 }); // msgIdx resolved later
+        parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
+          console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
+          return '';
+        });
+      }
+
       try {
         console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
         const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
@@ -1932,96 +2016,24 @@ Research context:\n${synFullContent}${langInstruction}`;
         emitter.emitModule('done', 'completed', { duration: dur });
         emitter.emitStreamDone(finalDbContent);
 
-        // --- Async HTML report generation (non-blocking) ---
-        // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
-        const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
-        if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
-          // Emit generating signal immediately so frontend shows Web tab skeleton
+        // --- HTML report: await parallel result or generate sequentially for roundtable ---
+        if (parallelHtmlPromise) {
+          // Non-roundtable: HTML was already generating in parallel, just await it
+          console.log(`[agent:chat:html] Awaiting parallel HTML promise...`);
+          const htmlContent = await parallelHtmlPromise;
+          await emitHtmlResult(htmlContent);
+        } else if (htmlEligible && isDeepResearch && finalDbContent && finalDbContent.length > 200) {
+          // Roundtable / deep research: generate sequentially since we need the full consensus content
           const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
           const genMsgIdx = pendingMsgCount - 1;
-          console.log(`[agent:chat:html] Emitting html_generating: sessionId=${sessionId}, msgIdx=${genMsgIdx}, pendingMsgCount=${pendingMsgCount}`);
           emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
-          (async () => {
-            try {
-              console.log(`[agent:chat:html] Starting async HTML generation for session ${sessionId}, queryType=${queryType}, input length=${finalDbContent.length}`);
-              const htmlPrompt = queryType === 'guru-council'
-                ? buildGuruCouncilHtmlPrompt(finalDbContent)
-                : buildWebReportPrompt(finalDbContent);
-              const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 16384);
-              const htmlReader = htmlStream.getReader();
-              const htmlDecoder = new TextDecoder();
-              let htmlContent = '';
-              let htmlBuf = '';
-              let chunkCount = 0;
-              while (true) {
-                const { done, value } = await htmlReader.read();
-                if (done) {
-                  // Process remaining buffer
-                  if (htmlBuf.trim()) {
-                    const remainLines = htmlBuf.split('\n');
-                    for (const line of remainLines) {
-                      const t = line.trim();
-                      if (t.startsWith('data: ')) {
-                        const d = t.slice(6).trim();
-                        if (d === '[DONE]') continue;
-                        try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
-                      }
-                    }
-                  }
-                  break;
-                }
-                chunkCount++;
-                htmlBuf += htmlDecoder.decode(value, { stream: true });
-                const htmlLines = htmlBuf.split('\n');
-                htmlBuf = htmlLines.pop() || '';
-                for (const line of htmlLines) {
-                  const t = line.trim();
-                  if (t.startsWith('data: ')) {
-                    const d = t.slice(6).trim();
-                    if (d === '[DONE]') continue;
-                    try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
-                  }
-                }
-              }
-              console.log(`[agent:chat:html] Stream finished. chunks=${chunkCount}, htmlLength=${htmlContent.length}`);
-              // ── Sanitize: strip LLM preamble/postamble and markdown fences ──
-              const sanitizeHtml = (raw: string): string => {
-                let s = raw.trim();
-                // Remove opening ```html or ``` fence and everything before <style or <div
-                s = s.replace(/^```html\s*/i, '').replace(/^```\s*/, '');
-                // Find first real HTML tag
-                const firstTag = Math.min(
-                  s.indexOf('<style') >= 0 ? s.indexOf('<style') : Infinity,
-                  s.indexOf('<div')   >= 0 ? s.indexOf('<div')   : Infinity,
-                );
-                if (firstTag > 0 && firstTag < Infinity) s = s.slice(firstTag);
-                // Remove trailing ``` fence
-                s = s.replace(/\n?```\s*$/, '').trim();
-                return s;
-              };
-              htmlContent = sanitizeHtml(htmlContent);
-              if (htmlContent.length > 100) {
-                // Compute frontend-compatible message index
-                const msgCount = await prisma.chatMessage.count({ where: { sessionId } });
-                const msgIdx = msgCount - 1;
-                console.log(`[agent:chat:html] msgCount=${msgCount}, msgIdx=${msgIdx}`);
-                // Update DB metadata with htmlReport
-                const lastMsg = await prisma.chatMessage.findFirst({ where: { sessionId, role: 'assistant' }, orderBy: { createdAt: 'desc' } });
-                if (lastMsg) {
-                  const existingMeta = lastMsg.metadata ? JSON.parse(lastMsg.metadata as string) : {};
-                  existingMeta.htmlReport = htmlContent;
-                  await prisma.chatMessage.update({ where: { id: lastMsg.id }, data: { metadata: JSON.stringify(existingMeta) } });
-                  console.log(`[agent:chat:html] DB updated with htmlReport`);
-                }
-                emitToUser(userId, 'agent:chat:html_ready', { sessionId, msgIdx, html: htmlContent });
-                console.log(`[agent:chat:html] ✅ HTML report emitted for session ${sessionId}, msgIdx=${msgIdx}, length=${htmlContent.length}`);
-              } else {
-                console.log(`[agent:chat:html] ⚠️ HTML content too short (${htmlContent.length}), skipping`);
-              }
-            } catch (htmlErr: any) {
-              console.error('[agent:chat:html] ❌ HTML report generation failed:', htmlErr.message);
-            }
-          })();
+          console.log(`[agent:chat:html] Starting SEQUENTIAL HTML generation for roundtable, input length=${finalDbContent.length}`);
+          try {
+            const htmlContent = await runHtmlGeneration(finalDbContent);
+            await emitHtmlResult(htmlContent);
+          } catch (htmlErr: any) {
+            console.error('[agent:chat:html] ❌ Roundtable HTML generation failed:', htmlErr.message);
+          }
         }
       } catch (err: any) {
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));

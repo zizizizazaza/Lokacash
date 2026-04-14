@@ -571,11 +571,12 @@ export const MOCK_REQUESTS = [
 ];
 
 
-export const navItems = [
-  { key: Page.CHATS, icon: I.Chat, label: 'Community', anim: 'nav-chat' },
-  { key: Page.CONTACTS, icon: I.People, label: 'Contacts', anim: 'nav-sparkle' },
-  { key: Page.DISCOVER, icon: I.Compass, label: 'Discover', anim: 'nav-compass' },
-  { key: Page.INVEST, icon: I.Market, label: 'Market', anim: 'nav-market' },
+export const navItems: { key: Page; icon: any; label: string; anim: string }[] = [
+  // Hidden for now — only Super Agent is active
+  // { key: Page.CHATS, icon: I.Chat, label: 'Community', anim: 'nav-chat' },
+  // { key: Page.CONTACTS, icon: I.People, label: 'Contacts', anim: 'nav-sparkle' },
+  // { key: Page.DISCOVER, icon: I.Compass, label: 'Discover', anim: 'nav-compass' },
+  // { key: Page.INVEST, icon: I.Market, label: 'Market', anim: 'nav-market' },
 ];
 
 export const PAGE_PATHS: Record<string, string> = {
