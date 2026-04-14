@@ -2488,6 +2488,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     setMessages(
                         history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
                             let sources: SearchSource[] | undefined;
+                            const userImages = m.role === 'user' ? parseUserImagesFromMetadata(m.metadata) : [];
                             if (m.metadata) {
                                 try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
                             }
@@ -2496,6 +2497,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                 content: m.content || '',
                                 timestamp: new Date(m.createdAt).toLocaleTimeString(),
                                 isStreaming: false,
+                                images: userImages.length > 0 ? userImages : undefined,
                                 metadata: m.metadata ?? null,
                                 sources,
                             };
