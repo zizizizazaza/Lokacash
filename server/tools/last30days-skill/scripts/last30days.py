@@ -20,9 +20,11 @@ import argparse
 import atexit
 import json
 import os
+import re
 import signal
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +83,18 @@ def parse_search_flag(search_str: str) -> set:
         print("Error: --search requires at least one source.", file=sys.stderr)
         sys.exit(1)
     return sources
+
+
+def _timing_emit(stage: str, started_at: float, **extra):
+    """Emit a structured timing line to stderr."""
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    extra_kv = " ".join(f"{k}={v}" for k, v in extra.items())
+    sys.stderr.write(
+        f"[TIMING] stage={stage} elapsed_s={elapsed_ms/1000:.3f}"
+        + (f" {extra_kv}" if extra_kv else "")
+        + "\n"
+    )
+    sys.stderr.flush()
 
 
 def register_child_pid(pid: int):
@@ -315,6 +329,53 @@ def _search_reddit(
     return reddit_items, raw_response, reddit_error, used_scrapecreators
 
 
+def _emit_bird_raw_hint(raw) -> None:
+    """Log Bird subprocess JSON shape (not full payload — avoids huge stderr)."""
+    try:
+        if isinstance(raw, list):
+            sys.stderr.write(f"[BirdRaw] shape=list len={len(raw)}\n")
+            if raw and isinstance(raw[0], dict):
+                sys.stderr.write(f"[BirdRaw] first_item_keys={list(raw[0].keys())[:24]}\n")
+        elif isinstance(raw, dict):
+            if raw.get("error"):
+                sys.stderr.write(f"[BirdRaw] shape=dict error={raw.get('error')!r}\n")
+            else:
+                sys.stderr.write(f"[BirdRaw] shape=dict keys={list(raw.keys())[:20]}\n")
+        elif raw is None:
+            sys.stderr.write("[BirdRaw] shape=null\n")
+        else:
+            sys.stderr.write(f"[BirdRaw] shape={type(raw).__name__}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _emit_bird_items_preview(items: list, max_show: int = 5, text_chars: int = 160) -> None:
+    """Log normalized X items after parse_bird_response (truncated)."""
+    try:
+        if not items:
+            sys.stderr.write("[BirdPreview] normalized_items=0\n")
+            sys.stderr.flush()
+            return
+        n = len(items)
+        show = min(max_show, n)
+        sys.stderr.write(f"[BirdPreview] normalized_items={n} showing_first={show}\n")
+        for i, it in enumerate(items[:show]):
+            url = (it.get("url") or "")[:220]
+            ah = it.get("author_handle") or ""
+            dt = it.get("date") or ""
+            tid = it.get("id") or ""
+            txt = (it.get("text") or "").replace("\n", " ").strip()
+            if len(txt) > text_chars:
+                txt = txt[: text_chars - 1] + "…"
+            sys.stderr.write(f"[BirdPreview] [{i + 1}] @{ah} date={dt} id={tid}\n")
+            sys.stderr.write(f"[BirdPreview] [{i + 1}] url={url}\n")
+            sys.stderr.write(f"[BirdPreview] [{i + 1}] text={txt!r}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _search_x(
     topic: str,
     config: dict,
@@ -325,10 +386,10 @@ def _search_x(
     mock: bool,
     x_source: str = "xai",
 ) -> tuple:
-    """Search X via Bird CLI or xAI (runs in thread).
+    """Search X via ScrapeCreators, Bird CLI, or xAI (runs in thread).
 
     Args:
-        x_source: 'bird' or 'xai' - which backend to use
+        x_source: 'scrapecreators', 'bird', or 'xai' - which backend to use
 
     Returns:
         Tuple of (x_items, raw_response, error)
@@ -336,9 +397,34 @@ def _search_x(
     raw_response = None
     x_error = None
 
+    def _emit_x_diag(source: str, topic_text: str, response: object, items_count: int, err: str | None):
+        try:
+            base = (
+                f"[XDiag] source={source} topic={topic_text!r} items={items_count} "
+                f"error={err or 'none'}"
+            )
+            if isinstance(response, list):
+                base += f" bird_raw_list_len={len(response)}"
+            elif isinstance(response, dict):
+                debug = response.get("sc_debug")
+                if isinstance(debug, dict):
+                    base += (
+                        f" status={debug.get('status_code')}"
+                        f" raw={debug.get('raw_count')}"
+                        f" after_limit={debug.get('after_limit_count')}"
+                        f" kept={debug.get('kept_count')}"
+                        f" core_topic={debug.get('core_topic')!r}"
+                        f" range={debug.get('from_date')}~{debug.get('to_date')}"
+                    )
+            sys.stderr.write(base + "\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
     if mock:
         raw_response = load_fixture("xai_sample.json")
         x_items = xai_x.parse_x_response(raw_response or {})
+        _emit_x_diag("mock-xai", topic, raw_response or {}, len(x_items), x_error)
         return x_items, raw_response, x_error
 
     # Use Bird if specified
@@ -360,6 +446,9 @@ def _search_x(
         if raw_response and isinstance(raw_response, dict) and raw_response.get("error") and not x_error:
             x_error = raw_response["error"]
 
+        _emit_bird_raw_hint(raw_response)
+        _emit_bird_items_preview(x_items, max_show=5, text_chars=160)
+        _emit_x_diag("bird", topic, raw_response if raw_response is not None else {}, len(x_items), x_error)
         return x_items, raw_response, x_error
 
     # Use ScrapeCreators if specified
@@ -379,6 +468,7 @@ def _search_x(
         if raw_response and isinstance(raw_response, dict) and raw_response.get("error") and not x_error:
             x_error = raw_response["error"]
 
+        _emit_x_diag("scrapecreators", topic, raw_response or {}, len(x_items), x_error)
         return x_items, raw_response, x_error
 
     # Use xAI (original behavior)
@@ -399,6 +489,7 @@ def _search_x(
         x_error = f"{type(e).__name__}: {e}"
 
     x_items = xai_x.parse_x_response(raw_response or {})
+    _emit_x_diag("xai", topic, raw_response or {}, len(x_items), x_error)
 
     return x_items, raw_response, x_error
 
@@ -727,7 +818,7 @@ def _run_supplemental(
         from_date: Start date
         to_date: End date
         depth: Research depth
-        x_source: 'bird' or 'xai'
+        x_source: 'scrapecreators', 'bird', or 'xai'
         progress: Optional progress display
         skip_reddit: If True, skip Reddit supplemental (e.g. rate-limited)
         resolved_handle: X handle resolved by the agent (without @), searched unfiltered
@@ -909,6 +1000,14 @@ def run_research(
     (i.e., no native web search API keys are configured). When native web search
     runs, web_items will be populated and web_needed will be False.
     """
+    run_started_at = time.perf_counter()
+    stage_costs: list[tuple[str, float]] = []
+
+    def stage_done(name: str, started_at: float, **extra):
+        elapsed_s = time.perf_counter() - started_at
+        stage_costs.append((name, elapsed_s))
+        _timing_emit(f"run_research.{name}", started_at, **extra)
+
     if timeouts is None:
         timeouts = TIMEOUT_PROFILES[depth]
     future_timeout = timeouts["future"]
@@ -1051,6 +1150,7 @@ def run_research(
         + (1 if web_backend else 0)
     )
 
+    submit_started_at = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit searches
         if do_reddit:
@@ -1127,10 +1227,27 @@ def run_research(
             web_future = executor.submit(
                 _search_web, topic, config, from_date, to_date, depth
             )
+        stage_done(
+            "submit_futures",
+            submit_started_at,
+            workers=max_workers,
+            do_reddit=do_reddit,
+            do_x=do_x,
+            run_youtube=run_youtube,
+            run_tiktok=run_tiktok,
+            run_instagram=run_instagram,
+            run_xiaohongshu=run_xiaohongshu,
+            do_hackernews=do_hackernews,
+            do_bluesky=do_bluesky,
+            do_truthsocial=do_truthsocial,
+            do_polymarket=do_polymarket,
+            web_backend=web_backend or "none",
+        )
 
         # Collect results (with timeouts to prevent indefinite blocking)
         reddit_used_sc = False  # Track if ScrapeCreators was used for Reddit
         if reddit_future:
+            s = time.perf_counter()
             reddit_timeout = timeouts.get("reddit_future", future_timeout)
             try:
                 reddit_items, raw_openai, reddit_error, reddit_used_sc = reddit_future.result(timeout=reddit_timeout)
@@ -1146,8 +1263,10 @@ def run_research(
                     progress.show_error(f"Reddit error: {e}")
             if progress:
                 progress.end_reddit(len(reddit_items))
+            stage_done("wait_reddit", s, count=len(reddit_items), timeout_s=reddit_timeout)
 
         if x_future:
+            s = time.perf_counter()
             try:
                 x_items, raw_xai, x_error = x_future.result(timeout=future_timeout)
                 if x_error and progress:
@@ -1162,8 +1281,10 @@ def run_research(
                     progress.show_error(f"X error: {e}")
             if progress:
                 progress.end_x(len(x_items))
+            stage_done("wait_x", s, count=len(x_items), timeout_s=future_timeout)
 
         if youtube_future:
+            s = time.perf_counter()
             yt_timeout = timeouts.get("youtube_future", future_timeout)
             try:
                 youtube_items, youtube_error = youtube_future.result(timeout=yt_timeout)
@@ -1179,8 +1300,10 @@ def run_research(
                     progress.show_error(f"YouTube error: {e}")
             if progress:
                 progress.end_youtube(len(youtube_items))
+            stage_done("wait_youtube", s, count=len(youtube_items), timeout_s=yt_timeout)
 
         if tiktok_future:
+            s = time.perf_counter()
             tk_timeout = timeouts.get("tiktok_future", future_timeout)
             try:
                 tiktok_items, tiktok_error = tiktok_future.result(timeout=tk_timeout)
@@ -1196,8 +1319,10 @@ def run_research(
                     progress.show_error(f"TikTok error: {e}")
             if progress:
                 progress.end_tiktok(len(tiktok_items))
+            stage_done("wait_tiktok", s, count=len(tiktok_items), timeout_s=tk_timeout)
 
         if instagram_future:
+            s = time.perf_counter()
             ig_timeout = timeouts.get("instagram_future", future_timeout)
             try:
                 instagram_items, instagram_error = instagram_future.result(timeout=ig_timeout)
@@ -1213,8 +1338,10 @@ def run_research(
                     progress.show_error(f"Instagram error: {e}")
             if progress:
                 progress.end_instagram(len(instagram_items))
+            stage_done("wait_instagram", s, count=len(instagram_items), timeout_s=ig_timeout)
 
         if xiaohongshu_future:
+            s = time.perf_counter()
             try:
                 xhs_items, xiaohongshu_error = xiaohongshu_future.result(timeout=future_timeout)
                 web_items.extend(xhs_items)
@@ -1228,8 +1355,10 @@ def run_research(
                 xiaohongshu_error = f"{type(e).__name__}: {e}"
                 if progress:
                     progress.show_error(f"Xiaohongshu error: {e}")
+            stage_done("wait_xiaohongshu", s, count=len(web_items), timeout_s=future_timeout)
 
         if hackernews_future:
+            s = time.perf_counter()
             hn_timeout = timeouts.get("hackernews_future", future_timeout)
             try:
                 hackernews_items, hackernews_error = hackernews_future.result(timeout=hn_timeout)
@@ -1245,8 +1374,10 @@ def run_research(
                     progress.show_error(f"HN error: {e}")
             if progress:
                 progress.end_hackernews(len(hackernews_items))
+            stage_done("wait_hackernews", s, count=len(hackernews_items), timeout_s=hn_timeout)
 
         if bluesky_future:
+            s = time.perf_counter()
             bsky_timeout = timeouts.get("bluesky_future", future_timeout)
             try:
                 bluesky_items, bluesky_error = bluesky_future.result(timeout=bsky_timeout)
@@ -1260,8 +1391,10 @@ def run_research(
                 bluesky_error = f"{type(e).__name__}: {e}"
                 if progress:
                     progress.show_error(f"Bluesky error: {e}")
+            stage_done("wait_bluesky", s, count=len(bluesky_items), timeout_s=bsky_timeout)
 
         if truthsocial_future:
+            s = time.perf_counter()
             ts_timeout = timeouts.get("truthsocial_future", future_timeout)
             try:
                 truthsocial_items, truthsocial_error = truthsocial_future.result(timeout=ts_timeout)
@@ -1275,8 +1408,10 @@ def run_research(
                 truthsocial_error = f"{type(e).__name__}: {e}"
                 if progress:
                     progress.show_error(f"Truth Social error: {e}")
+            stage_done("wait_truthsocial", s, count=len(truthsocial_items), timeout_s=ts_timeout)
 
         if polymarket_future:
+            s = time.perf_counter()
             pm_timeout = timeouts.get("polymarket_future", future_timeout)
             try:
                 polymarket_items, polymarket_error = polymarket_future.result(timeout=pm_timeout)
@@ -1292,8 +1427,10 @@ def run_research(
                     progress.show_error(f"Polymarket error: {e}")
             if progress:
                 progress.end_polymarket(len(polymarket_items))
+            stage_done("wait_polymarket", s, count=len(polymarket_items), timeout_s=pm_timeout)
 
         if web_future:
+            s = time.perf_counter()
             try:
                 web_items, web_error = web_future.result(timeout=future_timeout)
                 if web_error and progress:
@@ -1308,6 +1445,7 @@ def run_research(
                     progress.show_error(f"Web error: {e}")
             sys.stderr.write(f"[web] {len(web_items)} results\n")
             sys.stderr.flush()
+            stage_done("wait_web", s, count=len(web_items), timeout_s=future_timeout)
 
     # Enrich Reddit items with real data (parallel, capped)
     # Skip enrichment if ScrapeCreators already provided comments + engagement
@@ -1324,6 +1462,7 @@ def run_research(
         items_to_enrich = []  # Skip the enrichment block below
 
     if items_to_enrich:
+        s = time.perf_counter()
         if progress:
             progress.start_reddit_enrich(1, len(items_to_enrich))
 
@@ -1386,19 +1525,23 @@ def run_research(
 
         if progress:
             progress.end_reddit_enrich()
+        stage_done("reddit_enrich", s, enriched=min(len(items_to_enrich), len(raw_reddit_enriched)))
 
     # Enrich HN stories with comments
     if hackernews_items:
+        s = time.perf_counter()
         try:
             hackernews_items = hackernews.enrich_top_stories(hackernews_items, depth=depth)
         except Exception as e:
             sys.stderr.write(f"[HN] Enrichment error: {e}\n")
             sys.stderr.flush()
+        stage_done("hackernews_enrich", s, count=len(hackernews_items))
 
     # Phase 2: Supplemental search based on entities from Phase 1
     # Skip on --quick (speed matters), mock mode, or if Reddit is rate-limiting
     # Also skip Reddit supplemental when ScrapeCreators was used (subreddit drilling already done)
     if depth != "quick" and not mock and (reddit_items or x_items):
+        s = time.perf_counter()
         sup_reddit, sup_x = _run_supplemental(
             topic, reddit_items, x_items,
             from_date, to_date, depth, x_source, progress,
@@ -1409,11 +1552,20 @@ def run_research(
             reddit_items.extend(sup_reddit)
         if sup_x:
             x_items.extend(sup_x)
+        stage_done("phase2_supplemental", s, add_reddit=len(sup_reddit), add_x=len(sup_x))
+
+    # Top spenders summary for quick bottleneck reading.
+    if stage_costs:
+        top = sorted(stage_costs, key=lambda x: x[1], reverse=True)[:8]
+        top_fmt = ", ".join(f"{name}:{sec:.3f}s" for name, sec in top)
+        _timing_emit("run_research.top_stages", run_started_at, top=top_fmt)
+    _timing_emit("run_research.total", run_started_at, topic=topic, depth=depth)
 
     return reddit_items, x_items, youtube_items, tiktok_items, instagram_items, hackernews_items, bluesky_items, truthsocial_items, polymarket_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, tiktok_error, instagram_error, hackernews_error, bluesky_error, truthsocial_error, polymarket_error, web_error
 
 
 def main():
+    main_started_at = time.perf_counter()
     # Fix Unicode output on Windows (cp1252 can't encode emoji)
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1773,7 +1925,53 @@ def main():
         else:
             sources = "web"  # hn/polymarket only; no Reddit/X
 
+    # Source plan diagnostics: show why some sources are not active.
+    def _source_reason(source: str, available_flag: bool, enabled_flag: bool) -> str:
+        if args.search:
+            requested = (
+                source in search_sources
+                or (source == "bluesky" and "bsky" in search_sources)
+                or (source == "truthsocial" and "truth" in search_sources)
+            )
+            if not requested:
+                return "disabled_by_search_flag"
+        if not available_flag:
+            return "not_available_or_missing_key"
+        if not enabled_flag:
+            return f"disabled_by_query_type:{query_type}"
+        return "enabled"
+
+    has_scrapecreators = bool(config.get("SCRAPECREATORS_API_KEY"))
+    planned_reddit = sources in ("both", "reddit", "all", "reddit-web")
+    planned_x = sources in ("both", "x", "all", "x-web")
+    planned_web = sources in ("all", "web", "reddit-web", "x-web")
+
+    tiktok_reason = _source_reason("tiktok", has_tiktok, search_run_tiktok)
+    instagram_reason = _source_reason("instagram", has_instagram, search_run_instagram)
+    youtube_reason = _source_reason("youtube", has_ytdlp, search_run_youtube)
+    bluesky_reason = _source_reason("bluesky", has_bluesky, search_do_bluesky)
+    truthsocial_reason = _source_reason("truthsocial", has_truthsocial, search_do_truthsocial)
+    polymarket_reason = _source_reason("polymarket", True, search_do_polymarket)
+
+    sys.stderr.write(
+        f"[SourcePlan] query_type={query_type} mode={sources} "
+        f"reddit_source={env.get_reddit_source(config) or 'none'} "
+        f"x_source={x_source or 'none'} web_backend={(env.get_web_search_source(config) or 'none')} "
+        f"scrapecreators={'yes' if has_scrapecreators else 'no'}\n"
+    )
+    sys.stderr.write(
+        f"[SourcePlan] enabled reddit={planned_reddit} x={planned_x} web={planned_web} "
+        f"youtube={search_run_youtube}({youtube_reason}) "
+        f"tiktok={search_run_tiktok}({tiktok_reason}) "
+        f"instagram={search_run_instagram}({instagram_reason}) "
+        f"bluesky={search_do_bluesky}({bluesky_reason}) "
+        f"truthsocial={search_do_truthsocial}({truthsocial_reason}) "
+        f"polymarket={search_do_polymarket}({polymarket_reason})\n"
+    )
+    sys.stderr.flush()
+
     # Run research
+    search_started_at = time.perf_counter()
     reddit_items, x_items, youtube_items, tiktok_items, instagram_items, hackernews_items, bluesky_items, truthsocial_items, polymarket_items, web_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error, youtube_error, tiktok_error, instagram_error, hackernews_error, bluesky_error, truthsocial_error, polymarket_error, web_error = run_research(
         args.topic,
         sources,
@@ -1797,8 +1995,23 @@ def main():
         do_polymarket=search_do_polymarket,
         no_native_web=args.no_native_web,
     )
+    _timing_emit(
+        "main.run_research",
+        search_started_at,
+        reddit=len(reddit_items),
+        x=len(x_items),
+        youtube=len(youtube_items),
+        tiktok=len(tiktok_items),
+        instagram=len(instagram_items),
+        hn=len(hackernews_items),
+        bluesky=len(bluesky_items),
+        truthsocial=len(truthsocial_items),
+        polymarket=len(polymarket_items),
+        web=len(web_items),
+    )
 
     # Processing phase
+    processing_started_at = time.perf_counter()
     progress.start_processing()
 
     # Normalize items
@@ -1885,6 +2098,22 @@ def main():
     )
 
     progress.end_processing()
+    _timing_emit(
+        "main.processing",
+        processing_started_at,
+        deduped_total=(
+            len(deduped_reddit)
+            + len(deduped_x)
+            + len(deduped_youtube)
+            + len(deduped_tiktok)
+            + len(deduped_ig)
+            + len(deduped_hn)
+            + len(deduped_bsky)
+            + len(deduped_ts)
+            + len(deduped_pm)
+            + len(deduped_web)
+        ),
+    )
 
     # Create report
     report = schema.create_report(
@@ -1921,7 +2150,9 @@ def main():
     report.context_snippet_md = render.render_context_snippet(report)
 
     # Write outputs
+    output_started_at = time.perf_counter()
     render.write_outputs(report, raw_openai, raw_xai, raw_reddit_enriched)
+    _timing_emit("main.write_outputs", output_started_at)
 
     # Show completion
     if sources == "web":
@@ -1935,7 +2166,7 @@ def main():
         if x_source_status["bird_installed"]:
             source_info["x_skip_reason"] = "Bird installed but not authenticated — log into x.com in browser"
         else:
-            source_info["x_skip_reason"] = "No Bird CLI, XAI_API_KEY, or SCRAPECREATORS_API_KEY"
+            source_info["x_skip_reason"] = "No Bird CLI (AUTH_TOKEN/CT0) or XAI_API_KEY"
     if not has_ytdlp:
         source_info["youtube_skip_reason"] = "yt-dlp not installed — fix: brew install yt-dlp"
     elif has_ytdlp and not report.youtube:
@@ -1961,7 +2192,9 @@ def main():
     quality = quality_nudge.compute_quality_score(config, research_results)
 
     # Output result
+    final_output_started_at = time.perf_counter()
     output_result(report, args.emit, web_needed, args.topic, from_date, to_date, missing_keys, args.days, source_info, first_run=first_run, quality=quality)
+    _timing_emit("main.output_result", final_output_started_at, emit=args.emit)
 
     # Auto-save raw research to file if --save-dir is set
     if args.save_dir:
@@ -1981,6 +2214,7 @@ def main():
 
     # Persist findings to SQLite if requested
     if args.store:
+        store_started_at = time.perf_counter()
         import store as store_mod
         store_mod.init_db()
         topic_row = store_mod.add_topic(args.topic)
@@ -2080,6 +2314,9 @@ def main():
             f"[store] Saved {counts['new']} new, {counts['updated']} updated findings\n"
         )
         sys.stderr.flush()
+        _timing_emit("main.store_sqlite", store_started_at, findings=len(findings))
+
+    _timing_emit("main.total", main_started_at, topic=args.topic, depth=depth)
 
 
 def output_result(

@@ -125,6 +125,17 @@ export const researchService = {
       options.days ? `--days=${options.days}` : '--days=30',
     ].filter(Boolean) as string[];
 
+    // last30days --sources: unset/empty → default `x` (skip Reddit; good for X-only testing).
+    // Set LAST30DAYS_SOURCES=auto to restore Reddit + X heuristics, or both / reddit / x explicitly.
+    const rawSources = process.env.LAST30DAYS_SOURCES;
+    const last30daysSources =
+      rawSources === undefined || String(rawSources).trim() === ''
+        ? 'x'
+        : String(rawSources).trim().toLowerCase();
+    if (last30daysSources !== 'auto') {
+      args.push('--sources', last30daysSources);
+    }
+
     if (process.env.EXA_API_KEY) {
       args.push('--include-web');
     }
@@ -135,10 +146,27 @@ export const researchService = {
       timestamp: string;
       extractedSources: SignalSearchSource[];
     }>((resolve, reject) => {
+      const runStartedAt = Date.now();
+      const spawnStartedAt = Date.now();
+      const asSeconds = (ms: number) => (ms / 1000).toFixed(3);
+      const sinceStart = () => Date.now() - runStartedAt;
       const isWin = process.platform === 'win32';
       const pythonExe = isWin ? 'python' : 'python3';
 
       const emitResearchLine = (line: string) => {
+        if (line.includes('[TIMING]')) {
+          console.log(`[researchService:inner] ${line}`);
+        }
+        if (line.includes('[SourcePlan]')) {
+          console.log(`[researchService:plan] ${line}`);
+        }
+        // last30days X/Twitter diagnostics from Python stderr
+        if (line.includes('[XDiag]') || line.includes('[X/SC]')) {
+          console.log(`[researchService:x] ${line}`);
+        }
+        if (line.includes('[Bird]') || line.includes('[BirdRaw]') || line.includes('[BirdPreview]')) {
+          console.log(`[researchService:bird] ${line}`);
+        }
         if (!progress) return;
         if (typeof progress === 'function') progress(line + '\n');
         else progress.onResearchLine?.(line);
@@ -155,24 +183,75 @@ export const researchService = {
         cwd: LAST30DAYS_PATH,
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
       });
+      const spawnedAt = Date.now();
 
       let stdoutData = '';
       let stderrData = '';
       let stderrLineBuf = '';
+      let stdoutChunks = 0;
+      let stderrChunks = 0;
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let stderrLines = 0;
+      let firstStdoutAt: number | null = null;
+      let firstStderrAt: number | null = null;
+      let firstAnyOutputAt: number | null = null;
+      let lastOutputAt: number | null = null;
+
+      const logPythonRunBreakdown = (tag: 'close' | 'timeout' | 'child_error') => {
+        const now = Date.now();
+        const baseEnd = tag === 'close' ? now : now;
+        const firstOutAt = firstAnyOutputAt;
+        const startupToSpawn = spawnedAt - spawnStartedAt;
+        const startupToFirstOut = firstOutAt ? firstOutAt - spawnedAt : null;
+        const startupToFirstStdout = firstStdoutAt ? firstStdoutAt - spawnedAt : null;
+        const startupToFirstStderr = firstStderrAt ? firstStderrAt - spawnedAt : null;
+        const streamWindow =
+          firstOutAt && lastOutputAt && lastOutputAt >= firstOutAt ? lastOutputAt - firstOutAt : null;
+        const quietTail = lastOutputAt ? baseEnd - lastOutputAt : null;
+
+        console.log(
+          `[researchService:timing] python_run_breakdown tag=${tag} topic="${topic}"` +
+            ` spawn_boot_s=${asSeconds(startupToSpawn)}` +
+            ` first_output_s=${startupToFirstOut != null ? asSeconds(startupToFirstOut) : 'n/a'}` +
+            ` first_stdout_s=${startupToFirstStdout != null ? asSeconds(startupToFirstStdout) : 'n/a'}` +
+            ` first_stderr_s=${startupToFirstStderr != null ? asSeconds(startupToFirstStderr) : 'n/a'}` +
+            ` stream_window_s=${streamWindow != null ? asSeconds(streamWindow) : 'n/a'}` +
+            ` quiet_tail_s=${quietTail != null ? asSeconds(quietTail) : 'n/a'}` +
+            ` stdout_chunks=${stdoutChunks} stdout_bytes=${stdoutBytes}` +
+            ` stderr_chunks=${stderrChunks} stderr_bytes=${stderrBytes} stderr_lines=${stderrLines}`,
+        );
+      };
 
       child.stdout.on('data', (data) => {
-        stdoutData += data.toString();
+        const now = Date.now();
+        const text = data.toString();
+        stdoutData += text;
+        stdoutChunks += 1;
+        stdoutBytes += Buffer.byteLength(text);
+        if (!firstStdoutAt) firstStdoutAt = now;
+        if (!firstAnyOutputAt) firstAnyOutputAt = now;
+        lastOutputAt = now;
       });
 
       child.stderr.on('data', (data) => {
+        const now = Date.now();
         const text = data.toString();
         stderrData += text;
         stderrLineBuf += text;
+        stderrChunks += 1;
+        stderrBytes += Buffer.byteLength(text);
+        if (!firstStderrAt) firstStderrAt = now;
+        if (!firstAnyOutputAt) firstAnyOutputAt = now;
+        lastOutputAt = now;
         const parts = stderrLineBuf.split(/\r?\n/);
         stderrLineBuf = parts.pop() ?? '';
         for (const raw of parts) {
           const line = raw.trim();
-          if (line) emitResearchLine(line);
+          if (line) {
+            stderrLines += 1;
+            emitResearchLine(line);
+          }
         }
       });
 
@@ -180,25 +259,40 @@ export const researchService = {
       const timeoutSec = options.deep ? 300 : 180;
       const timer = setTimeout(() => {
         child.kill('SIGTERM');
+        logPythonRunBreakdown('timeout');
         reject(new Error(`Timeout after ${timeoutSec} seconds`));
       }, timeoutSec * 1000);
 
       child.on('close', async (code) => {
+        const childClosedAt = Date.now();
         clearTimeout(timer);
         if (stderrLineBuf.trim()) {
           emitResearchLine(stderrLineBuf.trim());
           stderrLineBuf = '';
         }
+        console.log(
+          `[researchService:timing] python_run_s=${asSeconds(childClosedAt - runStartedAt)} total_s=${asSeconds(
+            sinceStart(),
+          )} topic="${topic}"`,
+        );
+        logPythonRunBreakdown('close');
         if (code !== 0) {
           console.error('[researchService] Execution error:', stderrData);
           return reject(new Error(`Script exited with code ${code}:\n${stderrData}`));
         }
 
+        const parseStartedAt = Date.now();
         let finalSummary = stdoutData.trim();
         const extractedSources = sourcesFromLast30DaysCompact(stdoutData);
+        console.log(
+          `[researchService:timing] parse_output_s=${asSeconds(Date.now() - parseStartedAt)} total_s=${asSeconds(
+            sinceStart(),
+          )} topic="${topic}" sources=${extractedSources.length} stdout_len=${stdoutData.length}`,
+        );
 
         // Optional AI synthesis — tokens go to emitSynthToken only (main chat stream); status lines → research log
         if (process.env.LOKA_AI_API_KEY && process.env.LOKA_AI_BASE_URL && process.env.LOKA_AI_MODEL) {
+          const aiSynthesisStartedAt = Date.now();
           try {
             emitResearchLine('⏳ AI Synthesis：Generating final report…');
 
@@ -242,6 +336,7 @@ ${finalSummary}`,
               process.env.LOKA_AI_STREAM !== 'false' && process.env.LOKA_AI_STREAM !== '0';
 
             const runNonStreamSynthesis = async () => {
+              const nonStreamStartedAt = Date.now();
               const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: {
@@ -260,6 +355,11 @@ ${finalSummary}`,
                 if (data.choices && data.choices[0]?.message?.content) {
                   finalSummary = data.choices[0].message.content.trim();
                   emitResearchLine('✓ AI Synthesis：Report generated (non-streaming)');
+                  console.log(
+                    `[researchService:timing] ai_nonstream_s=${asSeconds(
+                      Date.now() - nonStreamStartedAt,
+                    )} total_s=${asSeconds(sinceStart())} topic="${topic}"`,
+                  );
                   return true;
                 }
               } else {
@@ -267,10 +367,16 @@ ${finalSummary}`,
                 console.error('[researchService] AI Synthesis API error:', errText);
                 emitResearchLine(`❌ AI Synthesis API Error (${response.status}). Using original search results.`);
               }
+              console.log(
+                `[researchService:timing] ai_nonstream_s=${asSeconds(
+                  Date.now() - nonStreamStartedAt,
+                )} total_s=${asSeconds(sinceStart())} topic="${topic}" success=false`,
+              );
               return false;
             };
 
             if (wantStream) {
+              const streamStartedAt = Date.now();
               try {
                 finalSummary = await streamChatCompletion(
                   apiUrl,
@@ -282,21 +388,49 @@ ${finalSummary}`,
                   120000,
                 );
                 emitResearchLine('✓ AI Synthesis：Streaming generation completed');
+                console.log(
+                  `[researchService:timing] ai_stream_s=${asSeconds(
+                    Date.now() - streamStartedAt,
+                  )} total_s=${asSeconds(sinceStart())} topic="${topic}"`,
+                );
               } catch (streamErr: any) {
                 console.warn('[researchService] AI Synthesis streaming failed, using non-stream:', streamErr?.message);
+                console.log(
+                  `[researchService:timing] ai_stream_s=${asSeconds(
+                    Date.now() - streamStartedAt,
+                  )} total_s=${asSeconds(sinceStart())} topic="${topic}" fallback=nonstream`,
+                );
                 await runNonStreamSynthesis();
               }
             } else {
               await runNonStreamSynthesis();
             }
+            console.log(
+              `[researchService:timing] ai_synthesis_total_s=${asSeconds(
+                Date.now() - aiSynthesisStartedAt,
+              )} total_s=${asSeconds(sinceStart())} topic="${topic}"`,
+            );
           } catch (err: any) {
             console.error('[researchService] AI Synthesis exception:', err);
             emitResearchLine('❌ AI Synthesis network error, using original search results.');
+            console.log(
+              `[researchService:timing] ai_synthesis_total_s=${asSeconds(
+                Date.now() - aiSynthesisStartedAt,
+              )} total_s=${asSeconds(sinceStart())} topic="${topic}" error=true`,
+            );
           }
         }
 
+        const finalCleanStartedAt = Date.now();
+        const cleanedSummary = stripInternalResearchCitations(finalSummary);
+        console.log(
+          `[researchService:timing] finalize_summary_s=${asSeconds(
+            Date.now() - finalCleanStartedAt,
+          )} total_s=${asSeconds(sinceStart())} topic="${topic}" final_len=${cleanedSummary.length}`,
+        );
+
         resolve({
-          summary: stripInternalResearchCitations(finalSummary),
+          summary: cleanedSummary,
           topic,
           timestamp: new Date().toISOString(),
           extractedSources,
@@ -305,6 +439,10 @@ ${finalSummary}`,
       
       child.on('error', (err) => {
         clearTimeout(timer);
+        console.log(
+          `[researchService:timing] child_error_after_s=${asSeconds(sinceStart())} topic="${topic}"`,
+        );
+        logPythonRunBreakdown('child_error');
         reject(err);
       });
     });

@@ -445,8 +445,8 @@ def get_reddit_source(config: Dict[str, Any]) -> Optional[str]:
 def get_available_sources(config: Dict[str, Any]) -> str:
     """Determine which sources are available.
 
-    X is available if ANY auth method works: AUTH_TOKEN/CT0 (env or cookies),
-    XAI_API_KEY, or Bird installed+authenticated.
+    X is available if Bird (AUTH_TOKEN/CT0 env or cookies) or XAI_API_KEY works.
+    SCRAPECREATORS_API_KEY does not count toward X availability.
     Reddit is always available (public JSON fallback).
     HN and Polymarket are always available.
     YouTube available if yt-dlp installed.
@@ -500,6 +500,7 @@ def get_missing_keys(config: Dict[str, Any]) -> str:
     from . import bird_x
     has_bird = bird_x.is_bird_installed() and bird_x.is_bird_authenticated()
 
+    # X/Twitter: Bird or xAI only (SC key is not used as the X backend).
     has_x = has_xai or has_bird
 
     if has_reddit and has_x and has_web:
@@ -585,6 +586,8 @@ def get_x_source(config: Dict[str, Any]) -> Optional[str]:
       3. XAI_API_KEY → xAI with method "api"
       4. None
 
+    SCRAPECREATORS_API_KEY is not used as the X/Twitter backend (Reddit/TikTok/Instagram only).
+
     Use get_x_source_with_method() to also get the method string.
 
     Args:
@@ -607,6 +610,8 @@ def get_x_source_with_method(config: Dict[str, Any]) -> tuple[Optional[str], Opt
       2. AUTH_TOKEN/CT0 (browser cookies) → Bird with method "browser-{browser}"
       3. XAI_API_KEY → xAI with method "api"
       4. None
+
+    SCRAPECREATORS_API_KEY is intentionally not used for X (use Bird/xAI for keyword search).
 
     Args:
         config: Configuration dict from get_config()
@@ -769,6 +774,7 @@ def get_x_source_status(config: Dict[str, Any]) -> Dict[str, Any]:
 
     setup_complete = config.get('SETUP_COMPLETE')
     xai_available = bool(config.get('XAI_API_KEY'))
+    scrapecreators_available = bool(config.get('SCRAPECREATORS_API_KEY'))
 
     if not setup_complete:
         # Before consent: do NOT call get_bird_status() which probes cookies.
@@ -787,6 +793,7 @@ def get_x_source_status(config: Dict[str, Any]) -> Dict[str, Any]:
             "bird_authenticated": bird_authenticated,
             "bird_username": None if not bird_authenticated else "env AUTH_TOKEN",
             "xai_available": xai_available,
+            "scrapecreators_available": scrapecreators_available,
             "can_install_bird": True,
         }
 
@@ -803,5 +810,6 @@ def get_x_source_status(config: Dict[str, Any]) -> Dict[str, Any]:
         "bird_authenticated": bird_status["authenticated"],
         "bird_username": bird_status["username"],
         "xai_available": xai_available,
+        "scrapecreators_available": scrapecreators_available,
         "can_install_bird": bird_status["can_install"],
     }

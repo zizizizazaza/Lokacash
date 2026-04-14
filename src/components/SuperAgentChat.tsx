@@ -9,6 +9,7 @@ import { api } from '../services/api';
 import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
+import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCompression';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -98,10 +99,42 @@ interface Message {
     content: string;
     timestamp: string;
     isStreaming?: boolean;
+    images?: ChatImagePayload[];
     /** From DB; used to restore Thinking Process when reopening a session */
     metadata?: string | null;
     /** Verified source URLs extracted from research data */
     sources?: SearchSource[];
+}
+
+interface ChatImagePayload {
+    url: string;
+    mime?: string;
+    name?: string;
+}
+
+interface PendingChatImage extends ChatImagePayload {
+    id: string;
+    previewUrl: string;
+    status: 'uploading' | 'uploaded' | 'error';
+}
+
+function parseUserImagesFromMetadata(metadata?: string | null): ChatImagePayload[] {
+    if (!metadata) return [];
+    try {
+        const parsed = JSON.parse(metadata) as { images?: ChatImagePayload[]; archivedImages?: ChatImagePayload[] };
+        const raw = Array.isArray(parsed?.images) && parsed.images.length > 0
+            ? parsed.images
+            : (Array.isArray(parsed?.archivedImages) ? parsed.archivedImages : []);
+        return raw
+            .map(img => ({
+                url: typeof img?.url === 'string' ? img.url.trim() : '',
+                mime: typeof img?.mime === 'string' ? img.mime : undefined,
+                name: typeof img?.name === 'string' ? img.name : undefined,
+            }))
+            .filter(img => img.url.length > 0);
+    } catch {
+        return [];
+    }
 }
 
 interface SearchSource {
@@ -171,7 +204,7 @@ interface ConsensusModuleData {
 }
 
 interface ThinkingModule {
-    type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'done';
+    type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'web3' | 'done';
     status: 'pending' | 'active' | 'completed';
     data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | { duration?: number };
 }
@@ -1290,6 +1323,30 @@ const ThinkingProcessSidePanel: React.FC<{
         );
     };
 
+    // ── Web3 Module Renderer (CoinGecko MCP) ──
+    const Web3Module: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = (mod.data || {}) as { label?: string };
+        const provider = d.label || 'CoinGecko MCP';
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-3">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">Crypto</span>
+                </div>
+                <div className="ml-7 mb-3">
+                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${mod.status === 'completed'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : mod.status === 'active'
+                            ? 'bg-blue-50 text-blue-600 animate-pulse'
+                            : 'bg-gray-50 text-gray-300'
+                        }`}>
+                        {mod.status === 'completed' ? '✓' : mod.status === 'active' ? '⟳' : '·'} {provider}
+                    </span>
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="flex flex-col h-full bg-white">
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
@@ -1321,6 +1378,7 @@ const ThinkingProcessSidePanel: React.FC<{
                         case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
                         case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
                         case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
+                        case 'web3': return <Web3Module key="web3" mod={mod} />;
                         case 'done': return <DoneModule key="done" mod={mod} />;
                         default: return null;
                     }
@@ -1377,6 +1435,7 @@ function summarizeTitle(raw: string): string {
 // ═════════════════════════════════════════════════════════════
 interface SuperAgentChatProps {
     initialMessage: string;
+    initialImages?: ChatImagePayload[];
     onBack: () => void;
     agentCount?: number;
     selectedAgentId?: string;
@@ -1407,7 +1466,15 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     });
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
+    initialMessage,
+    initialImages = [],
+    onBack,
+    agentCount = 2,
+    selectedAgentId,
+    initialSessionId,
+    initialChatMode
+}) => {
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
         try {
@@ -1429,12 +1496,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const p = JSON.parse(raw) as {
                 sessionId?: string;
                 userContent?: string;
+                userImages?: ChatImagePayload[];
                 streaming?: boolean;
             };
             const sid = sessionStorage.getItem(SA_SID_KEY);
-            if (!p?.streaming || !p.userContent || p.sessionId !== sid) return [];
+            const pendingImages = Array.isArray(p.userImages) ? p.userImages : [];
+            if (!p?.streaming || (typeof p.userContent !== 'string' && pendingImages.length === 0) || p.sessionId !== sid) return [];
             return [
-                { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
+                { role: 'user', content: p.userContent || '', images: pendingImages, timestamp: new Date().toLocaleTimeString() },
                 {
                     role: 'assistant',
                     content: '',
@@ -1488,39 +1557,107 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [htmlReports, setHtmlReports] = useState<Record<number, string>>({});
     const [htmlGenerating, setHtmlGenerating] = useState<Record<number, boolean>>({});
     const [msgViewMode, setMsgViewMode] = useState<Record<number, 'docs' | 'web'>>({});
+    const [imagePreview, setImagePreview] = useState<{ images: ChatImagePayload[]; index: number } | null>(null);
+    const htmlPendingTimersRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
     const [agentPickerOpen, setAgentPickerOpen] = useState(false);
     const agentPickerRef = useRef<HTMLDivElement>(null);
     const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
     const voiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const [chatPastedImages, setChatPastedImages] = useState<string[]>([]);
+    const [chatImageAttachments, setChatImageAttachments] = useState<PendingChatImage[]>([]);
     const chatFileRef = useRef<HTMLInputElement>(null);
+    const chatImageAttachmentsRef = useRef<PendingChatImage[]>([]);
+
+    useEffect(() => {
+        chatImageAttachmentsRef.current = chatImageAttachments;
+    }, [chatImageAttachments]);
+
+    useEffect(() => {
+        return () => {
+            for (const img of chatImageAttachmentsRef.current) {
+                URL.revokeObjectURL(img.previewUrl);
+            }
+        };
+    }, []);
+
+    const enqueueChatImages = useCallback((incomingFiles: File[]) => {
+        const availableSlots = Math.max(0, MAX_IMAGES_PER_MESSAGE - chatImageAttachmentsRef.current.length);
+        if (availableSlots <= 0) return;
+        const imageFiles = incomingFiles.filter(file => file.type.startsWith('image/')).slice(0, availableSlots);
+        for (const file of imageFiles) {
+            const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const previewUrl = URL.createObjectURL(file);
+            setChatImageAttachments(prev => [...prev, {
+                id,
+                previewUrl,
+                status: 'uploading' as const,
+                url: '',
+                mime: file.type,
+                name: file.name,
+            }].slice(-MAX_IMAGES_PER_MESSAGE));
+
+            void (async () => {
+                const prepared = await prepareImageForUpload(file);
+                if (!prepared.file) {
+                    throw new Error(prepared.error || 'Image preprocessing failed');
+                }
+                const res = await api.uploadFile(prepared.file);
+                return { res, uploadFile: prepared.file };
+            })()
+                .then(({ res, uploadFile }) => {
+                    if (res.type !== 'image' || !res.url) throw new Error('Invalid image upload response');
+                    setChatImageAttachments(prev => prev.map(item => (
+                        item.id === id
+                            ? { ...item, status: 'uploaded', url: res.url, mime: uploadFile.type || file.type, name: file.name }
+                            : item
+                    )));
+                })
+                .catch(() => {
+                    setChatImageAttachments(prev => prev.map(item => (
+                        item.id === id ? { ...item, status: 'error' } : item
+                    )));
+                });
+        }
+    }, []);
+
+    const removeChatImage = useCallback((id: string) => {
+        setChatImageAttachments(prev => {
+            const target = prev.find(item => item.id === id);
+            if (target) URL.revokeObjectURL(target.previewUrl);
+            return prev.filter(item => item.id !== id);
+        });
+    }, []);
+
+    const clearChatImages = useCallback(() => {
+        setChatImageAttachments(prev => {
+            for (const item of prev) URL.revokeObjectURL(item.previewUrl);
+            return [];
+        });
+    }, []);
+
+    const openPendingImagePreview = useCallback((startIndex: number) => {
+        if (!chatImageAttachments.length) return;
+        const previewImages: ChatImagePayload[] = chatImageAttachments.map(item => ({
+            url: item.previewUrl,
+            name: item.name,
+            mime: item.mime,
+        }));
+        const nextIndex = Math.min(Math.max(startIndex, 0), previewImages.length - 1);
+        setImagePreview({ images: previewImages, index: nextIndex });
+    }, [chatImageAttachments]);
 
     const handleChatPaste = (e: React.ClipboardEvent) => {
         const items = Array.from(e.clipboardData.items);
         const imageItems = items.filter(it => it.type.startsWith('image/'));
         if (!imageItems.length) return;
         e.preventDefault();
-        imageItems.forEach(item => {
-            const file = item.getAsFile();
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = ev => {
-                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
-            };
-            reader.readAsDataURL(file);
-        });
+        const files = imageItems.map(item => item.getAsFile()).filter((f): f is File => Boolean(f));
+        enqueueChatImages(files);
     };
 
     const handleChatFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
-        files.forEach(file => {
-            const reader = new FileReader();
-            reader.onload = ev => {
-                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
-            };
-            reader.readAsDataURL(file);
-        });
+        enqueueChatImages(files);
         e.target.value = '';
     };
 
@@ -1587,6 +1724,33 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [reactions, setReactions] = useState<Record<number, 'liked' | 'disliked' | null>>({});
     const [copied, setCopied] = useState<Record<number, boolean>>({});
     const [sourcePanelData, setSourcePanelData] = useState<SearchSource[] | null>(null);
+
+    const closeImagePreview = useCallback(() => setImagePreview(null), []);
+    const moveImagePreview = useCallback((delta: number) => {
+        setImagePreview(prev => {
+            if (!prev || prev.images.length === 0) return prev;
+            const nextIndex = (prev.index + delta + prev.images.length) % prev.images.length;
+            return { ...prev, index: nextIndex };
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!imagePreview) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeImagePreview();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                moveImagePreview(-1);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                moveImagePreview(1);
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [imagePreview, closeImagePreview, moveImagePreview]);
 
     const handleCopy = (idx: number, content: string) => {
         navigator.clipboard.writeText(content).then(() => {
@@ -1894,6 +2058,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
+        const normalizeAgentError = (raw: string) => {
+            const msg = String(raw || '').trim();
+            if (/do_request_failed|upstream error|AI API error \(500\)/i.test(msg)) {
+                return '上游模型服务暂时不稳定，已中断本次合成。你可以直接重试，或稍后再试。';
+            }
+            if (/timeout|timed out/i.test(msg)) {
+                return '本次处理超时。建议简化问题后重试，或稍后再试。';
+            }
+            return msg || '请求失败，请稍后重试。';
+        };
+
         const onError = (data: { sessionId: string; error: string }) => {
             saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
@@ -1902,14 +2077,31 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             } catch {
                 /* ignore */
             }
+            const msgIdx = activeMsgIdxRef.current;
+            const friendlyError = normalizeAgentError(data.error);
             setMessages(prev => {
                 const updated = [...prev];
-                const msgIdx = activeMsgIdxRef.current;
                 if (!updated[msgIdx]) return prev;
-                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + data.error, isStreaming: false };
+                updated[msgIdx] = {
+                    ...updated[msgIdx],
+                    content: `${updated[msgIdx].content}\n\n**提示：** ${friendlyError}`,
+                    isStreaming: false
+                };
                 return updated;
             });
             setIsStreaming(false);
+            setThinkingProcesses(prev => {
+                const flow = prev[msgIdx];
+                if (!flow) return prev;
+                const hasDone = flow.modules.some(m => m.type === 'done');
+                const modules = flow.modules.map(m =>
+                    m.status === 'active' ? { ...m, status: 'completed' as const } : m
+                );
+                if (!hasDone) {
+                    modules.push({ type: 'done', status: 'completed', data: { duration: 0 } });
+                }
+                return { ...prev, [msgIdx]: { ...flow, modules, isActive: false } };
+            });
         };
 
         const onThinkingLog = (data: { sessionId: string; line: string }) => {
@@ -2000,14 +2192,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
+            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; delete n[-1]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
             setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
+            const idx = data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
+            if (idx < 0) return;
+            setHtmlGenerating(prev => ({ ...prev, [idx]: true }));
+        };
+
+        const onHtmlFailed = (data: { sessionId: string; msgIdx?: number }) => {
+            if (data.sessionId !== sessionId) return;
+            const idx = data.msgIdx !== undefined && data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
+            setHtmlGenerating(prev => {
+                const n = { ...prev };
+                if (idx >= 0) delete n[idx];
+                delete n[-1];
+                return n;
+            });
         };
 
         socket.on('agent:chat:routing', onRouting);
@@ -2024,6 +2229,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:quote', onQuote);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
+        socket.on('agent:chat:html_failed', onHtmlFailed);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -2040,6 +2246,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:quote', onQuote);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
+            socket.off('agent:chat:html_failed', onHtmlFailed);
+            const timers = Object.values(htmlPendingTimersRef.current);
+            for (const t of timers) clearTimeout(t);
+            htmlPendingTimersRef.current = {};
         };
     }, [sessionId]);
 
@@ -2133,7 +2343,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     }
 
                     /** Server has no memory buffer (common during restart or never successfully started) and local still has SA_PENDING: resend agent:chat */
-                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; assistantMsgIdx?: number } | null = null;
+                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; userImages?: ChatImagePayload[]; assistantMsgIdx?: number } | null = null;
                     try {
                         const raw = sessionStorage.getItem(SA_PENDING_KEY);
                         pending = raw ? (JSON.parse(raw) as typeof pending) : null;
@@ -2143,8 +2353,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const canResend =
                         pending?.streaming &&
                         pending.sessionId === sessionId &&
-                        typeof pending.userContent === 'string' &&
-                        pending.userContent.length > 0 &&
+                        (typeof pending.userContent === 'string' || Array.isArray(pending.userImages)) &&
                         !replayRecoverAttemptedRef.current;
 
                     if (canResend) {
@@ -2158,7 +2367,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         }));
                         setIsStreaming(true);
                         socket.emit('agent:chat', {
-                            content: pending!.userContent!,
+                            content: pending!.userContent || '',
+                            images: pending!.userImages || [],
                             mode: chatMode,
                             sessionId,
                             agentId: chatSelectedAgent,
@@ -2213,13 +2423,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
     }, [sessionId, chatMode, chatSelectedAgent]);
 
-    const sendToAI = useCallback((text: string, existingMessages?: Message[]) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[], images?: ChatImagePayload[]) => {
         // Bump generation so stale events from a previous run are dropped
         chatGenRef.current += 1;
         activeChatGenRef.current = chatGenRef.current;
 
         saLog('sendToAI()', {
             textPreview: text.slice(0, 100),
+            imageCount: images?.length || 0,
             mode: chatMode,
             sessionId,
             gen: activeChatGenRef.current,
@@ -2249,6 +2460,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 JSON.stringify({
                     sessionId,
                     userContent: text,
+                    userImages: images || [],
                     assistantMsgIdx: msgIdx,
                     streaming: true,
                 }),
@@ -2259,6 +2471,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         socket.emit('agent:chat', {
             content: text,
+            images: images || [],
             mode: chatMode,
             sessionId,
             agentId: chatSelectedAgent,
@@ -2362,7 +2575,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             }));
             return;
         }
-        if (!initialMessage.trim()) return;
+        if (!initialMessage.trim() && initialImages.length === 0) return;
         hasSentInitial.current = true;
 
         // Broadcast new session for sidebar
@@ -2370,23 +2583,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             detail: { id: sessionId, title: summarizeTitle(initialMessage), agentId: chatSelectedAgent || 'auto' }
         }));
 
-        const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: initialMessage, images: initialImages, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 80); }, 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages, initialImages); setTimeout(scrollUserMsgToTop, 80); }, 50);
+    }, [initialMessage, initialImages, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSend = () => {
-        if (!inputText.trim() || isStreaming) return;
+        if (isStreaming) return;
+        const hasUploadingImages = chatImageAttachments.some(img => img.status === 'uploading');
+        if (hasUploadingImages) return;
+        const uploadedImages = chatImageAttachments
+            .filter(img => img.status === 'uploaded' && img.url)
+            .map(img => ({ url: img.url, mime: img.mime, name: img.name }));
+        if (!inputText.trim() && uploadedImages.length === 0) return;
         const text = inputText.trim();
         saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
-        const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: text, images: uploadedImages, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
         setInputText('');
-        sendToAI(text, newMessages);
+        sendToAI(text, newMessages, uploadedImages);
+        clearChatImages();
         // Scroll so the user’s question appears at the top
         setTimeout(scrollUserMsgToTop, 80);
     };
@@ -2528,8 +2748,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
-                                            <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm">
-                                                <p className="text-[13px] leading-relaxed">{msg.content}</p>
+                                            <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm space-y-2">
+                                                {!!msg.images?.length && (
+                                                    <div className={`grid gap-2 ${msg.images.length === 1 ? 'grid-cols-1 w-[170px]' : 'grid-cols-2'}`}>
+                                                        {msg.images.map((img, idx) => (
+                                                            <button
+                                                                key={`${img.url}-${idx}`}
+                                                                type="button"
+                                                                onClick={() => setImagePreview({ images: msg.images || [], index: idx })}
+                                                                className="group relative rounded-lg overflow-hidden border border-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+                                                            >
+                                                                <img
+                                                                    src={img.url}
+                                                                    alt={img.name || 'uploaded image'}
+                                                                    className={`rounded-lg object-cover cursor-zoom-in ${msg.images.length === 1 ? 'w-[170px] h-[170px]' : 'w-full max-h-36'}`}
+                                                                />
+                                                                <span className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {msg.content ? <p className="text-[13px] leading-relaxed">{msg.content}</p> : null}
                                                 <p className="text-[9px] text-gray-500 mt-1.5 text-right">{msg.timestamp}</p>
                                             </div>
                                         </div>
@@ -2548,7 +2787,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     />
                                                 )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && !msg.isStreaming && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                {msg.role === 'assistant' && (!msg.isStreaming || htmlReports[i]) && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className="flex items-center gap-1.5">
                                                         {(htmlReports[i] || htmlGenerating[i]) && (
@@ -2875,13 +3114,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 {/* Hidden file input */}
                                 <input ref={chatFileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleChatFileChange} />
                                 {/* Image preview strip */}
-                                {chatPastedImages.length > 0 && voiceState === 'idle' && (
+                                {chatImageAttachments.length > 0 && voiceState === 'idle' && (
                                     <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
-                                        {chatPastedImages.map((src, idx) => (
-                                            <div key={idx} className="relative group shrink-0">
-                                                <img src={src} alt="" className="w-12 h-12 rounded-xl object-cover border border-gray-200 shadow-sm" />
+                                        {chatImageAttachments.map((img) => (
+                                            <div key={img.id} className="relative group shrink-0">
+                                                <img
+                                                    src={img.previewUrl}
+                                                    alt=""
+                                                    onClick={() => openPendingImagePreview(chatImageAttachments.findIndex(item => item.id === img.id))}
+                                                    className={`w-12 h-12 rounded-xl object-cover border shadow-sm cursor-zoom-in ${img.status === 'error' ? 'border-red-300' : 'border-gray-200'}`}
+                                                />
+                                                {img.status === 'uploading' && (
+                                                    <span className="absolute inset-0 rounded-xl bg-black/35 flex items-center justify-center">
+                                                        <span className="w-5 h-5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                                                    </span>
+                                                )}
+                                                {img.status === 'error' && (
+                                                    <span className="absolute inset-0 rounded-xl bg-red-500/50 flex items-center justify-center" title="Upload failed">
+                                                        <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8v5m0 3h.01M10.29 3.86L1.82 18a2 2 0 001.73 3h16.9a2 2 0 001.73-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                                                        </svg>
+                                                    </span>
+                                                )}
                                                 <button
-                                                    onClick={() => setChatPastedImages(prev => prev.filter((_, i) => i !== idx))}
+                                                    onClick={() => removeChatImage(img.id)}
                                                     className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                                                 >
                                                     <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -2975,10 +3231,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         </button>
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
-                                            disabled={!isStreaming && !inputText.trim()}
+                                            disabled={!isStreaming && (chatImageAttachments.some(img => img.status === 'uploading') || (!inputText.trim() && !chatImageAttachments.some(img => img.status === 'uploaded' && img.url)))}
                                             className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isStreaming
                                                     ? 'bg-gray-900 text-white hover:bg-gray-700'
-                                                    : inputText.trim()
+                                                    : (inputText.trim() || chatImageAttachments.some(img => img.status === 'uploaded' && img.url))
                                                         ? 'bg-gray-900 text-white hover:bg-gray-800'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                                                 }`}
@@ -3075,6 +3331,52 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </div>
                 )}
             </div>
+
+            {imagePreview && imagePreview.images.length > 0 && (
+                <div
+                    className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+                    onClick={closeImagePreview}
+                >
+                    <div className="relative max-w-[92vw] max-h-[92vh]" onClick={e => e.stopPropagation()}>
+                        <img
+                            src={imagePreview.images[imagePreview.index]?.url}
+                            alt={imagePreview.images[imagePreview.index]?.name || 'preview'}
+                            className="max-w-[92vw] max-h-[92vh] object-contain rounded-xl shadow-2xl"
+                        />
+                        <button
+                            type="button"
+                            onClick={closeImagePreview}
+                            className="absolute -top-3 -right-3 w-9 h-9 rounded-full bg-white text-gray-700 flex items-center justify-center shadow-lg hover:bg-gray-100"
+                            title="关闭"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                        {imagePreview.images.length > 1 && (
+                            <>
+                                <button
+                                    type="button"
+                                    onClick={() => moveImagePreview(-1)}
+                                    className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
+                                    title="上一张"
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => moveImagePreview(1)}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
+                                    title="下一张"
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
+                                </button>
+                                <div className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[12px] text-white/90">
+                                    {imagePreview.index + 1} / {imagePreview.images.length}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

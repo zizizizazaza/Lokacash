@@ -35,6 +35,8 @@ export const config = {
     apiKey: process.env.LOKA_AI_API_KEY?.trim() || '',
     baseUrl: process.env.LOKA_AI_BASE_URL?.trim() || '',
     model: process.env.LOKA_AI_MODEL?.trim() || 'deepseek-v3',
+    // 图片路由摘要专用模型：不设置则回退到 LOKA_AI_MODEL
+    imageDigestModel: process.env.LOKA_AI_IMAGE_DIGEST_MODEL?.trim() || '',
   },
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
   rateLimit: {
@@ -56,4 +58,8 @@ export const config = {
   consensus: {
     baseUrl: process.env.CONSENSUS_API_BASE || 'http://173.249.5.203:8000/api/v1',
   },
+  /** 设为1/true/yes 时跳过 SuperAgent 的 HTML 报告生成（并行与 roundtable 顺序生成均不跑），用于排查耗时 */
+  superAgentDisableHtmlReport: /^1|true|yes$/i.test(
+    (process.env.SUPERAGENT_DISABLE_HTML_REPORT || '').trim(),
+  ),
 } as const;
