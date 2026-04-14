@@ -2091,6 +2091,7 @@ The HTML must:
           break;
       }
       const synthesisMaxTokens = queryType === 'market-brief' ? 4096 : 8192;
+      const synthesisModelOverride = config.lokaAi.synthesisModel || undefined;
 
       // ── Helper: run HTML generation stream and return the result ──
       const runHtmlGeneration = async (htmlInput: string): Promise<string> => {
@@ -2223,7 +2224,12 @@ The HTML must:
         const attempts = 2;
         for (let i = 1; i <= attempts; i += 1) {
           try {
-            const fallbackResp = await aiService.chat([{ role: 'user', content: fallbackPrompt }], 'superagent');
+            const fallbackResp = await aiService.chat(
+              [{ role: 'user', content: fallbackPrompt }],
+              'superagent',
+              undefined,
+              synthesisModelOverride,
+            );
             const content = (fallbackResp.content || '').trim();
             if (content) {
               console.log(`[agent:chat:fallback] ✅ fallback synthesis succeeded (attempt=${i})`);
@@ -2246,7 +2252,13 @@ The HTML must:
       const synthStartedAt = Date.now();
       try {
         console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
-        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
+        const synthesisStream = await aiService.chatStream(
+          [{ role: 'user', content: synthesizePrompt }],
+          'superagent',
+          undefined,
+          synthesisMaxTokens,
+          synthesisModelOverride,
+        );
         console.log('[agent:chat] Synthesis stream obtained, reading...');
         const synReader = synthesisStream.getReader();
         const synDecoder = new TextDecoder();
@@ -2405,7 +2417,13 @@ Research context:\n${synFullContent}${langInstruction}`;
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
             const deepSecondPassStartedAt = Date.now();
 
-            const deepStream = await aiService.chatStream([{ role: 'user', content: deepResearchFinalPrompt }], 'superagent', undefined, 16384);
+            const deepStream = await aiService.chatStream(
+              [{ role: 'user', content: deepResearchFinalPrompt }],
+              'superagent',
+              undefined,
+              16384,
+              synthesisModelOverride,
+            );
             const deepReader = deepStream.getReader();
             const deepDecoder = new TextDecoder();
             let deepFullContent = '';
@@ -2498,7 +2516,11 @@ Research context:\n${synFullContent}${langInstruction}`;
         });
 
         emitter.emitModule('done', 'completed', { duration: dur });
-        emitter.emitStreamDone(finalDbContent);
+        const streamDoneSources = finalSocialSources.length > 0 ? finalSocialSources : undefined;
+        console.log(
+          `[agent:chat:sources] stream_done_sources_count=${streamDoneSources?.length || 0} sessionId=${sessionId}`,
+        );
+        emitter.emitStreamDone(finalDbContent, { sources: streamDoneSources });
 
         // --- Async HTML report generation (non-blocking) ---
         // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
@@ -2561,7 +2583,11 @@ Research context:\n${synFullContent}${langInstruction}`;
 
         streamToChat(fallbackContent);
         emitter.emitModule('done', 'completed', { duration: dur, degraded: true, cause: 'synthesis_error' });
-        emitter.emitStreamDone(fallbackContent);
+        const fallbackStreamSources = finalSocialSources.length > 0 ? finalSocialSources : undefined;
+        console.log(
+          `[agent:chat:sources] fallback_stream_done_sources_count=${fallbackStreamSources?.length || 0} sessionId=${sessionId}`,
+        );
+        emitter.emitStreamDone(fallbackContent, { sources: fallbackStreamSources });
         console.log(
           `[agent:chat:timing] fallback_emitted_s=${asSeconds(Date.now() - synthStartedAt)} end_to_end_s=${asSeconds(sinceRequestStart())} ui_duration_s=${dur} sessionId=${sessionId}`,
         );

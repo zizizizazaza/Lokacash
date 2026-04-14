@@ -35,6 +35,8 @@ export const config = {
     apiKey: process.env.LOKA_AI_API_KEY?.trim() || '',
     baseUrl: process.env.LOKA_AI_BASE_URL?.trim() || '',
     model: process.env.LOKA_AI_MODEL?.trim() || 'deepseek-v3',
+    // 最终总结（Synthesis）专用模型：不设置则回退到 LOKA_AI_MODEL
+    synthesisModel: process.env.LOKA_AI_SYNTHESIS_MODEL?.trim() || '',
     // 图片路由摘要专用模型：不设置则回退到 LOKA_AI_MODEL
     imageDigestModel: process.env.LOKA_AI_IMAGE_DIGEST_MODEL?.trim() || '',
   },
