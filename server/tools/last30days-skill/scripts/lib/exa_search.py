@@ -7,6 +7,7 @@ API docs: https://docs.exa.ai/reference/search
 """
 
 import sys
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -19,6 +20,13 @@ EXCLUDED_DOMAINS = {
     "reddit.com", "www.reddit.com", "old.reddit.com",
     "twitter.com", "www.twitter.com", "x.com", "www.x.com",
 }
+
+
+def _safe_topic_preview(topic: str, max_len: int = 80) -> str:
+    text = (topic or "").strip().replace("\n", " ")
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
 
 
 def search_web(
@@ -56,9 +64,17 @@ def search_web(
     if to_date:
         payload["endPublishedDate"] = f"{to_date}T23:59:59.999Z"
 
+    # Structured observability line for backend log parsing
+    sys.stderr.write(
+        "[Exa] request "
+        f"depth={depth} num_results={num_results} max_chars={max_chars} "
+        f"from={from_date or 'n/a'} to={to_date or 'n/a'} "
+        f"topic=\"{_safe_topic_preview(topic)}\"\n"
+    )
     sys.stderr.write(f"[Web] Searching Exa for: {topic}\n")
     sys.stderr.flush()
 
+    started = time.perf_counter()
     try:
         response = http.post(
             ENDPOINT,
@@ -70,24 +86,37 @@ def search_web(
             retries=2,
         )
     except http.HTTPError as e:
+        elapsed = time.perf_counter() - started
         status = e.status_code
         if status == 401:
+            sys.stderr.write(f"[Exa] failed elapsed_s={elapsed:.3f} status=401 reason=invalid_api_key\n")
             sys.stderr.write("[Web] Exa: invalid API key (401)\n")
             sys.stderr.flush()
             return []
         if status == 429:
+            sys.stderr.write(f"[Exa] failed elapsed_s={elapsed:.3f} status=429 reason=rate_limited\n")
             sys.stderr.write("[Web] Exa: rate limited (429)\n")
             sys.stderr.flush()
             return []
+        sys.stderr.write(f"[Exa] failed elapsed_s={elapsed:.3f} status={status} reason=http_error\n")
         sys.stderr.write(f"[Web] Exa: HTTP error {status}: {e}\n")
         sys.stderr.flush()
         return []
     except Exception as e:
+        elapsed = time.perf_counter() - started
+        sys.stderr.write(f"[Exa] failed elapsed_s={elapsed:.3f} status=n/a reason=exception\n")
         sys.stderr.write(f"[Web] Exa: request failed: {e}\n")
         sys.stderr.flush()
         return []
 
-    return _normalize_results(response)
+    elapsed = time.perf_counter() - started
+    normalized = _normalize_results(response)
+    raw_count = len(response.get("results", [])) if isinstance(response, dict) else 0
+    sys.stderr.write(
+        f"[Exa] done elapsed_s={elapsed:.3f} raw_results={raw_count} normalized_results={len(normalized)}\n"
+    )
+    sys.stderr.flush()
+    return normalized
 
 
 def _normalize_results(response: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -23,14 +23,15 @@ const AuthModal: React.FC<AuthModalProps> = ({ onLogin, onClose, initialStep = '
 
     const handleInviteSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!inviteCode.trim()) return;
+        const normalized = inviteCode.replace(/\s+/g, '').trim().toUpperCase();
+        if (!normalized) return;
         setInviteChecking(true);
         setInviteError(null);
         try {
-            const result = await api.validateInvitationCode(inviteCode.trim());
+            const result = await api.validateInvitationCode(normalized);
             if (result.valid) {
-                localStorage.setItem('loka_invite_code', inviteCode.trim().toUpperCase());
-                api.useInvitationCode(inviteCode.trim().toUpperCase()).catch(() => {});
+                localStorage.setItem('loka_invite_code', normalized);
+                api.useInvitationCode(normalized).catch(() => {});
                 onLogin(); // ✅ only grant access after code verified
             } else {
                 setInviteError(result.reason || 'Invalid invitation code');

@@ -309,7 +309,7 @@ class TavilySearchProvider(BaseSearchProvider):
         
         try:
             client = TavilyClient(api_key=api_key)
-            
+            req_started_at = time.time()
             # 执行搜索（优化：使用advanced深度、限制最近几天）
             search_kwargs: Dict[str, Any] = {
                 "query": query,
@@ -322,11 +322,26 @@ class TavilySearchProvider(BaseSearchProvider):
             if topic is not None:
                 search_kwargs["topic"] = topic
 
+            logger.info(
+                "[Tavily][params] query=%r depth=%s max_results=%s days=%s topic=%s",
+                query,
+                search_kwargs.get("search_depth"),
+                search_kwargs.get("max_results"),
+                search_kwargs.get("days"),
+                search_kwargs.get("topic"),
+            )
             response = client.search(
                 **search_kwargs,
             )
+            req_elapsed = time.time() - req_started_at
             
             # 记录原始响应到日志
+            logger.info(
+                "[Tavily][timing] query=%r elapsed_s=%.3f raw_results=%s",
+                query,
+                req_elapsed,
+                len(response.get('results', [])),
+            )
             logger.info(f"[Tavily] 搜索完成，query='{query}', 返回 {len(response.get('results', []))} 条结果")
             logger.debug(f"[Tavily] 原始响应: {response}")
             
@@ -350,6 +365,7 @@ class TavilySearchProvider(BaseSearchProvider):
             
         except Exception as e:
             error_msg = str(e)
+            logger.warning("[Tavily][error] query=%r error=%s", query, error_msg)
             # 检查是否是配额问题
             if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
                 error_msg = f"API 配额已用尽: {error_msg}"
@@ -2925,6 +2941,17 @@ class SearchService:
             provider_index += 1
             
             logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
+            dim_started_at = time.time()
+            logger.info(
+                "[情报搜索][params] dim=%s provider=%s query=%r tavily_topic=%s strict_freshness=%s search_days=%s provider_max_results=%s",
+                dim.get('name'),
+                provider.name,
+                dim.get('query'),
+                dim.get('tavily_topic'),
+                dim.get('strict_freshness'),
+                search_days,
+                provider_max_results,
+            )
 
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
                 response = provider.search(
@@ -2951,6 +2978,7 @@ class SearchService:
                     response,
                     max_results=target_per_dimension,
                 )
+            dim_elapsed_s = time.time() - dim_started_at
             results[dim['name']] = filtered_response
             search_count += 1
             
@@ -2961,8 +2989,26 @@ class SearchService:
                     len(response.results),
                     len(filtered_response.results),
                 )
+                logger.info(
+                    "[情报搜索][timing] dim=%s provider=%s elapsed_s=%.3f success=%s raw=%s filtered=%s",
+                    dim.get('name'),
+                    provider.name,
+                    dim_elapsed_s,
+                    response.success,
+                    len(response.results),
+                    len(filtered_response.results),
+                )
             else:
                 logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
+                logger.info(
+                    "[情报搜索][timing] dim=%s provider=%s elapsed_s=%.3f success=%s raw=%s filtered=%s",
+                    dim.get('name'),
+                    provider.name,
+                    dim_elapsed_s,
+                    response.success,
+                    len(response.results),
+                    len(filtered_response.results),
+                )
             
             # 短暂延迟避免请求过快
             time.sleep(0.5)

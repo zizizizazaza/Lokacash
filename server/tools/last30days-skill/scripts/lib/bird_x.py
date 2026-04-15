@@ -30,6 +30,27 @@ DEPTH_CONFIG = {
     "deep": 60,
 }
 
+# Per-depth subprocess timeouts (seconds). Override via env from Loka server .env (passed through to Python).
+_BIRD_TIMEOUT_DEFAULTS = {"quick": 45, "default": 60, "deep": 90}
+_BIRD_TIMEOUT_ENV = {
+    "quick": "BIRD_SEARCH_TIMEOUT_QUICK",
+    "default": "BIRD_SEARCH_TIMEOUT_DEFAULT",
+    "deep": "BIRD_SEARCH_TIMEOUT_DEEP",
+}
+
+
+def _bird_subprocess_timeout_sec(depth: str) -> int:
+    """Wall-clock timeout for each Node bird-search invocation (includes TLS + X API)."""
+    d = depth if depth in _BIRD_TIMEOUT_DEFAULTS else "default"
+    default = _BIRD_TIMEOUT_DEFAULTS[d]
+    env_name = _BIRD_TIMEOUT_ENV[d]
+    raw = os.environ.get(env_name, str(default))
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        n = default
+    return max(15, min(180, n))
+
 # Module-level credentials injected from .env config
 _credentials: Dict[str, str] = {}
 
@@ -241,7 +262,7 @@ def search_x(
         Raw Bird JSON response or error dict.
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
-    timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+    timeout = _bird_subprocess_timeout_sec(depth)
 
     # Single @handle → X "from:" timeline (author's posts). Avoids mostly-@replies from others.
     handles = _TOPIC_HANDLE_RE.findall(topic or "")

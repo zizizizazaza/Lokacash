@@ -1,10 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import prisma from '../db.js';
+import { config } from '../config.js';
 import { authRequired, authOptional, type AuthRequest } from '../middleware/auth.js';
 import { AppError } from '../middleware/errorHandler.js';
 
 const router = Router();
+
+function normalizeInviteCode(raw: string): string {
+  return raw.toUpperCase().replace(/\s+/g, '').trim();
+}
 
 // ---- Helper: generate a human-readable code ----
 function generateCode(): string {
@@ -24,8 +29,14 @@ const validateSchema = z.object({
 router.post('/validate', async (req, res, next) => {
   try {
     const { code } = validateSchema.parse(req.body);
+    const normalized = normalizeInviteCode(code);
+
+    if (config.invitationGateDisabled && normalized.length > 0) {
+      return res.json({ valid: true, code: normalized });
+    }
+
     const invitation = await prisma.invitationCode.findUnique({
-      where: { code: code.toUpperCase().trim() },
+      where: { code: normalized },
     });
 
     if (!invitation) {
@@ -55,7 +66,11 @@ const useSchema = z.object({
 router.post('/use', authOptional, async (req: AuthRequest, res, next) => {
   try {
     const { code } = useSchema.parse(req.body);
-    const upperCode = code.toUpperCase().trim();
+    const upperCode = normalizeInviteCode(code);
+
+    if (config.invitationGateDisabled && upperCode.length > 0) {
+      return res.json({ ok: true, code: upperCode });
+    }
 
     const invitation = await prisma.invitationCode.findUnique({
       where: { code: upperCode },

@@ -39,10 +39,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 _child_pids: set = set()
 _child_pids_lock = threading.Lock()
 
+# "future" = ThreadPoolExecutor wait per source (must be >= Bird subprocess timeout in bird_x.py
+# plus headroom for one retry). Quick was 30s while Bird used 30s per call → constant timeouts.
 TIMEOUT_PROFILES = {
-    "quick":   {"global": 90,  "future": 30, "reddit_future": 60,  "youtube_future": 60,  "tiktok_future": 90,   "instagram_future": 90,   "hackernews_future": 30,  "bluesky_future": 30,  "truthsocial_future": 30,  "polymarket_future": 15,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
-    "default": {"global": 180, "future": 60, "reddit_future": 90,  "youtube_future": 90,  "tiktok_future": 120,  "instagram_future": 120,  "hackernews_future": 60,  "bluesky_future": 60,  "truthsocial_future": 60,  "polymarket_future": 30,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
-    "deep":    {"global": 300, "future": 90, "reddit_future": 120, "youtube_future": 120, "tiktok_future": 150,  "instagram_future": 150,  "hackernews_future": 90,  "bluesky_future": 90,  "truthsocial_future": 90,  "polymarket_future": 45,  "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
+    "quick":   {"global": 120, "future": 75, "reddit_future": 60,  "youtube_future": 60,  "tiktok_future": 90,   "instagram_future": 90,   "hackernews_future": 30,  "bluesky_future": 30,  "truthsocial_future": 30,  "polymarket_future": 15,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
+    "default": {"global": 220, "future": 100, "reddit_future": 90,  "youtube_future": 90,  "tiktok_future": 120,  "instagram_future": 120,  "hackernews_future": 60,  "bluesky_future": 60,  "truthsocial_future": 60,  "polymarket_future": 30,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
+    "deep":    {"global": 360, "future": 150, "reddit_future": 120, "youtube_future": 120, "tiktok_future": 150,  "instagram_future": 150,  "hackernews_future": 90,  "bluesky_future": 90,  "truthsocial_future": 90,  "polymarket_future": 45,  "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
 }
 
 # Valid source names for the --search flag
@@ -711,12 +713,20 @@ def _search_web(
     """
     from lib import brave_search, parallel_search, openrouter_search, exa_search
 
+    started_at = time.perf_counter()
     backend = env.get_web_search_source(config)
     if not backend:
         return [], "No web search API keys configured"
 
     web_error = None
     raw_results = []
+
+    sys.stderr.write(
+        "[WebSearch] plan "
+        f"backend={backend} depth={depth} from={from_date or 'n/a'} to={to_date or 'n/a'} "
+        f"topic=\"{topic[:120]}\"\n"
+    )
+    sys.stderr.flush()
 
     try:
         if backend == "exa":
@@ -738,6 +748,11 @@ def _search_web(
                 topic, from_date, to_date, config["OPENROUTER_API_KEY"], depth=depth,
             )
     except Exception as e:
+        elapsed_s = time.perf_counter() - started_at
+        sys.stderr.write(
+            f"[WebSearch] error backend={backend} elapsed_s={elapsed_s:.3f} error={type(e).__name__}:{e}\n"
+        )
+        sys.stderr.flush()
         return [], f"{type(e).__name__}: {e}"
 
     # Add IDs and date_confidence for websearch.normalize_websearch_items()
@@ -749,6 +764,11 @@ def _search_web(
             item["date_confidence"] = "low"
         item.setdefault("why_relevant", "")
 
+    elapsed_s = time.perf_counter() - started_at
+    sys.stderr.write(
+        f"[WebSearch] done backend={backend} elapsed_s={elapsed_s:.3f} results={len(raw_results)}\n"
+    )
+    sys.stderr.flush()
     return raw_results, web_error
 
 

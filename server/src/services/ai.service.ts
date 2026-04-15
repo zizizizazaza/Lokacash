@@ -574,6 +574,7 @@ RULES:
 4. "simulate": AI Hedge Fund Simulation — only when user asks for forecasting or simulating scenarios.
 5. "web3": Crypto / on-chain market data (CoinGecko). Use for BTC/ETH/SOL price, altcoins, DeFi tokens, DEX, gas, NFT collections, trending crypto. Provide a concise English "query" echoing user intent (e.g. "current Bitcoin BTC spot price USD").
 6. A user can trigger multiple! "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
+7. **MULTI-TURN — LATEST MESSAGE ONLY (CRITICAL)**: If the input has 【Conversation Context】 plus 【Latest User Message】, you MUST set queryType and ALL capability fields (**analysis.tickers**, **search.query**, **simulate.tickers**, **web3.query**) from **【Latest User Message】 alone**. Use prior turns ONLY when the latest message clearly continues the same subject (e.g. "继续上面的", "same as before", "那它呢", "还是这个币"). If the user **switches** asset or topic (e.g. chat was about RAVE, latest asks about **hype / HYPE / 多空 / 开多开空** in crypto), **never** carry over old tickers or old entity names into this JSON — refresh everything for the new intent. Note: Chinese **"hype"** in trading context usually means **Hyperliquid (HYPE)**, not a prior unrelated token.
 
 Examples:
 Query: "hi, 你能干啥" -> {"isSimpleChat":true,"queryType":"general","capabilities":{"analysis":{"needed":false},"search":{"needed":false},"simulate":{"needed":false}}}
@@ -587,6 +588,7 @@ Query: "Evaluate Midjourney as an investment — team, revenue, growth" -> {"isS
 Query: "深度分析一下阿里和腾讯的投资价值" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":true,"tickers":["BABA","TCEHY"]},"search":{"needed":true,"query":"Alibaba Tencent investment value comparison"},"simulate":{"needed":false}}}
 Query: "巴菲特最近买了什么股票" -> {"isSimpleChat":false,"queryType":"research","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Warren Buffett recent stock purchases portfolio"},"simulate":{"needed":false}}}
 Query: "模拟：如果第三季度降息50个基点对科技股有什么影响" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":true,"tickers":["QQQ"]},"search":{"needed":true,"query":"Fed 50bps rate cut impact on tech sector"},"simulate":{"needed":true,"tickers":["QQQ"]}}}
+Multi-turn: [User]: ...RAVE token... [Assistant]: ... [User]: "hype现在适合开多还是开空？" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Hyperliquid HYPE perpetual long short sentiment funding"},"simulate":{"needed":false},"web3":{"needed":true,"query":"Hyperliquid HYPE token price funding rate"}}}  // do NOT output RAVE from prior turn
 
 Query: "${query}"`;
     const compactRouterPrompt = `You are the routing coordinator for a Super Agent.
@@ -609,6 +611,7 @@ Rules:
 - simulate=true only for explicit simulation/what-if/debate requests.
 - web3=true only for crypto/on-chain requests.
 - It is allowed to enable multiple capabilities.
+- **Multi-turn**: If input has 【Latest User Message】, derive tickers and search/web3 queries from that message only unless the user clearly continues the previous topic. On topic switch, never reuse prior tickers (e.g. after RAVE, "hype多空" → Hyperliquid HYPE, not RAVE).
 
 User query:
 ${query}`;

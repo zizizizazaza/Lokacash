@@ -9,5 +9,9 @@
     "node": ">=22"
   },
   "license": "MIT",
-  "attribution": "Based on @steipete/bird v0.8.0 by Peter Steinberger (MIT License)"
+  "attribution": "Based on @steipete/bird v0.8.0 by Peter Steinberger (MIT License)",
+  "dependencies": {
+    "@steipete/sweet-cookie": "0.1.0",
+    "undici": "^6.21.2"
+  }
 }

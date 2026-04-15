@@ -2524,20 +2524,34 @@ Research context:\n${synFullContent}${langInstruction}`;
 
         // --- Async HTML report generation (non-blocking) ---
         // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
+        // IMPORTANT: respect SUPERAGENT_DISABLE_HTML_REPORT here as well (sequential branch).
         const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
-        if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
+        const htmlModeLabel = isDeepResearch ? 'roundtable' : 'standard';
+        if (htmlEligible && config.superAgentDisableHtmlReport) {
+          console.log('[agent:chat:html] Skipped SEQUENTIAL generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
+        } else if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
           // Emit generating signal immediately so frontend shows Web tab skeleton
           const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
           const genMsgIdx = pendingMsgCount - 1;
           emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
-          console.log(`[agent:chat:html] Starting SEQUENTIAL HTML generation for roundtable, input length=${finalDbContent.length}`);
+          const htmlSeqStartedAt = Date.now();
+          console.log(
+            `[agent:chat:html] Starting SEQUENTIAL HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
+          );
           try {
             const htmlContent = await runHtmlGeneration(finalDbContent);
             await emitHtmlResult(htmlContent);
+            console.log(
+              `[agent:chat:timing] html_sequential_s=${asSeconds(Date.now() - htmlSeqStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
+            );
           } catch (htmlErr: any) {
-            console.error('[agent:chat:html] ❌ Roundtable HTML generation failed:', htmlErr.message);
+            console.error(`[agent:chat:html] ❌ Sequential HTML generation failed (${htmlModeLabel}):`, htmlErr.message);
           }
         }
+
+        console.log(
+          `[agent:chat:timing] synthesizer_total_s=${asSeconds(Date.now() - synthStartedAt)} end_to_end_s=${asSeconds(sinceRequestStart())} ui_duration_s=${dur} sessionId=${sessionId}`,
+        );
       } catch (err: any) {
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
         if (isAborted()) {

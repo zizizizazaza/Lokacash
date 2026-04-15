@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { fetchWithProxy } from './fetch-proxy.js';
 import { runtimeQueryIds } from './runtime-query-ids.js';
 import { QUERY_IDS, TARGET_QUERY_ID_OPERATIONS } from './twitter-client-constants.js';
 import { normalizeQuoteDepth } from './twitter-client-utils.js';
@@ -64,12 +65,12 @@ export class TwitterClientBase {
     }
     async fetchWithTimeout(url, init) {
         if (!this.timeoutMs || this.timeoutMs <= 0) {
-            return fetch(url, init);
+            return fetchWithProxy(url, init);
         }
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
         try {
-            return await fetch(url, { ...init, signal: controller.signal });
+            return await fetchWithProxy(url, { ...init, signal: controller.signal });
         }
         finally {
             clearTimeout(timeoutId);

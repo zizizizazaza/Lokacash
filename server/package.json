@@ -15,10 +15,11 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
-    "setup:ai:win": "cd tools/ai-hedge-fund && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt && cd ../stock-analysis && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt",
-    "setup:ai:linux": "cd tools/ai-hedge-fund && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ../stock-analysis && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+    "setup:ai:win": "cd tools\\ai-hedge-fund && python -m venv .venv && .venv\\Scripts\\python -m pip install -U pip poetry && .venv\\Scripts\\python -m poetry env use .venv\\Scripts\\python.exe && .venv\\Scripts\\python -m poetry install --no-interaction && cd ..\\stock-analysis && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt",
+    "setup:ai:linux": "cd tools/ai-hedge-fund && python3 -m venv .venv && .venv/bin/python -m pip install -U pip poetry && .venv/bin/python -m poetry env use \"$(pwd)/.venv/bin/python\" && .venv/bin/python -m poetry install --no-interaction && cd ../stock-analysis && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
     "setup:aegean:win": "cd tools/aegean-consensus && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt",
-    "setup:aegean:linux": "cd tools/aegean-consensus && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    "setup:aegean:linux": "cd tools/aegean-consensus && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+    "setup:last30days-bird": "npm install --no-audit --no-fund --prefix ./tools/last30days-skill/scripts/lib/vendor/bird-search"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1017.0",
@@ -37,6 +38,7 @@
     "multer-s3": "^3.0.1",
     "socket.io": "^4.8.1",
     "stripe": "^21.0.1",
+    "undici": "^6.25.0",
     "uuid": "^13.0.0",
     "zod": "^3.24.2"
   },
