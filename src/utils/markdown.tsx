@@ -207,7 +207,7 @@ const LINK_CHIP =
 /** Citation tag style — small inline badge with source name */
 const CITE_TAG =
   'group/cite relative inline-flex items-center align-middle gap-1 mx-0.5 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight ' +
-  'text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200/60 ' +
+  'text-gray-500 bg-gray-50 hover:bg-gray-100 border border-gray-200/60 ' +
   'transition-all cursor-pointer no-underline hover:no-underline';
 
 function safeHttpUrl(href: string): string | null {
@@ -283,7 +283,7 @@ function InlineCitation({
         rel="noopener noreferrer"
         className={CITE_TAG}
       >
-        <svg className="w-2.5 h-2.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+        <svg className="w-2.5 h-2.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
         </svg>
         <span className="truncate max-w-[8rem]">{show}</span>
@@ -466,10 +466,31 @@ export function extractHeadings(text: string, msgIdx?: number): { level: number;
   return headings;
 }
 
+/** Split inline numbered lists into separate lines.
+ *  e.g. "1. aaa 2. bbb 3. ccc" → "1. aaa\n2. bbb\n3. ccc"
+ *  Only triggers when 3+ sequential numbered items appear on one line. */
+function splitInlineNumberedLists(text: string): string {
+  return text.replace(/^(.*?)(\d+\.\s.+)$/gm, (_match, prefix, listPart) => {
+    // Split on " N. " boundaries where N is sequential
+    const items = listPart.split(/\s+(?=\d+\.\s)/);
+    if (items.length < 3) return _match; // Need at least 3 items to be confident it's a list
+    // Verify they're roughly sequential (1,2,3 or 2,3,4 etc.)
+    const nums = items.map((it: string) => parseInt(it.match(/^(\d+)\./)?.[1] || '0', 10));
+    let sequential = true;
+    for (let j = 1; j < nums.length; j++) {
+      if (nums[j] !== nums[j - 1] + 1) { sequential = false; break; }
+    }
+    if (!sequential) return _match;
+    const joined = items.join('\n');
+    return prefix ? prefix.trimEnd() + '\n' + joined : joined;
+  });
+}
+
 export function renderMarkdownContent(text: string, msgIdx?: number): React.ReactNode {
   if (!text) return null;
   const prefix = msgIdx != null ? `m${msgIdx}-` : '';
-  const lines = text.split('\n');
+
+  const lines = splitInlineNumberedLists(text).split('\n');
   const elements: React.ReactNode[] = [];
   let i = 0;
 

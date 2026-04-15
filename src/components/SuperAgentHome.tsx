@@ -3,6 +3,7 @@ import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
+import GuruCarousel from './GuruCarousel';
 import { IFlytekStreamer } from '../services/iflytek';
 const SuperAgentHome: React.FC = () => {
   const navigate = useNavigate();
@@ -137,6 +138,13 @@ const SuperAgentHome: React.FC = () => {
       setPhIdx(Math.floor(Math.random() * QUICK_ACTIONS.length));
     }
   }, [newChatTs]); // eslint-disable-line
+
+  // Auto-select first scenario when entering an agent's secondary page
+  useEffect(() => {
+    if (selectedAgent && AGENT_GUIDES[selectedAgent]?.scenarios?.length) {
+      setSelectedScenario(AGENT_GUIDES[selectedAgent].scenarios![0].id);
+    }
+  }, [selectedAgent]);
 
   useEffect(() => {
     if (input) return;
@@ -363,6 +371,13 @@ const SuperAgentHome: React.FC = () => {
             <div className="hero-guide space-y-3" style={{ animation: 'fade-up 0.35s var(--ease-out-expo) both' }}>
               <p className="text-[13px] font-semibold text-gray-700">{AGENT_GUIDES[selectedAgent].desc}</p>
 
+              {/* Guru carousel — only for guru-council, wider than input box */}
+              {selectedAgent === 'guru-council' && (
+                <div className="-mx-20 md:-mx-40" style={{ animation: 'fade-up 0.45s var(--ease-out-expo) 0.1s both' }}>
+                  <GuruCarousel onSelect={(name) => setInput(`Analyze my portfolio from ${name}'s perspective`)} />
+                </div>
+              )}
+
               {AGENT_GUIDES[selectedAgent].scenarios && (
                 <div className="flex flex-wrap gap-2">
                   {AGENT_GUIDES[selectedAgent].scenarios!.map(s => (
@@ -386,7 +401,6 @@ const SuperAgentHome: React.FC = () => {
                 if (!prompts.length) return null;
                 return (
                   <div className="space-y-1">
-                    <p className="text-[13px] font-semibold text-gray-700 px-1 mb-2">Explore Ideas</p>
                     {prompts.map((p, i) => (
                       <button
                         key={i}

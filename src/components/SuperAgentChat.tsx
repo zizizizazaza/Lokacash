@@ -272,20 +272,103 @@ const ROUNDTABLE_AGENTS = [
     { name: 'Quant Tracker', initials: 'QT', agentId: 'agent_3' },
 ];
 
+/* ── Summon pool — expanded analyst characters for roundtable selection ── */
+const SUMMON_POOL = [
+    // ── Core analysts (default selected) ──
+    { id: 'fundamental', name: 'Fundamental Analyst', initials: 'FA', role: 'Value & earnings analysis', color: '#3B82F6', core: true },
+    { id: 'macro', name: 'Macro Strategist', initials: 'MS', role: 'Economic trends & policy', color: '#8B5CF6', core: true },
+    { id: 'sentiment', name: 'Sentiment Engine', initials: 'SE', role: 'Market mood & social signals', color: '#F59E0B', core: true },
+    { id: 'quant', name: 'Quant Tracker', initials: 'QT', role: 'Statistical patterns & models', color: '#10B981', core: true },
+    { id: 'technical', name: 'Technical Analyst', initials: 'TA', role: 'Charts, trends & momentum', color: '#EF4444', core: true },
+    { id: 'risk', name: 'Risk Assessor', initials: 'RA', role: 'Downside scenarios & hedging', color: '#6366F1', core: true },
+    { id: 'sector', name: 'Sector Specialist', initials: 'SS', role: 'Industry dynamics & comps', color: '#EC4899', core: false },
+    { id: 'contrarian', name: "Devil's Advocate", initials: 'DA', role: 'Challenges consensus views', color: '#F97316', core: false },
+    // ── Guru advisors (not default selected, appear smaller) ──
+    { id: 'warren_buffett', name: 'Warren Buffett', initials: 'WB', role: 'Competitive moats & value', color: '#1E40AF', core: false },
+    { id: 'charlie_munger', name: 'Charlie Munger', initials: 'CM', role: 'Mental models & inversion', color: '#374151', core: false },
+    { id: 'peter_lynch', name: 'Peter Lynch', initials: 'PL', role: 'Growth at reasonable price', color: '#047857', core: false },
+    { id: 'cathie_wood', name: 'Cathie Wood', initials: 'CW', role: 'Disruptive innovation', color: '#7C3AED', core: false },
+    { id: 'michael_burry', name: 'Michael Burry', initials: 'MB', role: 'Deep value & macro shorts', color: '#B91C1C', core: false },
+    { id: 'nassim_taleb', name: 'Nassim Taleb', initials: 'NT', role: 'Tail risk & antifragility', color: '#0F766E', core: false },
+];
+const DEFAULT_SUMMON_IDS = new Set(['fundamental', 'macro', 'sentiment', 'quant']);
+
 const AGENT_COLORS: Record<string, string> = {
     FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
 };
 
-// Unified robot icon for all agent avatars
-const ROBOT_ICON = <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-    {/* antenna */}<line x1="12" y1="2" x2="12" y2="6" /><circle cx="12" cy="2" r="1" fill="currentColor" />
-    {/* head */}<rect x="4" y="6" width="16" height="12" rx="3" />
-    {/* eyes */}<circle cx="9" cy="12" r="1.5" fill="currentColor" /><circle cx="15" cy="12" r="1.5" fill="currentColor" />
-    {/* mouth */}<line x1="9" y1="16" x2="15" y2="16" />
-    {/* ears */}<line x1="2" y1="10" x2="4" y2="10" /><line x1="20" y1="10" x2="22" y2="10" />
-</svg>;
+/* ── Avatar mapping: name/id → JPG path ── */
+const AVATAR_MAP: Record<string, string> = {
+    // SUMMON_POOL ids
+    fundamental: '/avatars/fundamental_analyst.jpg',
+    macro: '/avatars/default.jpg',
+    sentiment: '/avatars/sentiment_analyst.jpg',
+    quant: '/avatars/default.jpg',
+    technical: '/avatars/technical_analyst.jpg',
+    risk: '/avatars/default.jpg',
+    sector: '/avatars/default.jpg',
+    contrarian: '/avatars/default.jpg',
+    // ROUNDTABLE_AGENTS initials
+    FA: '/avatars/fundamental_analyst.jpg',
+    MS: '/avatars/default.jpg',
+    SE: '/avatars/sentiment_analyst.jpg',
+    QT: '/avatars/default.jpg',
+    TA: '/avatars/technical_analyst.jpg',
+    RA: '/avatars/default.jpg',
+    SS: '/avatars/default.jpg',
+    DA: '/avatars/default.jpg',
+    // Backend analyst snake_case keys (from hedge-fund agent)
+    technical_analyst: '/avatars/technical_analyst.jpg',
+    fundamentals_analyst: '/avatars/fundamental_analyst.jpg',
+    sentiment_analyst: '/avatars/sentiment_analyst.jpg',
+    news_sentiment_analyst: '/avatars/sentiment_analyst.jpg',
+    valuation_analyst: '/avatars/default.jpg',
+    growth_analyst: '/avatars/default.jpg',
+    risk_management_analyst: '/avatars/default.jpg',
+    // Guru snake_case keys (from hedge-fund agent)
+    warren_buffett: '/avatars/warren_buffett.jpg',
+    ben_graham: '/avatars/ben_graham.jpg',
+    peter_lynch: '/avatars/peter_lynch.jpg',
+    charlie_munger: '/avatars/charlie_munger.jpg',
+    aswath_damodaran: '/avatars/aswath_damodaran.jpg',
+    cathie_wood: '/avatars/cathie_wood.jpg',
+    michael_burry: '/avatars/michael_burry.jpg',
+    stanley_druckenmiller: '/avatars/stanley_druckenmiller.jpg',
+    nassim_taleb: '/avatars/nassim_taleb.jpg',
+    bill_ackman: '/avatars/bill_ackman.jpg',
+    phil_fisher: '/avatars/phil_fisher.jpg',
+    mohnish_pabrai: '/avatars/mohnish_pabrai.jpg',
+    rakesh_jhunjhunwala: '/avatars/rakesh_jhunjhunwala.jpg',
+    // Pretty display names (fallback)
+    'Warren Buffett': '/avatars/warren_buffett.jpg',
+    'Ben Graham': '/avatars/ben_graham.jpg',
+    'Peter Lynch': '/avatars/peter_lynch.jpg',
+    'Charlie Munger': '/avatars/charlie_munger.jpg',
+    'Aswath Damodaran': '/avatars/aswath_damodaran.jpg',
+    'Cathie Wood': '/avatars/cathie_wood.jpg',
+    'Michael Burry': '/avatars/michael_burry.jpg',
+    'Stanley Druckenmiller': '/avatars/stanley_druckenmiller.jpg',
+    'Nassim Taleb': '/avatars/nassim_taleb.jpg',
+    'Bill Ackman': '/avatars/bill_ackman.jpg',
+    'Phil Fisher': '/avatars/phil_fisher.jpg',
+    'Mohnish Pabrai': '/avatars/mohnish_pabrai.jpg',
+    'Rakesh Jhunjhunwala': '/avatars/rakesh_jhunjhunwala.jpg',
+    'Fundamental Analyst': '/avatars/fundamental_analyst.jpg',
+    'Technical Analyst': '/avatars/technical_analyst.jpg',
+    'Sentiment Engine': '/avatars/sentiment_analyst.jpg',
+};
 
-const AGENT_ICON = (_initials: string) => ROBOT_ICON;
+const getAgentAvatar = (nameOrId: string) => AVATAR_MAP[nameOrId] || '/avatars/default.jpg';
+
+/** Convert snake_case key to display name: "fundamentals_analyst" → "Fundamentals Analyst" */
+const prettyAgentName = (raw: string) =>
+    AVATAR_MAP[raw] ? raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : raw;
+
+const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: string }> = ({ nameOrId, size = 24, className = '' }) => (
+    <img src={getAgentAvatar(nameOrId)} alt={nameOrId} width={size} height={size}
+        className={`rounded-full object-cover shrink-0 ${className}`}
+        style={{ width: size, height: size }} />
+);
 
 /** Build RoundtableData from a real consensus_done result */
 const buildRoundtableFromConsensus = (result: any): RoundtableData => {
@@ -605,92 +688,48 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) =>
 };
 
 // ─── RoundtableView Component ──────────────────────────
-const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean }> = ({ data, isWaiting, isLive }) => {
-    // Empty / waiting state: show the roundtable graphic with agents but no rounds
+const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean; hideHeader?: boolean;
+    summonPhase?: 'idle' | 'loading' | 'narrating' | 'selecting'; selectedSummonIds?: Set<string>;
+    onSummonToggle?: (id: string) => void; onSummonConfirm?: () => void;
+}> = ({ data, isWaiting, isLive, hideHeader,
+    summonPhase = 'idle', selectedSummonIds, onSummonToggle, onSummonConfirm }) => {
+    // Empty / waiting state: show summon flow OR waiting placeholder
     if (data.rounds.length === 0) {
-        const emptyAgents = ROUNDTABLE_AGENTS;
-        const E_SIZE = 220, E_CTR = E_SIZE / 2, E_R = 72, E_AV = 38, E_HALF = E_AV / 2;
-        const emptyPositions = emptyAgents.map((_, i) => {
-            const a = (i / emptyAgents.length) * 2 * Math.PI - Math.PI / 2;
-            return { x: E_CTR + E_R * Math.cos(a), y: E_CTR + E_R * Math.sin(a) };
-        });
         return (
             <div className="flex flex-col h-full bg-white">
-                <div className="px-5 py-4 border-b border-gray-100">
-                    <h2 className="text-[14px] font-bold text-gray-900">Roundtable Consensus</h2>
-                    <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
-                </div>
-                <div className="flex-1 flex flex-col items-center justify-center px-5">
-                    <div className="relative" style={{ width: E_SIZE, height: E_SIZE + 24 }}>
-                        <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE }} viewBox={`0 0 ${E_SIZE} ${E_SIZE}`}>
-                            <circle cx={E_CTR} cy={E_CTR} r={E_R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
-                            <circle cx={E_CTR} cy={E_CTR} r={E_R} fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4 4" />
-                            {emptyPositions.map((p, i) => (
-                                <line key={i} x1={E_CTR} y1={E_CTR} x2={p.x} y2={p.y} stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
-                            ))}
-                        </svg>
-                        {/* Center indicator */}
-                        <div className="absolute flex items-center justify-center" style={{ left: E_CTR - 26, top: E_CTR - 26, width: 52, height: 52 }}>
+                {!hideHeader && (
+                    <div className="px-5 py-4 border-b border-gray-100">
+                        <h2 className="text-[14px] font-bold text-gray-900">Roundtable Graph</h2>
+                        <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
+                    </div>
+                )}
+                {summonPhase !== 'idle' && selectedSummonIds && onSummonToggle && onSummonConfirm ? (
+                    <SummonCharactersView
+                        phase={summonPhase as 'loading' | 'selecting'}
+                        selectedIds={selectedSummonIds}
+                        onToggle={onSummonToggle}
+                        onConfirm={onSummonConfirm}
+                    />
+                ) : (
+                    <div className="flex-1 flex flex-col items-center justify-center px-5">
+                        <div className="w-16 h-16 rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center mb-4">
                             {isWaiting ? (
-                                <div className="w-[52px] h-[52px] rounded-full bg-blue-50/80 border-2 border-blue-200 flex flex-col items-center justify-center">
-                                    <div className="flex gap-[3px] mb-1">
-                                        {[0, 1, 2].map(d => (
-                                            <div key={d} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${d * 0.2}s` }} />
-                                        ))}
-                                    </div>
-                                    <span className="text-[8px] text-blue-400 font-bold">PREP</span>
+                                <div className="flex gap-[3px]">
+                                    {[0, 1, 2].map(d => (
+                                        <div key={d} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${d * 0.2}s` }} />
+                                    ))}
                                 </div>
                             ) : (
-                                <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
-                                    <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
-                                </div>
+                                <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
                             )}
                         </div>
-                        {/* Agent avatars — orbit when waiting */}
                         {isWaiting ? (
-                            <div className="absolute rt-orbit" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE + 24, transformOrigin: `${E_CTR}px ${E_CTR}px` }}>
-                                {emptyAgents.map((agent, i) => {
-                                    const pos = emptyPositions[i];
-                                    const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                                    return (
-                                        <div key={agent.initials} className="absolute flex flex-col items-center rt-counter-orbit"
-                                            style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV, transformOrigin: `${E_HALF}px ${E_HALF}px` }}>
-                                            <div className="rounded-full flex items-center justify-center text-white shadow-sm ring-2 ring-blue-200/40 ring-offset-1"
-                                                style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.8 }}>
-                                                {AGENT_ICON(agent.initials)}
-                                            </div>
-                                            <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                                {agent.name}
-                                            </span>
-                                        </div>
-                                    );
-                                })}
-                            </div>
+                            <p className="text-[12px] font-medium text-blue-500">Analyzing & gathering data...</p>
                         ) : (
-                            emptyAgents.map((agent, i) => {
-                                const pos = emptyPositions[i];
-                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                                return (
-                                    <div key={agent.initials} className="absolute flex flex-col items-center"
-                                        style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
-                                        <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
-                                            style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
-                                            {AGENT_ICON(agent.initials)}
-                                        </div>
-                                        <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                            {agent.name}
-                                        </span>
-                                    </div>
-                                );
-                            })
+                            <p className="text-[12px] text-gray-400 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
                         )}
                     </div>
-                    {isWaiting ? (
-                        <p className="text-[12px] font-medium text-blue-500 mt-4">Analyzing & gathering data...</p>
-                    ) : (
-                        <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
-                    )}
-                </div>
+                )}
             </div>
         );
     }
@@ -700,7 +739,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
     return (
         <div className="flex flex-col h-full bg-white">
             <div className="px-5 py-4 border-b border-gray-100">
-                <h2 className="text-[14px] font-bold text-gray-900">Roundtable Consensus</h2>
+                <h2 className="text-[14px] font-bold text-gray-900">Roundtable Graph</h2>
                 <p className="text-[11px] text-gray-400 mt-0.5">{data.rounds.length} round{data.rounds.length > 1 ? 's' : ''} of discussion</p>
             </div>
 
@@ -771,9 +810,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                                                                     const color = AGENT_COLORS[a.initials] || '#6b7280';
                                                                     return (
                                                                         <div key={a.initials} className="flex items-center gap-1 bg-gray-50 rounded-full pl-0.5 pr-2 py-0.5">
-                                                                            <div className="w-5 h-5 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: color }}>
-                                                                                <span className="[&>svg]:w-2.5 [&>svg]:h-2.5">{AGENT_ICON(a.initials)}</span>
-                                                                            </div>
+                                                                            <AgentAvatarImg nameOrId={a.name} size={20} />
                                                                             <span className="text-[10px] font-medium text-gray-600">{a.name}</span>
                                                                             <span className="text-[9px] text-gray-400">{a.confidence}%</span>
                                                                         </div>
@@ -785,9 +822,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                                                     ) : (
                                                         <div className="flex items-center justify-between mb-2">
                                                             <div className="flex items-center gap-2">
-                                                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: AGENT_COLORS[group.agents[0].initials] || '#6b7280' }}>
-                                                                    <span className="[&>svg]:w-3 [&>svg]:h-3">{AGENT_ICON(group.agents[0].initials)}</span>
-                                                                </div>
+                                                                <AgentAvatarImg nameOrId={group.agents[0].name} size={24} />
                                                                 <span className="text-[12px] font-semibold text-gray-800">{group.agents[0].name}</span>
                                                             </div>
                                                             <span className="text-[11px] font-bold text-gray-500">{group.agents[0].confidence}%</span>
@@ -865,7 +900,104 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
     );
 };
 
-// ─── ThinkingInlineTrigger (one-liner that opens right side panel) ───
+// ─── Tool → real data-source domain mapping ─────────────────────────
+const TOOL_SOURCE_DOMAINS: Record<string, string[]> = {
+    get_realtime_quote:         ['eastmoney.com', 'sina.com.cn'],
+    get_daily_history:          ['eastmoney.com', 'tushare.pro'],
+    get_chip_distribution:      ['eastmoney.com'],
+    get_stock_info:             ['eastmoney.com', 'finance.sina.com.cn'],
+    search_stock_news:          ['google.com', 'bocha.cn', 'tavily.com'],
+    search_comprehensive_intel: ['google.com', 'brave.com', 'bocha.cn'],
+    get_market_indices:         ['eastmoney.com'],
+    get_sector_rankings:        ['eastmoney.com'],
+    analyze_trend:              ['eastmoney.com'],
+    calculate_ma:               ['eastmoney.com'],
+    get_volume_analysis:        ['eastmoney.com'],
+    analyze_pattern:            ['eastmoney.com'],
+    get_analysis_context:       ['loka-db'],
+    get_skill_backtest_summary: ['loka-db'],
+    get_strategy_backtest_summary: ['loka-db'],
+    get_stock_backtest_summary: ['loka-db'],
+};
+
+// ─── SummonCharactersView — bubble selection for roundtable participants ───
+const SummonCharactersView: React.FC<{
+    phase: 'loading' | 'selecting';
+    selectedIds: Set<string>;
+    onToggle: (id: string) => void;
+    onConfirm: () => void;
+}> = ({ phase, selectedIds, onToggle, onConfirm }) => {
+    if (phase === 'loading') {
+        return (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 py-16">
+                <div className="relative w-16 h-16">
+                    <div className="absolute inset-0 rounded-full border-[3px] border-blue-100" />
+                    <div className="absolute inset-0 rounded-full border-[3px] border-blue-400 border-t-transparent animate-spin" />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                        <svg className="w-6 h-6 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="9" cy="7" r="3" /><circle cx="15" cy="7" r="3" />
+                            <path d="M3 21v-1a4 4 0 014-4h2M13 16h4a4 4 0 014 4v1" />
+                        </svg>
+                    </div>
+                </div>
+                <div className="text-center space-y-1">
+                    <p className="text-[13px] text-gray-700 font-medium">Summoning analysts for your question…</p>
+                    <p className="text-[11px] text-gray-400">Summoning analysts for this discussion</p>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex-1 flex flex-col min-h-0">
+            <div className="px-5 py-3 shrink-0">
+                <p className="text-[12px] text-gray-500">Select analysts for this discussion, or continue directly</p>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4">
+                <div className="flex flex-wrap justify-center gap-5 content-center min-h-full">
+                    {SUMMON_POOL.map((agent, i) => {
+                        const selected = selectedIds.has(agent.id);
+                        return (
+                            <button key={agent.id}
+                                onClick={() => onToggle(agent.id)}
+                                className="flex flex-col items-center gap-1.5 group transition-all"
+                                style={{ animation: `summon-pop 0.4s ease-out ${i * 0.07}s both` }}
+                            >
+                                <div className={`relative w-[56px] h-[56px] rounded-full overflow-hidden
+                                    transition-all duration-200 cursor-pointer ${selected
+                                        ? 'ring-[2.5px] ring-offset-2 ring-blue-400 scale-105 shadow-lg'
+                                        : 'opacity-45 grayscale hover:opacity-75 hover:grayscale-0'
+                                    }`}
+                                >
+                                    <AgentAvatarImg nameOrId={agent.id} size={56} />
+                                    {selected && (
+                                        <div className="absolute -top-0.5 -right-0.5 w-[18px] h-[18px] bg-blue-500 rounded-full flex items-center justify-center shadow-sm">
+                                            <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                            </svg>
+                                        </div>
+                                    )}
+                                </div>
+                                <span className={`text-[10px] font-semibold text-center leading-tight max-w-[68px] transition-colors ${selected ? 'text-gray-800' : 'text-gray-400'}`}>{agent.name}</span>
+                                <span className="text-[9px] text-gray-400 text-center leading-tight max-w-[68px]">{agent.role}</span>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+            <div className="px-5 py-4 border-t border-gray-100 shrink-0">
+                <button onClick={onConfirm}
+                    disabled={selectedIds.size === 0}
+                    className="w-full py-2.5 bg-gray-900 text-white text-[13px] font-semibold rounded-xl hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                    Continue · {selectedIds.size} analyst{selectedIds.size > 1 ? 's' : ''}
+                </button>
+            </div>
+        </div>
+    );
+};
+
+// ─── ThinkingInlineTrigger (Grok-style with staged progress rows) ──────
 const ThinkingInlineTrigger: React.FC<{
     thinking: ThinkingFlow;
     onOpen: () => void;
@@ -875,37 +1007,47 @@ const ThinkingInlineTrigger: React.FC<{
     const durLabel =
         typeof dur === 'number' && !Number.isNaN(dur) ? String(dur) : '?';
     const activeModule = thinking.modules.find(m => m.status === 'active');
+    const trace = thinking.toolTrace || [];
 
-    // ── Single cycling label that changes every 3s ──
-    const phaseMsgs: Record<string, string[]> = useMemo(() => ({
-        search: ['Searching the web...', 'Scanning market feeds...', 'Checking social signals...', 'Reading financial data...', 'Crawling news sources...'],
-        analysis: ['Analyzing data...', 'Cross-referencing sources...', 'Evaluating fundamentals...', 'Identifying key patterns...'],
-        simulation: ['Running simulations...', 'Modeling scenarios...', 'Stress-testing thesis...', 'Simulating guru perspectives...'],
-        consensus: ['Reaching consensus...', 'Weighing expert views...', 'Forming final opinion...', 'Calculating conviction...'],
-    }), []);
-    const [msgIdx, setMsgIdx] = useState(0);
-    useEffect(() => {
-        if (!thinking.isActive) return;
-        setMsgIdx(0);
-        const iv = setInterval(() => setMsgIdx(i => i + 1), 3000);
-        return () => clearInterval(iv);
-    }, [thinking.isActive, activeModule?.type]);
-
-    const label = useMemo(() => {
+    // ── Line 1: summary title ──
+    const phaseLabel = useMemo(() => {
         if (!thinking.isActive) return `Loka completed in ${durLabel}s`;
-        const trace = thinking.toolTrace;
-        const running = trace?.filter(t => t.status === 'running');
-        // If something is actively fetching, show that specifically
-        if (activeModule?.type === 'search' && running && running.length > 0) {
-            return `Fetching ${running[0].displayName}...`;
-        }
         const type = activeModule?.type || 'search';
-        const msgs = phaseMsgs[type] || phaseMsgs.search;
-        return msgs[msgIdx % msgs.length];
-    }, [thinking.isActive, thinking.toolTrace, activeModule, msgIdx, durLabel, phaseMsgs]);
+        const labels: Record<string, string> = {
+            search: 'Searching the web',
+            analysis: 'Analyzing data',
+            simulation: 'Running simulations',
+            consensus: 'Reaching consensus',
+        };
+        return labels[type] || 'Thinking';
+    }, [thinking.isActive, activeModule, durLabel]);
+
+    // ── Capsule items: only show items for currently-running tools ──
+    const visibleCapsules = useMemo(() => {
+        if (!thinking.isActive || trace.length === 0) return [];
+        // Only show items from tools that are still running
+        const runningTools = trace.filter(t => t.status === 'running');
+        if (runningTools.length === 0) return [];
+        const seen = new Set<string>();
+        const items: { label: string; isDomain: boolean }[] = [];
+        for (const t of runningTools) {
+            if (t.displayName && !seen.has('a:' + t.displayName)) {
+                seen.add('a:' + t.displayName);
+                items.push({ label: t.displayName, isDomain: false });
+            }
+            const domains = (t.tool && TOOL_SOURCE_DOMAINS[t.tool]) || [];
+            for (const d of domains) {
+                if (d === 'loka-db' || seen.has('d:' + d)) continue;
+                seen.add('d:' + d);
+                items.push({ label: d, isDomain: true });
+            }
+        }
+        return items.slice(-5);
+    }, [trace, thinking.isActive]);
 
     const isSimple = thinking.routedMode === 'fast';
 
+    // Simple mode: single line, no panel open
     if (isSimple) {
         return (
             <div className="flex items-center gap-2 py-1.5 mb-2">
@@ -914,20 +1056,35 @@ const ThinkingInlineTrigger: React.FC<{
                 ) : (
                     <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
                 )}
-                <span className="text-[13px] font-medium text-gray-400">{label}</span>
+                <span className="text-[13px] font-medium text-gray-400">{phaseLabel}</span>
             </div>
         );
     }
 
+    // Full mode — arrow stays aligned to line 1 (items-center on the top row)
     return (
-        <button onClick={onOpen} className="group flex items-center gap-2 py-1.5 mb-2 hover:opacity-80 transition-opacity">
-            {thinking.isActive ? (
-                <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-            ) : (
-                <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+        <button onClick={onOpen} className="group py-1.5 mb-2 hover:opacity-80 transition-opacity text-left">
+            {/* Top row: spinner/check + title + arrow — fixed alignment */}
+            <div className="inline-flex items-center gap-2">
+                {thinking.isActive ? (
+                    <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                ) : (
+                    <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                )}
+                <span className="text-[13px] font-medium text-gray-500">{phaseLabel}</span>
+                <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+            </div>
+            {/* Capsule row below */}
+            {thinking.isActive && visibleCapsules.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 mt-1.5 pl-6 animate-fade-hint">
+                    {visibleCapsules.map((item, i) => (
+                        <span key={i} className={`inline-flex items-center px-1.5 py-[1px] rounded-full text-[10px] font-medium ${item.isDomain ? 'bg-gray-100 text-gray-500' : 'bg-blue-50 text-blue-500'}`}>
+                            {item.isDomain && <span className="w-1 h-1 rounded-full bg-blue-400 mr-1 opacity-60" />}
+                            {item.label}
+                        </span>
+                    ))}
+                </div>
             )}
-            <span key={label} className="text-[13px] font-medium text-gray-500 animate-fade-hint">{label}</span>
-            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
         </button>
     );
 };
@@ -986,7 +1143,8 @@ const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
 const ThinkingProcessSidePanel: React.FC<{
     thinking: ThinkingFlow;
     onClose: () => void;
-}> = ({ thinking, onClose }) => {
+    hideHeader?: boolean;
+}> = ({ thinking, onClose, hideHeader }) => {
 
     // ── Sub-section renderers for Search Module ──
     const SocialSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
@@ -1182,16 +1340,13 @@ const ThinkingProcessSidePanel: React.FC<{
         const ungrouped = hasGroups ? [] : d.panelists;
 
         const renderPanelist = (p: SimPanelist, i: number) => {
-            const colors = ['bg-blue-100 text-blue-700', 'bg-purple-100 text-purple-700', 'bg-emerald-100 text-emerald-700', 'bg-amber-100 text-amber-700', 'bg-rose-100 text-rose-700', 'bg-cyan-100 text-cyan-700'];
-            const initials = p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2);
+            const displayName = prettyAgentName(p.name);
             return (
                 <div key={i} className="flex items-center gap-2.5">
-                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${colors[i % colors.length]}`}>
-                        {initials}
-                    </div>
+                    <AgentAvatarImg nameOrId={p.name} size={24} />
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                            <span className="text-[12px] font-medium text-gray-700">{p.name}</span>
+                            <span className="text-[12px] font-medium text-gray-700">{displayName}</span>
                             {p.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing...</span>}
                         </div>
                         {p.status === 'done' && p.verdict && (
@@ -1292,6 +1447,7 @@ const ThinkingProcessSidePanel: React.FC<{
 
     return (
         <div className="flex flex-col h-full bg-white">
+            {!hideHeader && (
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <div>
                     <h2 className="text-[14px] font-bold text-gray-900">Thinking Process</h2>
@@ -1300,6 +1456,7 @@ const ThinkingProcessSidePanel: React.FC<{
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
             </div>
+            )}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
                 {/* Searching module: combines Basic Data (toolTrace) + Market Data (search module) */}
                 {(() => {
@@ -1385,26 +1542,118 @@ interface SuperAgentChatProps {
     initialChatMode?: 'auto' | 'fast' | 'roundtable';
 }
 
-/** Replace bare [Source Name] citations with [Source Name](url) using the sources list */
+/** Replace bare [Source Name] citations with [Source Name](url) using the sources list,
+ *  AND linkify plain-text mentions of source domains / publication names. */
 function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     if (!sources || sources.length === 0) return text;
-    // Build lookup: lowercase title/domain → url
-    const lookup = new Map<string, string>();
+
+    // Build lookup: lowercase key → { url, label }
+    const lookup = new Map<string, { url: string; label: string }>();
     for (const s of sources) {
-        if (s.url) {
-            lookup.set(s.title.toLowerCase(), s.url);
-            lookup.set(s.domain.toLowerCase(), s.url);
-            // Also match without trailing domain suffixes like ".com"
-            const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
-            if (short.length > 2) lookup.set(short, s.url);
+        if (!s.url) continue;
+        const entry = { url: s.url, label: s.domain };
+        lookup.set(s.title.toLowerCase(), entry);
+        lookup.set(s.domain.toLowerCase(), entry);
+        // Short name without TLD suffix (e.g. "finance.yahoo" from "finance.yahoo.com")
+        const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
+        if (short.length > 2) lookup.set(short, entry);
+        // Reversed sub-domain form: "finance.yahoo" → "yahoo finance" (common in LLM output)
+        const parts = short.split('.');
+        if (parts.length >= 2) {
+            const reversed = parts.reverse().join(' ');
+            if (!lookup.has(reversed)) lookup.set(reversed, entry);
+        }
+        // Single-word domain name: "reuters" from "reuters.com"
+        const base = s.domain.replace(/\..*$/, '').toLowerCase();
+        if (base.length > 3 && !lookup.has(base)) lookup.set(base, entry);
+    }
+
+    // Step 0: Clean up malformed LLM output before citation injection
+    let result = text;
+
+    // Remove orphaned URL path fragments that leaked as raw text (standalone lines)
+    result = result.replace(/^\s*[./][^\s\[]*\/[^\s]*[)）]*[。，；,.;!\s]*$/gm, '');
+
+    // Remove inline URL path garbage: ".com/path/..." or "/path/to/...)" anywhere in text
+    result = result.replace(/\.(?:com|cn|org|net|io)(?:\.\w+)*\/[^\s\[\]]*[)]+[。，；,.;]*/g, '');
+    result = result.replace(/(?<![\w(\[])\/[a-z0-9_-]+(?:\/[a-z0-9_-]+){2,}[^\s]*[)]+[。，；,.;]*/gi, '');
+
+    // Remove duplicate consecutive source-name lines (e.g. "Reuters\nReuters\n" from broken links)
+    result = result.replace(/^(.{2,30})\n\1$/gm, '$1');
+
+    // Remove duplicate consecutive markdown links: [A](url)[A](url) → [A](url)
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\1/g, '$1');
+
+    // Strip stray closing parens/brackets after a valid markdown link
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*[)\]]+/g, '$1');
+
+    // Clean up trailing URL garbage after citation tags: [Name](url).cn/path...) or [Name](url)/path...)
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))[./][^\s。，]*[)）]+[。，；,.;]*/g, '$1');
+
+    // Step 1: Fix bare bracket citations [text] NOT followed by (
+    result = result.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
+        const hit = lookup.get(label.toLowerCase().trim());
+        if (hit) return `[${label}](${hit.url})`;
+        return match;
+    });
+
+    // Step 2: Linkify plain-text domain/publication mentions that are NOT already inside []() links.
+    const phrases: { pattern: string; url: string; label: string }[] = [];
+    const seenPatterns = new Set<string>();
+    for (const s of sources) {
+        if (!s.url) continue;
+        // Domain name (e.g. "yahoo.com")
+        const dom = s.domain.toLowerCase();
+        if (dom.length > 3 && !seenPatterns.has(dom)) {
+            seenPatterns.add(dom);
+            phrases.push({ pattern: s.domain, url: s.url, label: s.domain });
+        }
+        // Short name without suffix (e.g. "finance.yahoo")
+        const short = s.domain.replace(/\.\w+$/, '');
+        const shortLower = short.toLowerCase();
+        if (shortLower.length > 3 && !seenPatterns.has(shortLower)) {
+            seenPatterns.add(shortLower);
+            phrases.push({ pattern: short, url: s.url, label: s.domain });
+        }
+        // Reversed form: "Yahoo Finance" from "finance.yahoo.com"
+        const parts = short.toLowerCase().split('.');
+        if (parts.length >= 2) {
+            const reversed = parts.reverse().map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+            if (!seenPatterns.has(reversed.toLowerCase())) {
+                seenPatterns.add(reversed.toLowerCase());
+                phrases.push({ pattern: reversed, url: s.url, label: s.domain });
+            }
+        }
+        // Base domain word: "Reuters" from "reuters.com"
+        const base = s.domain.replace(/\..*$/, '');
+        if (base.length > 3 && !seenPatterns.has(base.toLowerCase())) {
+            seenPatterns.add(base.toLowerCase());
+            phrases.push({ pattern: base, url: s.url, label: s.domain });
         }
     }
-    // Match [text] NOT followed by ( — bare bracket citations
-    return text.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
-        const url = lookup.get(label.toLowerCase().trim());
-        if (url) return `[${label}](${url})`;
-        return match; // no match — leave as-is
-    });
+    phrases.sort((a, b) => b.pattern.length - a.pattern.length);
+
+    for (const { pattern, url } of phrases) {
+        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(
+            `(?<!\\[|\\()\\b(${escaped})\\b(?![\\])(])`,
+            'gi'
+        );
+        let replaced = false;
+        result = result.replace(re, (m, captured) => {
+            if (replaced) return m;
+            replaced = true;
+            return `[${captured}](${url})`;
+        });
+    }
+
+    // Step 3: Remove parenthesised citation wrappers like （[Link](url) 数据）
+    result = result.replace(/[（(]\s*(\[[^\]]+\]\([^)]+\))\s*(?:数据|data|来源|source)?\s*[)）]/gi, ' $1');
+
+    // Step 4: Remove blank lines left by cleanup
+    result = result.replace(/\n{3,}/g, '\n\n');
+
+    return result;
 }
 
 const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
@@ -1479,9 +1728,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         })(),
     );
     // ─── Right Side Panel ─────────────────────────────────────
-    const [showGraphPanel, setShowGraphPanel] = useState(() => (initialChatMode ?? 'auto') === 'roundtable');
+    const [showGraphPanel, setShowGraphPanel] = useState(false);
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
+    const [panelTab, setPanelTab] = useState<'process' | 'graph'>('process');
+    const [summonPhase, setSummonPhase] = useState<'idle' | 'loading' | 'narrating' | 'selecting'>('idle');
+    const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
+    const [pendingRtText, setPendingRtText] = useState<string | null>(null);
+    const summonBypassRef = useRef(false);
     const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
@@ -1765,14 +2019,29 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
         requestAnimationFrame(() => {
-            const el = lastUserMsgRef.current;
-            const container = scrollContainerRef.current;
-            if (el && container) {
-                const elTop = el.offsetTop - container.offsetTop;
-                container.scrollTo({ top: elTop - 24, behavior: 'smooth' });
-            }
+            requestAnimationFrame(() => {
+                const el = lastUserMsgRef.current;
+                const container = scrollContainerRef.current;
+                if (el && container) {
+                    const containerRect = container.getBoundingClientRect();
+                    const elRect = el.getBoundingClientRect();
+                    const scrollTarget = elRect.top - containerRect.top + container.scrollTop - 24;
+                    container.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+                }
+            });
         });
     }, []);
+
+    // Auto-scroll when a new user message is added (catches all paths: handleSend, follow-up, suggestions)
+    const prevMsgCountRef = useRef(0);
+    useEffect(() => {
+        const lastMsg = messages[messages.length - 1];
+        if (messages.length > prevMsgCountRef.current && lastMsg?.role === 'user') {
+            // Double rAF ensures React has committed the DOM
+            requestAnimationFrame(() => requestAnimationFrame(() => scrollUserMsgToTop()));
+        }
+        prevMsgCountRef.current = messages.length;
+    }, [messages.length, scrollUserMsgToTop]);
 
     // ─── Real Socket.IO Integration ────────────────────────────
     const activeMsgIdxRef = useRef<number>(-1);
@@ -2161,7 +2430,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             content: pending!.userContent!,
                             mode: chatMode,
                             sessionId,
-                            agentId: chatSelectedAgent,
+                            agentId: msgIdx <= 1 ? chatSelectedAgent : undefined,
                         });
                         return;
                     }
@@ -2236,8 +2505,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
 
         setActiveGraphMsgIdx(msgIdx);
-        // Keep graph panel open in roundtable mode so user sees the waiting state
-        if (chatMode !== 'roundtable') setShowGraphPanel(false);
+        // In roundtable mode, show the unified panel with process tab
+        if (chatMode === 'roundtable') {
+            setShowThinkingPanel(true);
+            setPanelTab('process');
+        }
+        setShowGraphPanel(false);
 
         setThinkingProcesses(prev => ({
             ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
@@ -2261,7 +2534,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             content: text,
             mode: chatMode,
             sessionId,
-            agentId: chatSelectedAgent,
+            // Only send agentId on the first message (the one that started this session).
+            // Subsequent messages let the router decide based on content — prevents
+            // sticky guru-council mode when user switches topics.
+            agentId: currentMessages.length === 0 ? chatSelectedAgent : undefined,
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -2373,22 +2649,68 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
+
+        // Roundtable mode: show inline summon panel instead of sending immediately
+        if (chatMode === 'roundtable') {
+            saLog('initial: roundtable → show summon flow', { initialPreview: initialMessage.slice(0, 80) });
+            setPendingRtText(initialMessage);
+            setSummonPhase('loading');
+            setSelectedSummonIds(new Set(DEFAULT_SUMMON_IDS));
+            // Narrative sequence: loading → narrating → selecting
+            setTimeout(() => { setSummonPhase('narrating'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 1400);
+            setTimeout(() => { setSummonPhase('selecting'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 3200);
+            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 300);
+            return;
+        }
+
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 80); }, 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 150); }, 50);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode]);
 
     // ─── Handle send ────────────────────────────────────────
+    const handleSummonConfirm = useCallback(() => {
+        const text = pendingRtText;
+        if (!text) return;
+        setSummonPhase('idle');
+        setPendingRtText(null);
+        summonBypassRef.current = true;
+        // Open side panel on Roundtable Graph tab
+        setShowThinkingPanel(true);
+        setShowGraphPanel(false);
+        setSourcePanelData(null);
+        setPanelTab('graph');
+        sendToAI(text, messages);
+        setTimeout(scrollUserMsgToTop, 150);
+    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop]);
+
     const handleSend = () => {
         if (!inputText.trim() || isStreaming) return;
         const text = inputText.trim();
         saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
+
+        // Roundtable mode: intercept to show summon character selection inline
+        if (chatMode === 'roundtable' && !summonBypassRef.current) {
+            const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
+            setMessages(prev => [...prev, userMsg]);
+            setInputText('');
+            setPendingRtText(text);
+            setSummonPhase('loading');
+            setSelectedSummonIds(new Set(DEFAULT_SUMMON_IDS));
+            // Narrative sequence: loading → narrating → selecting
+            setTimeout(() => { setSummonPhase('narrating'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 1400);
+            setTimeout(() => { setSummonPhase('selecting'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 3200);
+            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 300);
+            return;
+        }
+
+        summonBypassRef.current = false;
         const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
         setInputText('');
         sendToAI(text, newMessages);
         // Scroll so the user’s question appears at the top
-        setTimeout(scrollUserMsgToTop, 80);
+        setTimeout(scrollUserMsgToTop, 150);
     };
 
     const handleStop = () => {
@@ -2423,33 +2745,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             <style>{`
                 @keyframes voice-bar { 0%,100%{height:3px} 50%{height:10px} }
                 .voice-bar { min-height: 3px; display:inline-block; border-radius:9999px; background:#9ca3af; }
+                @keyframes summon-float { 0% { opacity: 0; transform: translateY(30px) scale(0.6); } 50% { opacity: 0.7; transform: translateY(-6px) scale(1.04); } 70% { transform: translateY(3px) scale(0.98); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+                @keyframes summon-hover { 0%,100% { transform: translate(-50%,-50%) translateY(0); } 50% { transform: translate(-50%,-50%) translateY(-6px); } }
+                @keyframes summon-text { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+                @keyframes summon-dot { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
+                @keyframes summon-glow { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } 50% { box-shadow: 0 0 12px 2px rgba(34,197,94,0.25); } }
             `}</style>
-            {/* ══ Header: chat title + graph toggle ══ */}
+            {/* ══ Header: chat title ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <div className="flex items-center gap-1.5">
-                    <button
-                    onClick={() => {
-                        setShowGraphPanel(p => {
-                            if (!p && activeGraphMsgIdx === null) {
-                                // Find latest msg with a thinking process
-                                for (let j = messages.length - 1; j >= 0; j--) {
-                                    if (thinkingProcesses[j]) { setActiveGraphMsgIdx(j); break; }
-                                }
-                            }
-                            return !p;
-                        });
-                    }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${showGraphPanel ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
-                        }`}
-                >
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                        <circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="5" r="2.5" /><circle cx="19" cy="19" r="2.5" />
-                        <path d="M7.5 11L16.5 6M7.5 13L16.5 18" />
-                    </svg>
-                    Roundtable Graph
-                </button>
-                </div>
             </div>
 
             {/* ══ Content Row ══ */}
@@ -2544,6 +2848,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             setActiveGraphMsgIdx(i);
                                                             setShowThinkingPanel(true);
                                                             setShowGraphPanel(false);
+                                                            setSourcePanelData(null);
+                                                            if (chatMode === 'roundtable') setPanelTab('process');
                                                         }}
                                                     />
                                                 )}
@@ -2578,7 +2884,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         </div>
                                                         {consensusResults[i] && (
                                                             <button
-                                                                onClick={() => { setActiveGraphMsgIdx(i); setShowGraphPanel(true); setShowThinkingPanel(false); }}
+                                                                onClick={() => { setActiveGraphMsgIdx(i); setShowThinkingPanel(true); setShowGraphPanel(false); setSourcePanelData(null); setPanelTab('graph'); }}
                                                                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
                                                             >
                                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
@@ -2707,36 +3013,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 </SourcesProvider>
                                                             </div>
                                                             )}
+
                                                         </>
                                                     );
                                                 })() : null}
                                                 {/* Sources bar — click to open side panel */}
-                                                {!msg.isStreaming && msg.sources && msg.sources.length > 0 && (
-                                                    <div className="mt-4 pt-3 border-t border-gray-100">
-                                                        <button
-                                                            onClick={() => setSourcePanelData(msg.sources!)}
-                                                            className="flex items-center gap-2 group cursor-pointer hover:bg-gray-50 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
-                                                        >
-                                                            <div className="flex items-center gap-1.5">
-                                                                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
-                                                                <span className="text-[12px] font-medium text-gray-500 group-hover:text-gray-700">{msg.sources.length} sources</span>
-                                                            </div>
-                                                            <div className="flex -space-x-1">
-                                                                {msg.sources.slice(0, 5).map((s, si) => (
-                                                                    <div key={si} className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center" title={s.title}>
-                                                                        <span className="text-[8px] text-gray-500 font-bold uppercase">{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
-                                                                    </div>
-                                                                ))}
-                                                                {msg.sources.length > 5 && (
-                                                                    <div className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center">
-                                                                        <span className="text-[8px] text-gray-400 font-medium">+{msg.sources.length - 5}</span>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-                                                        </button>
-                                                    </div>
-                                                )}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
@@ -2767,7 +3048,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 const prev = messages.slice(0, i);
                                                                 setMessages(prev);
                                                                 sendToAI(userText, prev);
-                                                                setTimeout(scrollUserMsgToTop, 80);
+                                                                setTimeout(scrollUserMsgToTop, 150);
                                                             }}
                                                             title="Retry"
                                                             className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-all"
@@ -2792,6 +3073,48 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         >
                                                             <svg className="w-3.5 h-3.5" fill={reactions[i] === 'disliked' ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z" /><path d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17" /></svg>
                                                         </button>
+                                                        {/* Sources — inline after reactions */}
+                                                        {msg.sources && msg.sources.length > 0 && (
+                                                            <>
+                                                                <div className="w-px h-4 bg-gray-200 mx-1" />
+                                                                <button
+                                                                    onClick={() => { setSourcePanelData(msg.sources!); setShowThinkingPanel(false); setShowGraphPanel(false); }}
+                                                                    className="group inline-flex items-center gap-2 h-7 rounded-lg px-2 text-gray-300 hover:text-gray-500 hover:bg-gray-50 transition-all"
+                                                                >
+                                                                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                                                    <span className="text-[12px] font-medium text-gray-500 group-hover:text-gray-700">{msg.sources.length} sources</span>
+                                                                    <div className="flex -space-x-1">
+                                                                        {(() => {
+                                                                            const seen = new Set<string>();
+                                                                            return msg.sources!.filter(s => {
+                                                                                const key = s.domain?.toLowerCase() || s.favicon;
+                                                                                if (seen.has(key)) return false;
+                                                                                seen.add(key);
+                                                                                return true;
+                                                                            }).slice(0, 5).map((s, si) => (
+                                                                                <div key={si} className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center overflow-hidden" title={s.title}>
+                                                                                    {s.domain ? (
+                                                                                        <img
+                                                                                            src={`https://www.google.com/s2/favicons?domain=${s.domain}&sz=32`}
+                                                                                            alt=""
+                                                                                            className="w-3.5 h-3.5"
+                                                                                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden'); }}
+                                                                                        />
+                                                                                    ) : null}
+                                                                                    <span className={`text-[8px] text-gray-500 font-bold uppercase ${s.domain ? 'hidden' : ''}`}>{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
+                                                                                </div>
+                                                                            ));
+                                                                        })()}
+                                                                        {msg.sources.length > 5 && (
+                                                                            <div className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center">
+                                                                                <span className="text-[8px] text-gray-400 font-medium">+{msg.sources.length - 5}</span>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                                                                </button>
+                                                            </>
+                                                        )}
                                                     </div>
                                                 )}
                                                 {/* Follow-up questions */}
@@ -2814,7 +3137,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                             setMessages(newMsgs);
                                                                             setInputText('');
                                                                             sendToAI(q, newMsgs);
-                                                                            setTimeout(scrollUserMsgToTop, 80);
+                                                                            setTimeout(scrollUserMsgToTop, 150);
                                                                         }}
                                                                         className="group flex items-start gap-1.5 text-left text-[12px] text-gray-400 hover:text-gray-600 py-1 transition-colors cursor-pointer leading-snug"
                                                                     >
@@ -2831,6 +3154,194 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     )}
                                 </div>
                             ))}
+
+                            {/* ── Inline Summon Panel (appears in message area during roundtable) ── */}
+                            {summonPhase !== 'idle' && (() => {
+                                const isCN = /[\u4e00-\u9fff]/.test(pendingRtText || '');
+                                const t = {
+                                    sensing:   isCN ? '正在感知你的问题…'              : 'Sensing your question…',
+                                    attracting: isCN ? '有把握的角色正在被吸引过来 ✨'  : 'Confident analysts are being drawn in ✨',
+                                    ready:     isCN ? '相关的角色已经被吸引过来了'      : 'Relevant analysts have arrived',
+                                    selectTip: isCN ? '点选参与圆桌讨论的分析师'        : 'Tap to select who joins the roundtable',
+                                    btn:       isCN
+                                        ? `开始圆桌讨论 · ${selectedSummonIds.size} 位分析师`
+                                        : `Start roundtable · ${selectedSummonIds.size} analyst${selectedSummonIds.size > 1 ? 's' : ''}`,
+                                    cancel:    isCN ? '取消' : 'Cancel',
+                                };
+                                return (
+                                <div className="flex items-start gap-3">
+                                    <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden" style={{ maxWidth: 680 }}>
+                                            {summonPhase === 'loading' || summonPhase === 'narrating' ? (
+                                                /* ── Phase 1+2: Narrative loading ── */
+                                                <div className="px-6 py-7">
+                                                    {/* Pulsing dots */}
+                                                    <div className="flex items-center gap-1.5 mb-5">
+                                                        {[0, 1, 2].map(i => (
+                                                            <div key={i} className="w-2 h-2 rounded-full bg-emerald-400"
+                                                                style={{ animation: `summon-dot 1.4s ease-in-out ${i * 0.2}s infinite` }} />
+                                                        ))}
+                                                    </div>
+                                                    {/* Narrative text lines */}
+                                                    <div className="space-y-3">
+                                                        <p className="text-[13px] text-gray-700 leading-relaxed"
+                                                            style={{ animation: 'summon-text 0.6s ease-out both' }}
+                                                        >
+                                                            {t.sensing}
+                                                        </p>
+                                                        {summonPhase === 'narrating' && (
+                                                            <p className="text-[13px] text-gray-700 leading-relaxed"
+                                                                style={{ animation: 'summon-text 0.6s ease-out 0.15s both' }}
+                                                            >
+                                                                {t.attracting}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                /* ── Phase 3: Two-zone selection — selected row + scatter pool ── */
+                                                <div>
+                                                    <div className="px-5 pt-4 pb-2">
+                                                        <p className="text-[13px] font-semibold text-gray-800"
+                                                            style={{ animation: 'summon-text 0.4s ease-out both' }}
+                                                        >{t.ready}</p>
+                                                        <p className="text-[11px] text-gray-400 mt-0.5"
+                                                            style={{ animation: 'summon-text 0.4s ease-out 0.1s both' }}
+                                                        >{t.selectTip}</p>
+                                                    </div>
+
+                                                    {/* ── Selected row (top) ── */}
+                                                    <div className="px-4 pt-2 pb-1">
+                                                        <div className="flex flex-wrap items-center gap-3 min-h-[68px] px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-200 border-dashed"
+                                                            style={{ animation: 'summon-text 0.3s ease-out both' }}
+                                                        >
+                                                            {SUMMON_POOL.filter(a => selectedSummonIds.has(a.id)).length === 0 ? (
+                                                                <p className="text-[11px] text-gray-400 italic w-full text-center">
+                                                                    {/[\u4e00-\u9fff]/.test(pendingRtText || '') ? '点击下方头像来选择分析师' : 'Tap avatars below to select analysts'}
+                                                                </p>
+                                                            ) : (
+                                                                SUMMON_POOL.filter(a => selectedSummonIds.has(a.id)).map(agent => (
+                                                                    <button key={agent.id}
+                                                                        onClick={() => setSelectedSummonIds(prev => { const n = new Set(prev); n.delete(agent.id); return n; })}
+                                                                        className="flex flex-col items-center gap-0.5 group transition-all duration-300"
+                                                                        title={/[\u4e00-\u9fff]/.test(pendingRtText || '') ? '点击取消选中' : 'Click to deselect'}
+                                                                    >
+                                                                        <div className="relative w-[46px] h-[46px] rounded-full overflow-hidden ring-2 ring-offset-1 ring-emerald-500 shadow-md group-hover:ring-red-400 group-hover:shadow-red-100 transition-all duration-200"
+                                                                        >
+                                                                            <AgentAvatarImg nameOrId={agent.id} size={46} />
+                                                                            <div className="absolute inset-0 bg-red-500/0 group-hover:bg-red-500/20 transition-colors flex items-center justify-center">
+                                                                                <svg className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                                                                                </svg>
+                                                                            </div>
+                                                                        </div>
+                                                                        <span className="text-[9px] font-medium text-emerald-700 text-center leading-tight whitespace-nowrap max-w-[60px] truncate group-hover:max-w-none group-hover:overflow-visible">{agent.name}</span>
+                                                                    </button>
+                                                                ))
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* ── Scatter pool (bottom) — unselected agents in radial layout ── */}
+                                                    <div className="px-3 py-2">
+                                                        <div className="relative" style={{ height: 260 }}>
+                                                            {(() => {
+                                                                const unselected = SUMMON_POOL.filter(a => !selectedSummonIds.has(a.id));
+                                                                if (unselected.length === 0) return (
+                                                                    <div className="flex items-center justify-center h-full">
+                                                                        <p className="text-[12px] text-gray-300">
+                                                                            {/[\u4e00-\u9fff]/.test(pendingRtText || '') ? '全部已选中' : 'All selected'}
+                                                                        </p>
+                                                                    </div>
+                                                                );
+                                                                const cx = 50, cy = 50;
+                                                                // Seeded random
+                                                                let seed = 0;
+                                                                for (let i = 0; i < (sessionId || 'x').length; i++) seed = ((seed << 5) - seed + (sessionId || 'x').charCodeAt(i)) | 0;
+                                                                const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return (seed & 0x7fffffff) / 2147483647; };
+
+                                                                // Place with random angle + radius
+                                                                type Pt = { x: number; y: number };
+                                                                const pts: Pt[] = unselected.map(() => {
+                                                                    const angle = rand() * Math.PI * 2;
+                                                                    const r = 14 + rand() * 28;
+                                                                    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) * 0.75 };
+                                                                });
+                                                                // Push apart
+                                                                const minDist = 17; // wider spacing to prevent text-avatar overlap
+                                                                for (let iter = 0; iter < 8; iter++) {
+                                                                    for (let i = 0; i < pts.length; i++) {
+                                                                        for (let j = i + 1; j < pts.length; j++) {
+                                                                            const dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y;
+                                                                            const d = Math.sqrt(dx * dx + dy * dy) || 0.1;
+                                                                            if (d < minDist) {
+                                                                                const push = (minDist - d) / 2 + 0.5;
+                                                                                const nx = dx / d, ny = dy / d;
+                                                                                pts[i].x -= nx * push; pts[i].y -= ny * push;
+                                                                                pts[j].x += nx * push; pts[j].y += ny * push;
+                                                                            }
+                                                                        }
+                                                                        pts[i].x = Math.max(10, Math.min(90, pts[i].x));
+                                                                        pts[i].y = Math.max(10, Math.min(90, pts[i].y));
+                                                                    }
+                                                                }
+
+                                                                return unselected.map((agent, ui) => {
+                                                                    const { x: px, y: py } = pts[ui];
+                                                                    const dist = Math.sqrt((px - cx) ** 2 + (py - cy) ** 2);
+                                                                    const distRatio = Math.min(dist / 42, 1);
+                                                                    const avatarSize = Math.round(42 - distRatio * 8); // 42→34
+                                                                    return (
+                                                                        <button key={agent.id}
+                                                                            onClick={() => setSelectedSummonIds(prev => new Set([...prev, agent.id]))}
+                                                                            className="absolute flex flex-col items-center transition-all duration-400 ease-out group"
+                                                                            style={{
+                                                                                left: `${px}%`, top: `${py}%`,
+                                                                                transform: 'translate(-50%, -50%)',
+                                                                                animation: `summon-float 0.6s cubic-bezier(0.22,1,0.36,1) ${ui * 0.05}s both, summon-hover ${3 + (ui % 4) * 0.8}s ease-in-out ${ui * 0.3}s infinite`,
+                                                                                zIndex: Math.round(5 - distRatio * 4),
+                                                                            }}
+                                                                        >
+                                                                            <div className="relative rounded-full overflow-hidden transition-all duration-300 group-hover:scale-110 group-hover:shadow-md"
+                                                                                style={{
+                                                                                    width: avatarSize, height: avatarSize,
+                                                                                    opacity: 0.55 + (1 - distRatio) * 0.3,
+                                                                                    filter: `grayscale(${Math.round(distRatio * 60)}%)`,
+                                                                                }}
+                                                                            >
+                                                                                <AgentAvatarImg nameOrId={agent.id} size={avatarSize} />
+                                                                            </div>
+                                                                            <span className="mt-0.5 font-medium text-center leading-tight whitespace-nowrap transition-colors"
+                                                                                style={{ fontSize: 9, color: '#6b7280', opacity: 0.7 + (1 - distRatio) * 0.3 }}
+                                                                            >{agent.name}</span>
+                                                                        </button>
+                                                                    );
+                                                                });
+                                                            })()}
+                                                        </div>
+                                                    </div>
+                                                    <div className="px-4 pb-4 pt-1 flex gap-2"
+                                                        style={{ animation: 'summon-text 0.4s ease-out 0.8s both' }}
+                                                    >
+                                                        <button onClick={() => { setSummonPhase('idle'); setPendingRtText(null); setMessages(prev => prev.slice(0, -1)); }}
+                                                            className="px-4 py-2.5 border border-gray-200 text-gray-500 text-[12px] font-medium rounded-xl hover:bg-gray-50 transition-colors"
+                                                        >{t.cancel}</button>
+                                                        <button onClick={handleSummonConfirm}
+                                                            disabled={selectedSummonIds.size === 0}
+                                                            className="flex-1 py-2.5 bg-emerald-500 text-white text-[12px] font-semibold rounded-xl hover:bg-emerald-600 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm shadow-emerald-200"
+                                                        >
+                                                            <span>{t.btn}</span>
+                                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            );})()}
+
                             <div ref={messagesEndRef} />
                         </div>
                     </div>
@@ -2925,11 +3436,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 onClick={() => {
                                                                     setChatMode(m.id);
                                                                     setChatModeOpen(false);
-                                                                    // Auto-open Roundtable Graph when selecting roundtable mode
-                                                                    if (m.id === 'roundtable') {
-                                                                        setShowGraphPanel(true);
-                                                                        setShowThinkingPanel(false);
-                                                                    }
                                                                 }}
                                                                 className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
                                                             >
@@ -2997,8 +3503,58 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
                 </div>
 
-                {/* Thinking Process Side Panel */}
-                {showThinkingPanel && currentThinking && (
+                {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
+                {showThinkingPanel && chatMode === 'roundtable' && (
+                    <div className="w-[480px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
+                        {/* Tab bar */}
+                        <div className="flex items-center px-4 py-2.5 border-b border-gray-100 gap-1 shrink-0">
+                            <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                                <button onClick={() => setPanelTab('process')}
+                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
+                                        panelTab === 'process' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                                    }`}>Process</button>
+                                <button onClick={() => setPanelTab('graph')}
+                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
+                                        panelTab === 'graph' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                                    }`}>Roundtable Graph</button>
+                            </div>
+                            <div className="flex-1" />
+                            <button onClick={() => setShowThinkingPanel(false)}
+                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        {/* Content */}
+                        {panelTab === 'process' ? (
+                            currentThinking ? (
+                                <div className="flex-1 overflow-hidden">
+                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader />
+                                </div>
+                            ) : (
+                                <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
+                            )
+                        ) : (
+                            <div className="flex-1 overflow-hidden">
+                                <RoundtableView data={currentRoundtableData}
+                                    isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
+                                    isLive={isStreaming}
+                                    hideHeader
+                                    summonPhase={summonPhase}
+                                    selectedSummonIds={selectedSummonIds}
+                                    onSummonToggle={(id) => setSelectedSummonIds(prev => {
+                                        const next = new Set(prev);
+                                        next.has(id) ? next.delete(id) : next.add(id);
+                                        return next;
+                                    })}
+                                    onSummonConfirm={handleSummonConfirm}
+                                />
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Non-roundtable: original Thinking Process Side Panel */}
+                {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && (
                     <div className="w-[360px] shrink-0 border-l border-gray-100 overflow-hidden">
                         <ThinkingProcessSidePanel
                             thinking={currentThinking}
@@ -3007,8 +3563,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </div>
                 )}
 
-                {/* Roundtable Consensus Panel */}
-                {showGraphPanel && !showThinkingPanel && (
+                {/* Standalone Roundtable Panel — only for non-roundtable mode fallback */}
+                {showGraphPanel && !showThinkingPanel && !sourcePanelData && chatMode !== 'roundtable' && (
                     <div className="w-[520px] shrink-0 border-l border-gray-100 overflow-hidden relative">
                         <button
                             onClick={() => setShowGraphPanel(false)}
@@ -3021,7 +3577,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 )}
 
                 {/* Sources Side Panel */}
-                {sourcePanelData && (
+                {sourcePanelData && !showThinkingPanel && (
                     <div className="w-[380px] shrink-0 border-l border-gray-100 flex flex-col bg-white overflow-hidden">
                         {/* Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
