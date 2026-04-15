@@ -15,6 +15,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -309,7 +310,7 @@ class TavilySearchProvider(BaseSearchProvider):
         
         try:
             client = TavilyClient(api_key=api_key)
-            
+            req_started_at = time.time()
             # 执行搜索（优化：使用advanced深度、限制最近几天）
             search_kwargs: Dict[str, Any] = {
                 "query": query,
@@ -322,11 +323,26 @@ class TavilySearchProvider(BaseSearchProvider):
             if topic is not None:
                 search_kwargs["topic"] = topic
 
+            logger.info(
+                "[Tavily][params] query=%r depth=%s max_results=%s days=%s topic=%s",
+                query,
+                search_kwargs.get("search_depth"),
+                search_kwargs.get("max_results"),
+                search_kwargs.get("days"),
+                search_kwargs.get("topic"),
+            )
             response = client.search(
                 **search_kwargs,
             )
+            req_elapsed = time.time() - req_started_at
             
             # 记录原始响应到日志
+            logger.info(
+                "[Tavily][timing] query=%r elapsed_s=%.3f raw_results=%s",
+                query,
+                req_elapsed,
+                len(response.get('results', [])),
+            )
             logger.info(f"[Tavily] 搜索完成，query='{query}', 返回 {len(response.get('results', []))} 条结果")
             logger.debug(f"[Tavily] 原始响应: {response}")
             
@@ -350,6 +366,7 @@ class TavilySearchProvider(BaseSearchProvider):
             
         except Exception as e:
             error_msg = str(e)
+            logger.warning("[Tavily][error] query=%r error=%s", query, error_msg)
             # 检查是否是配额问题
             if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
                 error_msg = f"API 配额已用尽: {error_msg}"
@@ -2597,15 +2614,24 @@ class SearchService:
                 return cached
 
         try:
-            # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
+            # 并行请求所有可用搜索引擎，再按 provider 优先级顺序择优返回。
             had_provider_success = False
             fallback_response: Optional[SearchResponse] = None
             best_preferred_response: Optional[SearchResponse] = None
             best_preferred_count = 0
-            for provider in self._providers:
-                if not provider.is_available:
-                    continue
+            available_providers = [provider for provider in self._providers if provider.is_available]
+            if not available_providers:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider="None",
+                    success=False,
+                    error_message="所有搜索引擎都不可用或搜索失败",
+                )
 
+            provider_results: Dict[str, Dict[str, Any]] = {}
+
+            def _run_provider(provider: BaseSearchProvider) -> Dict[str, Any]:
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
@@ -2617,14 +2643,25 @@ class SearchService:
                         )
                     )
 
-                response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
+                try:
+                    response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
+                except Exception as exc:
+                    response = SearchResponse(
+                        query=query,
+                        results=[],
+                        provider=provider.name,
+                        success=False,
+                        error_message=str(exc),
+                    )
+
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
                     max_results=provider_max_results,
                     log_scope=f"{stock_code}:{provider.name}:stock_news",
                 )
-                had_provider_success = had_provider_success or bool(response.success)
+                preferred_count = 0
+                limited_response: Optional[SearchResponse] = None
 
                 if filtered_response.success and filtered_response.results:
                     prioritized_response, preferred_count = self._prioritize_news_language(
@@ -2635,8 +2672,63 @@ class SearchService:
                         prioritized_response,
                         max_results=max_results,
                     )
-                    visible_preferred_count = min(preferred_count, len(limited_response.results))
 
+                return {
+                    "provider": provider,
+                    "response": response,
+                    "filtered_response": filtered_response,
+                    "limited_response": limited_response,
+                    "visible_preferred_count": (
+                        min(preferred_count, len(limited_response.results))
+                        if limited_response is not None
+                        else 0
+                    ),
+                }
+
+            max_workers = min(len(available_providers), 6)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_provider = {
+                    pool.submit(_run_provider, provider): provider
+                    for provider in available_providers
+                }
+                for future in as_completed(future_to_provider):
+                    provider = future_to_provider[future]
+                    try:
+                        provider_results[provider.name] = future.result()
+                    except Exception as exc:
+                        provider_results[provider.name] = {
+                            "provider": provider,
+                            "response": SearchResponse(
+                                query=query,
+                                results=[],
+                                provider=provider.name,
+                                success=False,
+                                error_message=str(exc),
+                            ),
+                            "filtered_response": SearchResponse(
+                                query=query,
+                                results=[],
+                                provider=provider.name,
+                                success=False,
+                                error_message=str(exc),
+                            ),
+                            "limited_response": None,
+                            "visible_preferred_count": 0,
+                        }
+
+            # 继续按照 provider 优先级顺序做决策，保持原有行为稳定。
+            for provider in available_providers:
+                payload = provider_results.get(provider.name)
+                if payload is None:
+                    continue
+
+                response = payload["response"]
+                filtered_response = payload["filtered_response"]
+                limited_response = payload["limited_response"]
+                visible_preferred_count = int(payload["visible_preferred_count"] or 0)
+                had_provider_success = had_provider_success or bool(response.success)
+
+                if limited_response is not None and filtered_response.success and filtered_response.results:
                     if not prefer_chinese:
                         logger.info(f"使用 {provider.name} 搜索成功")
                         self._put_cache(cache_key, limited_response)
@@ -2925,6 +3017,17 @@ class SearchService:
             provider_index += 1
             
             logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
+            dim_started_at = time.time()
+            logger.info(
+                "[情报搜索][params] dim=%s provider=%s query=%r tavily_topic=%s strict_freshness=%s search_days=%s provider_max_results=%s",
+                dim.get('name'),
+                provider.name,
+                dim.get('query'),
+                dim.get('tavily_topic'),
+                dim.get('strict_freshness'),
+                search_days,
+                provider_max_results,
+            )
 
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
                 response = provider.search(
@@ -2951,6 +3054,7 @@ class SearchService:
                     response,
                     max_results=target_per_dimension,
                 )
+            dim_elapsed_s = time.time() - dim_started_at
             results[dim['name']] = filtered_response
             search_count += 1
             
@@ -2961,8 +3065,26 @@ class SearchService:
                     len(response.results),
                     len(filtered_response.results),
                 )
+                logger.info(
+                    "[情报搜索][timing] dim=%s provider=%s elapsed_s=%.3f success=%s raw=%s filtered=%s",
+                    dim.get('name'),
+                    provider.name,
+                    dim_elapsed_s,
+                    response.success,
+                    len(response.results),
+                    len(filtered_response.results),
+                )
             else:
                 logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
+                logger.info(
+                    "[情报搜索][timing] dim=%s provider=%s elapsed_s=%.3f success=%s raw=%s filtered=%s",
+                    dim.get('name'),
+                    provider.name,
+                    dim_elapsed_s,
+                    response.success,
+                    len(response.results),
+                    len(filtered_response.results),
+                )
             
             # 短暂延迟避免请求过快
             time.sleep(0.5)

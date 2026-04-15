@@ -71,14 +71,23 @@ function isSkippableUrl(url: string): boolean {
 
 function cleanCompactTitle(raw: string): string {
   let t = raw.trim().replace(/^\s*[-*]\s+/, '');
-  if (t.startsWith('*') && t.endsWith('*') && t.length > 2 && !t.startsWith('**')) {
-    t = t.slice(1, -1).trim();
-  }
-  return t.replace(/\s+/g, ' ').slice(0, 200);
+  // Strip common markdown wrappers.
+  t = t
+    .replace(/^\*{1,3}(.+?)\*{1,3}$/, '$1')
+    .replace(/^_{1,3}(.+?)_{1,3}$/, '$1')
+    .replace(/^`{1,3}(.+?)`{1,3}$/, '$1')
+    .trim();
+  // Remove leading markdown heading/list markers.
+  t = t.replace(/^(#{1,6}\s*|[-*]\s+)+/, '').trim();
+  t = t.replace(/\s+/g, ' ').slice(0, 200);
+  // Reject placeholder-like remnants such as "**", "__", "```", etc.
+  if (!t || /^[*_`~\-.\s]+$/.test(t)) return '';
+  return t;
 }
 
 function isNoisePrevLine(t: string): boolean {
   if (!t) return true;
+  if (/^[*_`~\-.\s]+$/.test(t)) return true;
   if (/^https?:\/\//i.test(t)) return true;
   if (/^insights:$/i.test(t)) return true;
   if (/^highlights:$/i.test(t)) return true;
@@ -93,6 +102,7 @@ function isNoisePrevLine(t: string): boolean {
 /** Compact-item header lines like **id** (score:...) — skip when hunting for a human title. */
 function isResearchItemHeaderLine(t: string): boolean {
   if (!t.startsWith('**')) return false;
+  if (/^\*+\s*$/.test(t)) return true;
   return /\(score:/i.test(t) || /\[WEB\]/i.test(t);
 }
 

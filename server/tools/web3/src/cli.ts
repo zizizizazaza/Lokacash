@@ -4,9 +4,27 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 const PUBLIC_MCP = 'https://mcp.api.coingecko.com/mcp';
 const PRO_MCP = 'https://mcp.pro-api.coingecko.com/mcp';
+
+let proxyInitialized = false;
+
+function initProxyFromEnv(): void {
+  if (proxyInitialized) return;
+  const proxyUrl = (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim();
+  if (!proxyUrl) return;
+  try {
+    const agent = new ProxyAgent(proxyUrl);
+    setGlobalDispatcher(agent);
+    console.error(`[web3-cli] outbound proxy enabled: ${proxyUrl}`);
+  } catch (e) {
+    console.error(`[web3-cli] proxy init failed: ${(e as Error).message}`);
+  } finally {
+    proxyInitialized = true;
+  }
+}
 
 function getArgQuery(): string {
   const a = process.argv.slice(2).join(' ').trim();
@@ -334,6 +352,7 @@ async function runMcp(
 }
 
 async function main() {
+  initProxyFromEnv();
   const query = getArgQuery();
   if (!query) {
     console.log(JSON.stringify({ ok: false, error: 'missing_query', report: '' }));

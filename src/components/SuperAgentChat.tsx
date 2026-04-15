@@ -2040,10 +2040,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 // Guard: if this message is no longer streaming (previous run already finished
                 // or a new run already took over), ignore stale stream_done
                 if (!updated[msgIdx].isStreaming) return prev;
+                const streamedContent = updated[msgIdx].content || '';
+                const finalContent = data.content || '';
+                // Prefer authoritative stream_done payload when it is longer/different.
+                // This fixes truncation when some progress chunks were dropped.
+                const resolvedContent =
+                    finalContent && finalContent.length >= streamedContent.length
+                        ? finalContent
+                        : streamedContent || finalContent;
                 updated[msgIdx] = {
                     ...updated[msgIdx],
-                    // Only use server content if we have nothing accumulated (e.g. reconnect)
-                    content: updated[msgIdx].content || data.content || '',
+                    content: resolvedContent,
                     isStreaming: false, 
                     timestamp: new Date().toLocaleTimeString(),
                     sources: data.sources,

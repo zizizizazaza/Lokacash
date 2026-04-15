@@ -1,3 +1,5 @@
+import { ProxyAgent } from 'undici';
+
 /**
  * Token Price Service — CoinGecko API with local cache fallback
  * 
@@ -39,38 +41,103 @@ let cachedPrices: Record<string, number> = { ...FALLBACK_PRICES };
 let lastFetchAt: Date | null = null;
 let fetchInterval: ReturnType<typeof setInterval> | null = null;
 
+/** Node 自带 fetch 不会读 macOS「系统代理」，需与 curl 一致时请设 HTTPS_PROXY / HTTP_PROXY */
+let coingeckoProxyAgent: ProxyAgent | null = null;
+
+function getCoingeckoDispatcher(): ProxyAgent | undefined {
+  const uri = (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim();
+  if (!uri) return undefined;
+  if (!coingeckoProxyAgent) {
+    coingeckoProxyAgent = new ProxyAgent({ uri });
+    console.log('[PriceService] CoinGecko outbound using proxy from env (HTTPS_PROXY or HTTP_PROXY)');
+  }
+  return coingeckoProxyAgent;
+}
+
+function formatFetchError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts = [err.message];
+  let c: unknown = (err as Error & { cause?: unknown }).cause;
+  let depth = 0;
+  while (c instanceof Error && depth < 4) {
+    parts.push(`cause: ${c.message}`);
+    c = (c as Error & { cause?: unknown }).cause;
+    depth++;
+  }
+  return parts.join(' | ');
+}
+
+function coingeckoFetchTimeoutMs(): number {
+  const raw = (process.env.COINGECKO_FETCH_TIMEOUT_MS || '').trim();
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 5000 && n <= 120_000) {
+    return n;
+  }
+  // simple/price with many ids is heavier than /ping; cold start + concurrent boot often needs >10s
+  return 25_000;
+}
+
+function isTransientNetworkError(err: unknown): boolean {
+  const name = err && typeof err === 'object' && 'name' in err ? String((err as Error).name) : '';
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    /timeout|aborted|ECONNRESET|ETIMEDOUT|fetch failed/i.test(msg)
+  );
+}
+
 /** Fetch prices from CoinGecko free API (no API key needed) */
 async function fetchFromCoinGecko(): Promise<Record<string, number> | null> {
-  try {
-    const ids = [...new Set(Object.values(COINGECKO_IDS))].join(',');
-    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`;
+  const ids = [...new Set(Object.values(COINGECKO_IDS))].join(',');
+  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`;
+  const timeoutMs = coingeckoFetchTimeoutMs();
 
-    const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10000), // 10s timeout
-    });
+  const dispatcher = getCoingeckoDispatcher();
 
-    if (!response.ok) {
-      console.warn(`[PriceService] CoinGecko API returned ${response.status}`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(timeoutMs),
+        ...(dispatcher ? { dispatcher } : {}),
+      });
+
+      if (!response.ok) {
+        console.warn(`[PriceService] CoinGecko API returned ${response.status}`);
+        return null;
+      }
+
+      const data = (await response.json()) as Record<string, { usd?: number }>;
+
+      const prices: Record<string, number> = {};
+      for (const [symbol, geckoId] of Object.entries(COINGECKO_IDS)) {
+        const price = data[geckoId]?.usd;
+        if (price !== undefined) {
+          prices[symbol] = price;
+        }
+      }
+
+      return prices;
+    } catch (err) {
+      const transient = isTransientNetworkError(err);
+      if (attempt === 0 && transient) {
+        console.warn(
+          `[PriceService] CoinGecko fetch attempt 1 failed (${formatFetchError(err)}), retrying in 1.5s...`,
+        );
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      const hint =
+        !dispatcher && /fetch failed|ECONNREFUSED|ENOTFOUND|certificate/i.test(formatFetchError(err))
+          ? ' (若本机需代理访问外网，请在 server/.env 设置 HTTPS_PROXY，例如 HTTPS_PROXY=http://127.0.0.1:7890)'
+          : '';
+      console.warn('[PriceService] CoinGecko fetch failed:', formatFetchError(err) + hint);
       return null;
     }
-
-    const data = await response.json() as Record<string, { usd?: number }>;
-
-    // Map CoinGecko response back to our symbols
-    const prices: Record<string, number> = {};
-    for (const [symbol, geckoId] of Object.entries(COINGECKO_IDS)) {
-      const price = data[geckoId]?.usd;
-      if (price !== undefined) {
-        prices[symbol] = price;
-      }
-    }
-
-    return prices;
-  } catch (err) {
-    console.warn('[PriceService] CoinGecko fetch failed:', (err as Error).message);
-    return null;
   }
+
+  return null;
 }
 
 /** Refresh cached prices */

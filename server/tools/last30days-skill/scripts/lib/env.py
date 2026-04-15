@@ -11,6 +11,14 @@ from typing import Optional, Dict, Any, List, Literal
 
 logger = logging.getLogger(__name__)
 
+# Cache X source status for a short interval to avoid repeated Bird probes.
+_X_STATUS_CACHE_TTL_S = 30.0
+_X_STATUS_CACHE: Dict[str, Any] = {
+    "key": None,
+    "expires_at": 0.0,
+    "value": None,
+}
+
 # ---------------------------------------------------------------------------
 # Cookie domain registry: maps source names to browser cookie extraction params.
 # Each entry: (domain, cookie_names, config_key_mapping)
@@ -442,7 +450,11 @@ def get_reddit_source(config: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def get_available_sources(config: Dict[str, Any]) -> str:
+def get_available_sources(
+    config: Dict[str, Any],
+    *,
+    x_source_status: Optional[Dict[str, Any]] = None,
+) -> str:
     """Determine which sources are available.
 
     X is available if Bird (AUTH_TOKEN/CT0 env or cookies) or XAI_API_KEY works.
@@ -454,7 +466,10 @@ def get_available_sources(config: Dict[str, Any]) -> str:
     Returns: 'all', 'both', 'reddit', 'reddit-web', 'x', 'x-web', 'web', or 'none'
     """
     has_reddit = True
-    has_x = get_x_source(config) is not None
+    if isinstance(x_source_status, dict):
+        has_x = bool(x_source_status.get("source"))
+    else:
+        has_x = get_x_source(config) is not None
     has_web = has_web_search_keys(config)
 
     if has_reddit and has_x:
@@ -487,7 +502,11 @@ def get_web_search_source(config: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def get_missing_keys(config: Dict[str, Any]) -> str:
+def get_missing_keys(
+    config: Dict[str, Any],
+    *,
+    x_source_status: Optional[Dict[str, Any]] = None,
+) -> str:
     """Determine which sources are missing (accounting for Bird).
 
     Returns: 'all', 'both', 'reddit', 'x', 'web', or 'none'
@@ -496,12 +515,14 @@ def get_missing_keys(config: Dict[str, Any]) -> str:
     has_xai = bool(config.get('XAI_API_KEY'))
     has_web = has_web_search_keys(config)
 
-    # Check if Bird provides X access (import here to avoid circular dependency)
-    from . import bird_x
-    has_bird = bird_x.is_bird_installed() and bird_x.is_bird_authenticated()
-
-    # X/Twitter: Bird or xAI only (SC key is not used as the X backend).
-    has_x = has_xai or has_bird
+    if isinstance(x_source_status, dict):
+        has_x = bool(x_source_status.get("source"))
+    else:
+        # Check if Bird provides X access (import here to avoid circular dependency)
+        from . import bird_x
+        has_bird = bird_x.is_bird_installed() and bird_x.is_bird_authenticated()
+        # X/Twitter: Bird or xAI only (SC key is not used as the X backend).
+        has_x = has_xai or has_bird
 
     if has_reddit and has_x and has_web:
         return 'none'
@@ -627,6 +648,12 @@ def get_x_source_with_method(config: Dict[str, Any]) -> tuple[Optional[str], Opt
     # Check Bird first (free option — uses AUTH_TOKEN/CT0 from any source)
     if bird_x.is_bird_installed():
         auth_source = config.get('_AUTH_TOKEN_SOURCE')
+        has_env_creds = bool(config.get('AUTH_TOKEN') and config.get('CT0'))
+        strict_env_check = str(os.environ.get("BIRD_STRICT_ENV_AUTH_CHECK", "")).strip().lower() in {"1", "true", "yes"}
+
+        # Fast path: explicit env cookies are present. Skip --whoami probe unless strict check is enabled.
+        if auth_source == 'env' and has_env_creds and not strict_env_check:
+            return 'bird', 'env'
 
         # If SETUP_COMPLETE is not set, only allow explicit env var credentials.
         # Do NOT call is_bird_authenticated() for browser-cookie probing —
@@ -772,6 +799,24 @@ def get_x_source_status(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     from . import bird_x
 
+    cache_key = "|".join([
+        str(bool(config.get("SETUP_COMPLETE"))),
+        str(config.get("_AUTH_TOKEN_SOURCE") or ""),
+        str(bool(config.get("AUTH_TOKEN"))),
+        str(bool(config.get("CT0"))),
+        str(bool(config.get("XAI_API_KEY"))),
+        str(bool(config.get("SCRAPECREATORS_API_KEY"))),
+        str(os.environ.get("BIRD_STRICT_ENV_AUTH_CHECK", "") or ""),
+    ])
+    now = time.time()
+    cached_value = _X_STATUS_CACHE.get("value")
+    if (
+        _X_STATUS_CACHE.get("key") == cache_key
+        and isinstance(cached_value, dict)
+        and float(_X_STATUS_CACHE.get("expires_at") or 0.0) > now
+    ):
+        return dict(cached_value)
+
     setup_complete = config.get('SETUP_COMPLETE')
     xai_available = bool(config.get('XAI_API_KEY'))
     scrapecreators_available = bool(config.get('SCRAPECREATORS_API_KEY'))
@@ -786,7 +831,7 @@ def get_x_source_status(config: Dict[str, Any]) -> Dict[str, Any]:
         # Bird "authenticated" only if get_x_source_with_method found explicit creds
         bird_authenticated = (source == 'bird')
 
-        return {
+        status = {
             "source": source,
             "method": method,
             "bird_installed": bird_installed,
@@ -796,20 +841,37 @@ def get_x_source_status(config: Dict[str, Any]) -> Dict[str, Any]:
             "scrapecreators_available": scrapecreators_available,
             "can_install_bird": True,
         }
+        _X_STATUS_CACHE.update(
+            {"key": cache_key, "expires_at": now + _X_STATUS_CACHE_TTL_S, "value": dict(status)}
+        )
+        return status
 
     # SETUP_COMPLETE is set — normal flow
-    bird_status = bird_x.get_bird_status()
-
-    # Use the unified resolution function for source + method
+    # Use the unified resolution function first so we can fast-path env creds
+    # without paying an extra Bird whoami probe.
     source, method = get_x_source_with_method(config)
+    bird_installed = bird_x.is_bird_installed()
+    bird_authenticated = source == "bird"
+    bird_username = "env AUTH_TOKEN" if (bird_authenticated and method == "env") else None
+    can_install_bird = True
 
-    return {
+    if bird_installed and not bird_authenticated:
+        bird_status = bird_x.get_bird_status()
+        bird_authenticated = bool(bird_status["authenticated"])
+        bird_username = bird_status["username"]
+        can_install_bird = bird_status["can_install"]
+
+    status = {
         "source": source,
         "method": method,
-        "bird_installed": bird_status["installed"],
-        "bird_authenticated": bird_status["authenticated"],
-        "bird_username": bird_status["username"],
+        "bird_installed": bird_installed,
+        "bird_authenticated": bird_authenticated,
+        "bird_username": bird_username,
         "xai_available": xai_available,
         "scrapecreators_available": scrapecreators_available,
-        "can_install_bird": bird_status["can_install"],
+        "can_install_bird": can_install_bird,
     }
+    _X_STATUS_CACHE.update(
+        {"key": cache_key, "expires_at": now + _X_STATUS_CACHE_TTL_S, "value": dict(status)}
+    )
+    return status

@@ -926,11 +926,19 @@ Text: "${query}"`;
         });
         const signalResearchLogLines: string[] = [];
         let logHintSources: any[] = [];
+        // Faster default for SuperAgent chat: focus on X + web, skip slower auxiliary sources unless overridden.
+        const superagentSearchSources = (process.env.SUPERAGENT_LAST30DAYS_SEARCH || 'x,web').trim();
 
         promises.push(
           researchService.runDeepResearch(
             plan.capabilities.search.query || [userContent, plan.imageDigest].filter(Boolean).join(' ; '),
-            { deep: false },
+            {
+              deep: false,
+              searchSources: superagentSearchSources || undefined,
+              // Skip last30days internal synthesis to avoid double summarization latency;
+              // SuperAgent already performs final synthesis after all tools settle.
+              skipInnerSynthesis: true,
+            },
             {
               onResearchLine: (line) => {
                 const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '');
@@ -959,6 +967,17 @@ Text: "${query}"`;
             }
             // Fallback: log-based platform hints
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
+            const sourceDomains = Array.from(new Set((socialSources || []).map((s) => s.domain).filter(Boolean)));
+            const sourcePreview = (socialSources || [])
+              .slice(0, 3)
+              .map((s) => `${s.domain || 'unknown'}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
+              .join(' || ');
+            console.log(
+              `[sources] final extraction: count=${socialSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
+            );
+            if (sourcePreview) {
+              console.log(`[sources] final extraction preview: ${sourcePreview}`);
+            }
 
             finalSocialSources = socialSources;
             emitter.emitModule('search', 'completed', {
@@ -2250,6 +2269,19 @@ The HTML must:
       };
 
       const synthStartedAt = Date.now();
+      const shouldLogSynthesisText =
+        /^(1|true|yes|on)$/i.test(String(process.env.SUPERAGENT_LOG_SYNTHESIS_TEXT || '').trim());
+      const logSynthesisFinalText = (kind: 'primary' | 'fallback', content: string) => {
+        if (!shouldLogSynthesisText) return;
+        const text = String(content ?? '');
+        console.log(
+          `[agent:chat:synthesis_text] kind=${kind} sessionId=${sessionId} chars=${text.length} BEGIN`,
+        );
+        console.log(text);
+        console.log(
+          `[agent:chat:synthesis_text] kind=${kind} sessionId=${sessionId} END`,
+        );
+      };
       try {
         console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
         const synthesisStream = await aiService.chatStream(
@@ -2514,6 +2546,7 @@ Research context:\n${synFullContent}${langInstruction}`;
             })
           }
         });
+        logSynthesisFinalText('primary', finalDbContent);
 
         emitter.emitModule('done', 'completed', { duration: dur });
         const streamDoneSources = finalSocialSources.length > 0 ? finalSocialSources : undefined;
@@ -2524,20 +2557,34 @@ Research context:\n${synFullContent}${langInstruction}`;
 
         // --- Async HTML report generation (non-blocking) ---
         // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
+        // IMPORTANT: respect SUPERAGENT_DISABLE_HTML_REPORT here as well (sequential branch).
         const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
-        if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
+        const htmlModeLabel = isDeepResearch ? 'roundtable' : 'standard';
+        if (htmlEligible && config.superAgentDisableHtmlReport) {
+          console.log('[agent:chat:html] Skipped SEQUENTIAL generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
+        } else if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
           // Emit generating signal immediately so frontend shows Web tab skeleton
           const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
           const genMsgIdx = pendingMsgCount - 1;
           emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
-          console.log(`[agent:chat:html] Starting SEQUENTIAL HTML generation for roundtable, input length=${finalDbContent.length}`);
+          const htmlSeqStartedAt = Date.now();
+          console.log(
+            `[agent:chat:html] Starting SEQUENTIAL HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
+          );
           try {
             const htmlContent = await runHtmlGeneration(finalDbContent);
             await emitHtmlResult(htmlContent);
+            console.log(
+              `[agent:chat:timing] html_sequential_s=${asSeconds(Date.now() - htmlSeqStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
+            );
           } catch (htmlErr: any) {
-            console.error('[agent:chat:html] ❌ Roundtable HTML generation failed:', htmlErr.message);
+            console.error(`[agent:chat:html] ❌ Sequential HTML generation failed (${htmlModeLabel}):`, htmlErr.message);
           }
         }
+
+        console.log(
+          `[agent:chat:timing] synthesizer_total_s=${asSeconds(Date.now() - synthStartedAt)} end_to_end_s=${asSeconds(sinceRequestStart())} ui_duration_s=${dur} sessionId=${sessionId}`,
+        );
       } catch (err: any) {
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
         if (isAborted()) {
@@ -2580,6 +2627,7 @@ Research context:\n${synFullContent}${langInstruction}`;
             }),
           },
         });
+        logSynthesisFinalText('fallback', fallbackContent);
 
         streamToChat(fallbackContent);
         emitter.emitModule('done', 'completed', { duration: dur, degraded: true, cause: 'synthesis_error' });

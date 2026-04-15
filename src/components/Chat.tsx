@@ -510,14 +510,15 @@ const Chat: React.FC = () => {
     };
 
     const handleInviteSubmit = async () => {
-        if (!inviteCode.trim()) return;
+        const normalized = inviteCode.replace(/\s+/g, '').trim().toUpperCase();
+        if (!normalized) return;
         setInviteChecking(true);
         setInviteError(null);
         try {
-            const result = await api.validateInvitationCode(inviteCode.trim());
+            const result = await api.validateInvitationCode(normalized);
             if (result.valid) {
-                localStorage.setItem('loka_invite_code', inviteCode.trim().toUpperCase());
-                api.useInvitationCode(inviteCode.trim()).catch(() => { });
+                localStorage.setItem('loka_invite_code', normalized);
+                api.useInvitationCode(normalized).catch(() => { });
                 setShowInviteModal(false);
                 setInviteCode('');
                 // Auto-send the pending message

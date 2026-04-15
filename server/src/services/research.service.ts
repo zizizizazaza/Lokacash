@@ -9,7 +9,12 @@ const __dirname = path.dirname(__filename);
 
 const LAST30DAYS_PATH = path.join(__dirname, '../../tools/last30days-skill');
 
-/** OpenAI-compatible chat completions streaming (SSE). Returns full text. */
+function estimateTokenCount(text: string): number {
+  // Coarse estimate for observability: 1 token ~= 4 chars.
+  return Math.max(1, Math.ceil((text || '').length / 4));
+}
+
+/** OpenAI-compatible chat completions streaming (SSE). Returns full text + streaming usage estimate. */
 async function streamChatCompletion(
   apiUrl: string,
   apiKey: string,
@@ -18,7 +23,7 @@ async function streamChatCompletion(
   temperature: number,
   onToken: (chunk: string) => void,
   timeoutMs: number,
-): Promise<string> {
+): Promise<{ content: string; completionChars: number; completionTokensEst: number }> {
   const response = await fetch(apiUrl, {
     method: 'POST',
     headers: {
@@ -47,6 +52,7 @@ async function streamChatCompletion(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let full = '';
+  let completionChars = 0;
   let buffer = '';
 
   while (true) {
@@ -74,6 +80,7 @@ async function streamChatCompletion(
           (typeof choice?.message?.content === 'string' ? choice.message.content : '');
         if (piece) {
           full += piece;
+          completionChars += piece.length;
           onToken(piece);
         }
       } catch {
@@ -93,6 +100,7 @@ async function streamChatCompletion(
         const piece = json.choices?.[0]?.delta?.content;
         if (piece) {
           full += piece;
+          completionChars += piece.length;
           onToken(piece);
         }
       } catch {
@@ -101,7 +109,11 @@ async function streamChatCompletion(
     }
   }
 
-  return full.trim();
+  return {
+    content: full.trim(),
+    completionChars,
+    completionTokensEst: estimateTokenCount(full),
+  };
 }
 
 /** Legacy: single callback receives stderr lines (with \\n) + synthesis tokens. Structured: split research log vs chat stream. */
@@ -115,7 +127,7 @@ export type DeepResearchProgress =
 export const researchService = {
   runDeepResearch(
     topic: string,
-    options: { deep?: boolean; days?: number } = {},
+    options: { deep?: boolean; days?: number; searchSources?: string; skipInnerSynthesis?: boolean } = {},
     progress?: DeepResearchProgress,
   ) {
     const args = [
@@ -138,6 +150,10 @@ export const researchService = {
 
     if (process.env.EXA_API_KEY) {
       args.push('--include-web');
+    }
+    const searchSources = typeof options.searchSources === 'string' ? options.searchSources.trim() : '';
+    if (searchSources) {
+      args.push('--search', searchSources);
     }
 
     return new Promise<{
@@ -167,6 +183,14 @@ export const researchService = {
         }
         if (line.includes('[Bird]') || line.includes('[BirdRaw]') || line.includes('[BirdPreview]')) {
           console.log(`[researchService:bird] ${line}`);
+        }
+        if (
+          line.includes('[Exa]') ||
+          line.includes('[WebSearch]') ||
+          line.includes('[Tavily]') ||
+          line.includes('[TOKENS]')
+        ) {
+          console.log(`[researchService:web] ${line}`);
         }
         if (!progress) return;
         if (typeof progress === 'function') progress(line + '\n');
@@ -285,19 +309,30 @@ export const researchService = {
         const parseStartedAt = Date.now();
         let finalSummary = stdoutData.trim();
         const extractedSources = sourcesFromLast30DaysCompact(stdoutData);
+        const extractedPreview = extractedSources
+          .slice(0, 3)
+          .map((s) => `${s.domain}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
+          .join(' || ');
         console.log(
           `[researchService:timing] parse_output_s=${asSeconds(Date.now() - parseStartedAt)} total_s=${asSeconds(
             sinceStart(),
           )} topic="${topic}" sources=${extractedSources.length} stdout_len=${stdoutData.length}`,
         );
+        if (extractedPreview) {
+          console.log(`[researchService:sources] extraction_preview=${extractedPreview}`);
+        }
 
         // Optional AI synthesis — tokens go to emitSynthToken only (main chat stream); status lines → research log
-        if (process.env.LOKA_AI_API_KEY && process.env.LOKA_AI_BASE_URL && process.env.LOKA_AI_MODEL) {
+        const aiApiKey = process.env.LOKA_AI_API_KEY;
+        const aiBaseUrl = process.env.LOKA_AI_BASE_URL;
+        const aiModel = process.env.LOKA_AI_MODEL;
+        const shouldRunInnerSynthesis = !options.skipInnerSynthesis && Boolean(aiApiKey && aiBaseUrl && aiModel);
+        if (shouldRunInnerSynthesis && aiApiKey && aiBaseUrl && aiModel) {
           const aiSynthesisStartedAt = Date.now();
           try {
             emitResearchLine('⏳ AI Synthesis：Generating final report…');
 
-            let apiUrl = process.env.LOKA_AI_BASE_URL.replace(/\/$/, '');
+            let apiUrl = aiBaseUrl.replace(/\/$/, '');
             if (!apiUrl.endsWith('/chat/completions')) {
               apiUrl += '/chat/completions';
             }
@@ -335,6 +370,13 @@ ${finalSummary}`,
 
             const wantStream =
               process.env.LOKA_AI_STREAM !== 'false' && process.env.LOKA_AI_STREAM !== '0';
+            const synthesisPromptChars = synthesisMessages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+            const synthesisPromptTokensEst = estimateTokenCount(
+              synthesisMessages.map((m) => m.content || '').join('\n'),
+            );
+            console.log(
+              `[researchService:tokens] stage=ai_synthesis mode=${wantStream ? 'stream' : 'nonstream'} prompt_chars=${synthesisPromptChars} prompt_tokens_est=${synthesisPromptTokensEst} topic="${topic}"`,
+            );
 
             const runNonStreamSynthesis = async () => {
               const nonStreamStartedAt = Date.now();
@@ -342,10 +384,10 @@ ${finalSummary}`,
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
-                  Authorization: `Bearer ${process.env.LOKA_AI_API_KEY}`,
+                  Authorization: `Bearer ${aiApiKey}`,
                 },
                 body: JSON.stringify({
-                  model: process.env.LOKA_AI_MODEL,
+                  model: aiModel,
                   messages: synthesisMessages,
                   temperature: 0.3,
                 }),
@@ -355,6 +397,15 @@ ${finalSummary}`,
                 const data = (await response.json()) as any;
                 if (data.choices && data.choices[0]?.message?.content) {
                   finalSummary = data.choices[0].message.content.trim();
+                  const completionChars = finalSummary.length;
+                  const usagePromptTokens = Number(data?.usage?.prompt_tokens || 0);
+                  const usageCompletionTokens = Number(data?.usage?.completion_tokens || 0);
+                  const usageTotalTokens = Number(data?.usage?.total_tokens || 0);
+                  console.log(
+                    `[researchService:tokens] stage=ai_synthesis mode=nonstream prompt_tokens=${usagePromptTokens || 'n/a'} completion_tokens=${usageCompletionTokens || 'n/a'} total_tokens=${usageTotalTokens || 'n/a'} completion_chars=${completionChars} completion_tokens_est=${estimateTokenCount(
+                      finalSummary,
+                    )} topic="${topic}"`,
+                  );
                   emitResearchLine('✓ AI Synthesis：Report generated (non-streaming)');
                   console.log(
                     `[researchService:timing] ai_nonstream_s=${asSeconds(
@@ -379,14 +430,18 @@ ${finalSummary}`,
             if (wantStream) {
               const streamStartedAt = Date.now();
               try {
-                finalSummary = await streamChatCompletion(
+                const streamResult = await streamChatCompletion(
                   apiUrl,
-                  process.env.LOKA_AI_API_KEY,
-                  process.env.LOKA_AI_MODEL!,
+                  aiApiKey,
+                  aiModel,
                   synthesisMessages,
                   0.3,
                   (chunk) => emitSynthToken(chunk),
                   120000,
+                );
+                finalSummary = streamResult.content;
+                console.log(
+                  `[researchService:tokens] stage=ai_synthesis mode=stream prompt_tokens_est=${synthesisPromptTokensEst} completion_chars=${streamResult.completionChars} completion_tokens_est=${streamResult.completionTokensEst} topic="${topic}"`,
                 );
                 emitResearchLine('✓ AI Synthesis：Streaming generation completed');
                 console.log(
@@ -420,6 +475,8 @@ ${finalSummary}`,
               )} total_s=${asSeconds(sinceStart())} topic="${topic}" error=true`,
             );
           }
+        } else if (options.skipInnerSynthesis) {
+          emitResearchLine('ℹ️ AI Synthesis skipped (SuperAgent will synthesize with all tools later).');
         }
 
         const finalCleanStartedAt = Date.now();

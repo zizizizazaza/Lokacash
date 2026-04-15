@@ -16,16 +16,24 @@ same implementation.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.runner import run_agent_loop, parse_dashboard_json
 from src.agent.tools.registry import ToolRegistry
+from src.data.stock_mapping import STOCK_NAME_MAP
 from src.report_language import normalize_report_language
 from src.market_context import get_market_role, get_market_guidelines
 
 logger = logging.getLogger(__name__)
+_LOCAL_STOCK_NAME_TO_CODE = {name: code for code, name in STOCK_NAME_MAP.items() if name}
+
+_COMPLEXITY_KEYWORDS = (
+    "对比", "比较", "财报", "估值", "回测", "策略", "行业", "竞品", "组合", "仓位", "风险",
+    "模型", "情景", "sotp", "dcf", "peer", "compare", "backtest", "valuation", "portfolio",
+)
 
 
 # ============================================================
@@ -592,12 +600,66 @@ class AgentExecutor:
                 messages.append({"role": "user", "content": context_msg})
                 messages.append({"role": "assistant", "content": "好的，我已了解该股票的历史分析数据。请告诉我你想了解什么？"})
 
+        stock_code_guardrail = self._build_stock_code_guardrail(message=message, context=context)
+        if stock_code_guardrail:
+            messages.append({"role": "system", "content": stock_code_guardrail})
+
         messages.append({"role": "user", "content": message})
 
         # Persist the user turn immediately so the session appears in history during processing
         conversation_manager.add_message(session_id, "user", message)
 
-        result = self._run_loop(messages, tool_decls, parse_dashboard=False, progress_callback=progress_callback)
+        execution_policy = self._resolve_chat_execution_policy(message)
+        if progress_callback:
+            progress_callback({
+                "type": "thinking",
+                "step": 0,
+                "message": (
+                    f"查询复杂度评分 {execution_policy['complexity_score']}/10，"
+                    f"进入{execution_policy['path_mode']}路径（max_steps={execution_policy['max_steps']}）。"
+                ),
+            })
+
+        if execution_policy.get("use_planning"):
+            plan_payload = self._run_planning_phase(
+                messages=messages,
+                user_message=message,
+                progress_callback=progress_callback,
+            )
+            if plan_payload:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "[Planning]\n"
+                            f"{json.dumps(plan_payload, ensure_ascii=False)}"
+                        ),
+                    }
+                )
+                planned_rounds = int(plan_payload.get("max_rounds", execution_policy["max_steps"]))
+                execution_policy["max_steps"] = max(
+                    execution_policy["min_steps"],
+                    min(4, planned_rounds),
+                )
+
+        loop_controls = {
+            "path_mode": execution_policy["path_mode"],
+            "allow_early_stop": True,
+            "confidence_threshold": 0.82,
+            "gain_threshold": 0.10,
+            "low_gain_threshold": 0.08,
+            "low_gain_streak_limit": 2,
+            "min_steps_before_stop": execution_policy["min_steps"],
+        }
+
+        result = self._run_loop(
+            messages,
+            tool_decls,
+            parse_dashboard=False,
+            progress_callback=progress_callback,
+            max_steps_override=execution_policy["max_steps"],
+            loop_controls=loop_controls,
+        )
 
         # Persist assistant reply (or error note) for context continuity
         if result.success:
@@ -608,7 +670,15 @@ class AgentExecutor:
 
         return result
 
-    def _run_loop(self, messages: List[Dict[str, Any]], tool_decls: List[Dict[str, Any]], parse_dashboard: bool, progress_callback: Optional[Callable] = None) -> AgentResult:
+    def _run_loop(
+        self,
+        messages: List[Dict[str, Any]],
+        tool_decls: List[Dict[str, Any]],
+        parse_dashboard: bool,
+        progress_callback: Optional[Callable] = None,
+        max_steps_override: Optional[int] = None,
+        loop_controls: Optional[Dict[str, Any]] = None,
+    ) -> AgentResult:
         """Delegate to the shared runner and adapt the result.
 
         This preserves the exact same observable behaviour as the original
@@ -619,9 +689,10 @@ class AgentExecutor:
             messages=messages,
             tool_registry=self.tool_registry,
             llm_adapter=self.llm_adapter,
-            max_steps=self.max_steps,
+            max_steps=max_steps_override if isinstance(max_steps_override, int) and max_steps_override > 0 else self.max_steps,
             progress_callback=progress_callback,
             max_wall_clock_seconds=self.timeout_seconds,
+            loop_controls=loop_controls,
         )
 
         model_str = loop_result.model
@@ -652,6 +723,79 @@ class AgentExecutor:
             error=loop_result.error,
         )
 
+    def _build_stock_code_guardrail(
+        self,
+        *,
+        message: str,
+        context: Optional[Dict[str, Any]],
+    ) -> str:
+        """Build a strict stock-code constraint to avoid close-code misrouting."""
+        text = str(message or "")
+        if not text:
+            return ""
+
+        # 1) If upstream already provided a stock code, trust it first.
+        context_code = str((context or {}).get("stock_code") or "").strip().upper()
+        if context_code:
+            aliases = self._stock_code_aliases(context_code)
+            aliases_text = ", ".join(f"`{a}`" for a in aliases)
+            return (
+                "代码一致性约束：本轮工具调用必须与既定股票代码保持一致。"
+                f"仅允许使用 {aliases_text}。若出现相近代码（如 00784 vs 00984），"
+                "必须以既定代码为准，不得替换。"
+            )
+
+        # 2) Resolve by exact local name hit (deterministic, no LLM guess).
+        best_name = ""
+        best_code = ""
+        for name, code in _LOCAL_STOCK_NAME_TO_CODE.items():
+            if name and name in text and len(name) > len(best_name):
+                best_name = name
+                best_code = str(code).strip().upper()
+
+        if best_name and best_code:
+            aliases = self._stock_code_aliases(best_code)
+            aliases_text = ", ".join(f"`{a}`" for a in aliases)
+            return (
+                f"代码一致性约束：用户提到“{best_name}”，本轮仅允许使用 {aliases_text}。"
+                "禁止替换为其他近似代码。"
+            )
+
+        # 3) If user explicitly writes code, constrain to that exact code family.
+        explicit = re.search(r"(?<![A-Z0-9])(HK\d{5}|\d{5}\.HK|\d{5})(?![A-Z0-9])", text, re.IGNORECASE)
+        if explicit:
+            raw = explicit.group(1).upper()
+            if raw.endswith(".HK"):
+                raw = raw[:-3]
+            if raw.startswith("HK"):
+                raw = raw[2:]
+            if raw.isdigit() and len(raw) == 5:
+                aliases = self._stock_code_aliases(raw)
+                aliases_text = ", ".join(f"`{a}`" for a in aliases)
+                return (
+                    "代码一致性约束：用户已给出港股代码，工具调用仅允许使用 "
+                    f"{aliases_text}，不得改成其他代码。"
+                )
+
+        return ""
+
+    @staticmethod
+    def _stock_code_aliases(code: str) -> List[str]:
+        """Return normalized code aliases for prompt constraints."""
+        normalized = str(code or "").strip().upper()
+        if not normalized:
+            return []
+
+        if normalized.endswith(".HK"):
+            normalized = normalized[:-3]
+        if normalized.startswith("HK"):
+            normalized = normalized[2:]
+
+        if normalized.isdigit() and len(normalized) == 5:
+            return [f"HK{normalized}", f"{normalized}.HK", normalized]
+
+        return [str(code).strip().upper()]
+
     def _build_user_message(self, task: str, context: Optional[Dict[str, Any]] = None) -> str:
         """Build the initial user message."""
         parts = [task]
@@ -676,3 +820,104 @@ class AgentExecutor:
 
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)
+
+    def _resolve_chat_execution_policy(self, message: str) -> Dict[str, Any]:
+        """Route chat requests into fast/adaptive execution policy."""
+        text = (message or "").lower()
+        score = 0
+
+        if any(k in text for k in _COMPLEXITY_KEYWORDS):
+            score += 3
+
+        multi_stock_tokens = [",", "，", " 和 ", " vs ", " 对比 ", "比较", "以及", " and "]
+        if any(tok in text for tok in multi_stock_tokens):
+            score += 2
+
+        if any(k in text for k in ("长期", "一年", "两年", "three year", "1y", "2y", "3y", "历史")):
+            score += 1
+
+        if len(text) > 80:
+            score += 1
+
+        score = max(0, min(10, score))
+        is_complex = score >= 6
+        if is_complex:
+            return {
+                "path_mode": "adaptive",
+                "complexity_score": score,
+                "max_steps": min(4, self.max_steps),
+                "min_steps": 2,
+                "use_planning": True,
+            }
+        return {
+            "path_mode": "fast",
+            "complexity_score": score,
+            "max_steps": min(2, self.max_steps),
+            "min_steps": 1,
+            "use_planning": False,
+        }
+
+    def _run_planning_phase(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        user_message: str,
+        progress_callback: Optional[Callable] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Run lightweight planning for complex chat queries."""
+        if progress_callback:
+            progress_callback({
+                "type": "thinking",
+                "step": 0,
+                "message": "复杂查询：正在生成轻量分析计划...",
+            })
+
+        planning_prompt = (
+            "You are a planning assistant for stock analysis. "
+            "Given the user request, output a compact JSON plan only.\n"
+            "JSON schema:\n"
+            "{"
+            "\"required_data\": [\"quote|daily|trend|news|fundamental|peer|risk\"], "
+            "\"tools\": [\"tool_name\"], "
+            "\"max_rounds\": 2-4, "
+            "\"reason\": \"short reason\""
+            "}\n"
+            f"User request: {user_message}\n"
+            "Rules: keep plan concise and practical."
+        )
+        planning_messages = messages + [{"role": "user", "content": planning_prompt}]
+        try:
+            plan_response = self.llm_adapter.call_with_tools(
+                planning_messages,
+                [],
+                timeout=self.timeout_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Planning phase failed: %s", exc)
+            return None
+
+        raw = (plan_response.content or "").strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            parsed = parse_dashboard_json(raw)
+            payload = parsed if isinstance(parsed, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        max_rounds = payload.get("max_rounds", 4)
+        try:
+            payload["max_rounds"] = max(2, min(4, int(max_rounds)))
+        except (TypeError, ValueError):
+            payload["max_rounds"] = 4
+        if progress_callback:
+            progress_callback({
+                "type": "thinking",
+                "step": 0,
+                "message": (
+                    f"计划完成：预计调用 {len(payload.get('tools', []) or [])} 个工具，"
+                    f"最多 {payload['max_rounds']} 轮。"
+                ),
+            })
+        return payload

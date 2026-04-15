@@ -21,7 +21,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.tools.registry import ToolRegistry
@@ -47,6 +47,12 @@ _THINKING_TOOL_LABELS: Dict[str, str] = {
     "get_skill_backtest_summary": "Skill backtest overview",
     "get_strategy_backtest_summary": "Strategy backtest overview",
     "get_stock_backtest_summary": "Stock backtest data",
+}
+
+_ESSENTIAL_TOOL_GROUPS: Dict[str, Set[str]] = {
+    "quote": {"get_realtime_quote"},
+    "trend": {"get_daily_history", "analyze_trend"},
+    "news": {"search_stock_news", "search_comprehensive_intel"},
 }
 
 
@@ -324,6 +330,104 @@ def _build_timeout_result(
     )
 
 
+def _collect_successful_tools(tool_calls_log: List[Dict[str, Any]]) -> Set[str]:
+    tools: Set[str] = set()
+    for item in tool_calls_log:
+        if item.get("success") is True and item.get("tool"):
+            tools.add(str(item["tool"]))
+    return tools
+
+
+def _coverage_from_tools(successful_tools: Set[str]) -> Dict[str, bool]:
+    return {
+        group: any(tool in successful_tools for tool in tool_names)
+        for group, tool_names in _ESSENTIAL_TOOL_GROUPS.items()
+    }
+
+
+def _compute_round_metrics(
+    *,
+    current_step: int,
+    max_steps: int,
+    all_tool_calls_log: List[Dict[str, Any]],
+    previous_successful_tools: Set[str],
+    response_had_tools: bool,
+    loop_controls: Optional[Dict[str, Any]],
+    low_gain_streak: int = 0,
+) -> Dict[str, Any]:
+    """Compute per-round control metrics for adaptive early-stop decisions."""
+    loop_controls = loop_controls or {}
+    successful_tools = _collect_successful_tools(all_tool_calls_log)
+    newly_added = successful_tools - previous_successful_tools
+    coverage = _coverage_from_tools(successful_tools)
+    new_coverage = _coverage_from_tools(newly_added)
+
+    # Confidence: heuristic from evidence coverage + amount of successful retrieval.
+    confidence = 0.32
+    if coverage["quote"]:
+        confidence += 0.24
+    if coverage["trend"]:
+        confidence += 0.20
+    if coverage["news"]:
+        confidence += 0.18
+    confidence += min(0.12, 0.02 * len(successful_tools))
+    confidence = max(0.0, min(1.0, confidence))
+
+    # Evidence gain emphasizes newly added core dimensions.
+    new_evidence_gain = 0.0
+    if new_coverage["quote"]:
+        new_evidence_gain += 0.36
+    if new_coverage["trend"]:
+        new_evidence_gain += 0.30
+    if new_coverage["news"]:
+        new_evidence_gain += 0.26
+    if newly_added:
+        new_evidence_gain += min(0.08, 0.02 * len(newly_added))
+    new_evidence_gain = max(0.0, min(1.0, new_evidence_gain))
+
+    path_mode = str(loop_controls.get("path_mode") or "adaptive")
+    confidence_threshold = float(loop_controls.get("confidence_threshold", 0.82))
+    gain_threshold = float(loop_controls.get("gain_threshold", 0.10))
+    min_steps_before_stop = int(loop_controls.get("min_steps_before_stop", 1))
+    allow_early_stop = bool(loop_controls.get("allow_early_stop", True))
+    low_gain_threshold = float(loop_controls.get("low_gain_threshold", 0.08))
+    low_gain_streak_limit = int(loop_controls.get("low_gain_streak_limit", 2))
+
+    continue_reason = "continue_for_more_evidence"
+    should_stop = False
+
+    if not response_had_tools:
+        continue_reason = "model_returned_final_answer"
+        should_stop = True
+    elif path_mode == "fast" and current_step >= min_steps_before_stop:
+        if confidence >= confidence_threshold and new_evidence_gain <= gain_threshold:
+            continue_reason = "sufficient_confidence_low_new_evidence"
+            should_stop = allow_early_stop
+        elif current_step + 1 >= max_steps:
+            continue_reason = "reached_fast_path_step_limit"
+            should_stop = allow_early_stop
+    elif path_mode == "adaptive" and current_step >= min_steps_before_stop:
+        if confidence >= confidence_threshold and new_evidence_gain <= gain_threshold:
+            continue_reason = "adaptive_confident_low_gain"
+            should_stop = allow_early_stop
+        elif low_gain_streak >= low_gain_streak_limit and new_evidence_gain < low_gain_threshold:
+            continue_reason = "adaptive_consecutive_low_gain"
+            should_stop = allow_early_stop
+
+    return {
+        "path_mode": path_mode,
+        "continue_reason": continue_reason,
+        "confidence_score": round(confidence, 3),
+        "new_evidence_gain": round(new_evidence_gain, 3),
+        "should_stop": bool(should_stop),
+        "low_gain_threshold": low_gain_threshold,
+        "low_gain_streak": low_gain_streak,
+        "coverage": coverage,
+        "new_tools": sorted(newly_added),
+        "successful_tools": sorted(successful_tools),
+    }
+
+
 # ============================================================
 # Core loop
 # ============================================================
@@ -338,6 +442,7 @@ def run_agent_loop(
     thinking_labels: Optional[Dict[str, str]] = None,
     max_wall_clock_seconds: Optional[float] = None,
     tool_call_timeout_seconds: Optional[float] = None,
+    loop_controls: Optional[Dict[str, Any]] = None,
 ) -> RunLoopResult:
     """Execute the ReAct LLM ↔ tool loop.
 
@@ -371,6 +476,9 @@ def run_agent_loop(
     provider_used = ""
     models_used: List[str] = []
 
+    previous_successful_tools: Set[str] = set()
+    low_gain_streak = 0
+    loop_controls = loop_controls or {}
     for step in range(max_steps):
         remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
         if remaining_timeout is not None and remaining_timeout <= 0:
@@ -501,6 +609,83 @@ def run_agent_loop(
                     }
                 )
 
+            round_metrics = _compute_round_metrics(
+                current_step=step + 1,
+                max_steps=max_steps,
+                all_tool_calls_log=tool_calls_log,
+                previous_successful_tools=previous_successful_tools,
+                response_had_tools=True,
+                loop_controls=loop_controls,
+                low_gain_streak=low_gain_streak,
+            )
+            previous_successful_tools = set(round_metrics.get("successful_tools") or [])
+            if round_metrics["new_evidence_gain"] < round_metrics.get("low_gain_threshold", 0.08):
+                low_gain_streak += 1
+            else:
+                low_gain_streak = 0
+            if progress_callback:
+                progress_callback({
+                    "type": "round_eval",
+                    "step": step + 1,
+                    "continue_reason": round_metrics["continue_reason"],
+                    "confidence_score": round_metrics["confidence_score"],
+                    "new_evidence_gain": round_metrics["new_evidence_gain"],
+                    "low_gain_streak": low_gain_streak,
+                    "path_mode": round_metrics["path_mode"],
+                    "coverage": round_metrics.get("coverage", {}),
+                })
+
+            if round_metrics.get("should_stop") and step + 1 < max_steps:
+                logger.info(
+                    "Early stop triggered at step %d reason=%s confidence=%.3f gain=%.3f",
+                    step + 1,
+                    round_metrics["continue_reason"],
+                    round_metrics["confidence_score"],
+                    round_metrics["new_evidence_gain"],
+                )
+                if progress_callback:
+                    progress_callback({
+                        "type": "thinking",
+                        "step": step + 1,
+                        "message": "已具备关键证据，正在生成最终结论...",
+                    })
+
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Use the gathered evidence to produce the final answer now. "
+                            "Do not call any additional tools."
+                        ),
+                    }
+                )
+                final_response = llm_adapter.call_with_tools(
+                    messages,
+                    [],
+                    timeout=_remaining_timeout_seconds(start_time, max_wall_clock_seconds),
+                    on_text_delta=_on_stream_delta if progress_callback else None,
+                )
+                provider_used = final_response.provider or provider_used
+                total_tokens += (final_response.usage or {}).get("total_tokens", 0)
+                fm = getattr(final_response, "model", "") or final_response.provider
+                if fm and fm != "error":
+                    models_used.append(fm)
+                if fm and fm != "error" and final_response.usage:
+                    _persist_usage(final_response.usage, fm, call_type="agent")
+                final_content = final_response.content or ""
+                is_error = final_response.provider == "error"
+                return RunLoopResult(
+                    success=not is_error and bool(final_content),
+                    content=final_content if not is_error else "",
+                    tool_calls_log=tool_calls_log,
+                    total_steps=step + 2,
+                    total_tokens=total_tokens,
+                    provider=provider_used,
+                    models_used=models_used,
+                    error=final_content if is_error else None,
+                    messages=messages,
+                )
+
             remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
             if remaining_timeout is not None and remaining_timeout <= 0:
                 logger.warning("Agent timed out after tool execution at step %d", step + 1)
@@ -517,6 +702,25 @@ def run_agent_loop(
 
         else:
             # ---- final answer branch ----
+            round_metrics = _compute_round_metrics(
+                current_step=step + 1,
+                max_steps=max_steps,
+                all_tool_calls_log=tool_calls_log,
+                previous_successful_tools=previous_successful_tools,
+                response_had_tools=False,
+                loop_controls=loop_controls,
+                low_gain_streak=low_gain_streak,
+            )
+            if progress_callback:
+                progress_callback({
+                    "type": "round_eval",
+                    "step": step + 1,
+                    "continue_reason": round_metrics["continue_reason"],
+                    "confidence_score": round_metrics["confidence_score"],
+                    "new_evidence_gain": round_metrics["new_evidence_gain"],
+                    "path_mode": round_metrics["path_mode"],
+                    "coverage": round_metrics.get("coverage", {}),
+                })
             logger.info(
                 "Agent completed in %d steps (%.1fs, %d tokens)",
                 step + 1,
