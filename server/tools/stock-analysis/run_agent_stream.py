@@ -223,6 +223,28 @@ def progress_callback(event: dict):
         elif not ev["message"]:
             ev["message"] = "正在生成最终分析..."
         emit_event(ev)
+    elif event_type == "round_eval":
+        continue_reason = str(event.get("continue_reason", "continue"))
+        confidence_score = event.get("confidence_score", 0.0)
+        new_evidence_gain = event.get("new_evidence_gain", 0.0)
+        low_gain_streak = event.get("low_gain_streak", 0)
+        path_mode = event.get("path_mode", "adaptive")
+        emit_event({
+            "type": "thinking",
+            "step": event.get("step", 0),
+            "message": (
+                f"[{path_mode}] continue_reason={continue_reason} "
+                f"confidence_score={confidence_score} "
+                f"new_evidence_gain={new_evidence_gain} "
+                f"low_gain_streak={low_gain_streak}"
+            ),
+            "continue_reason": continue_reason,
+            "confidence_score": confidence_score,
+            "new_evidence_gain": new_evidence_gain,
+            "low_gain_streak": low_gain_streak,
+            "path_mode": path_mode,
+            "coverage": event.get("coverage", {}),
+        })
 
 
 def main():

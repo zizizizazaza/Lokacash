@@ -99,6 +99,55 @@ def _timing_emit(stage: str, started_at: float, **extra):
     sys.stderr.flush()
 
 
+def _stage_count_map(**named_lists) -> dict:
+    """Return compact {name: len(list)} for stage diagnostics."""
+    return {k: len(v or []) for k, v in named_lists.items()}
+
+
+def _item_preview(item) -> str:
+    """Best-effort compact preview for mixed dict/object item types."""
+    if item is None:
+        return "n/a"
+    if isinstance(item, dict):
+        title = str(
+            item.get("title")
+            or item.get("text")
+            or item.get("question")
+            or item.get("url")
+            or ""
+        ).strip()
+        url = str(item.get("url") or item.get("hn_url") or "").strip()
+    else:
+        title = str(
+            getattr(item, "title", None)
+            or getattr(item, "text", None)
+            or getattr(item, "question", None)
+            or getattr(item, "url", None)
+            or ""
+        ).strip()
+        url = str(getattr(item, "url", None) or getattr(item, "hn_url", None) or "").strip()
+    title = re.sub(r"\s+", " ", title)[:100]
+    url = url[:140]
+    if title and url:
+        return f"{title} | {url}"
+    return title or url or "n/a"
+
+
+def _emit_stage_snapshot(stage: str, max_samples: int = 1, **named_lists) -> None:
+    """Emit per-stage count breakdown + tiny sample preview to stderr."""
+    counts = _stage_count_map(**named_lists)
+    count_text = " ".join(f"{k}={v}" for k, v in counts.items())
+    sys.stderr.write(f"[PIPELINE] stage={stage} {count_text}\n")
+    for name, items in named_lists.items():
+        if not items:
+            continue
+        for idx, entry in enumerate(items[:max_samples]):
+            sys.stderr.write(
+                f"[PIPELINE] stage={stage} sample_{name}_{idx + 1}={_item_preview(entry)}\n"
+            )
+    sys.stderr.flush()
+
+
 def register_child_pid(pid: int):
     """Track a child process for cleanup."""
     with _child_pids_lock:
@@ -1712,7 +1761,9 @@ def main():
     _install_global_timeout(global_timeout)
 
     # Load config
+    preflight_config_started_at = time.perf_counter()
     config = env.get_config()
+    _timing_emit("main.preflight.config_load", preflight_config_started_at)
 
     # Detect first run (no SETUP_COMPLETE in config)
     first_run = setup_wizard.is_first_run(config)
@@ -1720,6 +1771,7 @@ def main():
     # On first run, block Bird's Node.js sweet-cookie scanner from probing
     # browser cookies before the user has given consent via the setup wizard.
     # Explicit AUTH_TOKEN (from env var) is fine — only block browser scanning.
+    preflight_bird_setup_started_at = time.perf_counter()
     if first_run and config.get('_AUTH_TOKEN_SOURCE') != 'env':
         os.environ['BIRD_DISABLE_BROWSER_COOKIES'] = '1'
 
@@ -1732,32 +1784,42 @@ def main():
             bird_x.set_credentials(config.get('AUTH_TOKEN'), config.get('CT0'))
     else:
         bird_x.set_credentials(config.get('AUTH_TOKEN'), config.get('CT0'))
+    _timing_emit("main.preflight.bird_setup", preflight_bird_setup_started_at, first_run=bool(first_run))
 
     # Auto-detect Bird (no prompts - just use it if available)
+    preflight_x_source_started_at = time.perf_counter()
     x_source_status = env.get_x_source_status(config)
     x_source = x_source_status["source"]  # 'bird', 'xai', or None
     x_method = x_source_status.get("method")  # 'env', 'browser-firefox', 'api', etc.
+    _timing_emit(
+        "main.preflight.x_source",
+        preflight_x_source_started_at,
+        source=x_source or "none",
+        method=x_method or "none",
+    )
 
-    # Auto-detect yt-dlp for YouTube search
+    preflight_caps_started_at = time.perf_counter()
+    # Lightweight capability checks (no network I/O).
     has_ytdlp = env.is_ytdlp_available()
-
-    # Auto-detect ScrapeCreators/Apify for TikTok
     has_tiktok = env.is_tiktok_available(config)
-
-    # Auto-detect ScrapeCreators for Instagram
     has_instagram = env.is_instagram_available(config)
-
-    # Auto-detect Xiaohongshu HTTP API (requires service + login)
-    has_xiaohongshu = env.is_xiaohongshu_available(config)
-
-    # Auto-detect Bluesky (requires BSKY_HANDLE + BSKY_APP_PASSWORD)
     has_bluesky = env.is_bluesky_available(config)
-
-    # Auto-detect Truth Social (requires TRUTHSOCIAL_TOKEN)
     has_truthsocial = env.is_truthsocial_available(config)
+    has_xiaohongshu = False
+    _timing_emit(
+        "main.preflight.capabilities_basic",
+        preflight_caps_started_at,
+        youtube=has_ytdlp,
+        tiktok=has_tiktok,
+        instagram=has_instagram,
+        bluesky=has_bluesky,
+        truthsocial=has_truthsocial,
+    )
 
     # --diagnose: show source availability and exit
     if args.diagnose:
+        preflight_diag_started_at = time.perf_counter()
+        has_xiaohongshu = env.is_xiaohongshu_available(config)
         web_source = env.get_web_search_source(config)
         diag = {
             "openai": bool(config.get("OPENAI_API_KEY")),
@@ -1783,6 +1845,7 @@ def main():
             "brave": bool(config.get("BRAVE_API_KEY")),
             "openrouter": bool(config.get("OPENROUTER_API_KEY")),
         }
+        _timing_emit("main.preflight.diagnose", preflight_diag_started_at, xiaohongshu=has_xiaohongshu)
         print(json.dumps(diag, indent=2))
         sys.exit(0)
 
@@ -1829,8 +1892,10 @@ def main():
     }
     ui.show_diagnostic_banner(diag)
 
-    # Check available sources (now accounts for Bird/cookie auth automatically)
-    available = env.get_available_sources(config)
+    # Check available sources (reuse x_source_status to avoid duplicate Bird probing)
+    preflight_available_started_at = time.perf_counter()
+    available = env.get_available_sources(config, x_source_status=x_source_status)
+    _timing_emit("main.preflight.available_sources", preflight_available_started_at, available=available)
 
     # Mock mode can work without keys
     if args.mock:
@@ -1849,11 +1914,22 @@ def main():
                 print(f"Error: {error}", file=sys.stderr)
                 sys.exit(1)
 
+    # Detect query type early so we can gate expensive capability probes.
+    route_started_at = time.perf_counter()
+    query_type = qt.detect_query_type(args.topic)
+    search_sources = set(parse_search_flag(args.search)) if args.search else set()
+
     # Get date range
     from_date, to_date = dates.get_date_range(args.days)
 
-    # Check what keys are missing for promo messaging
-    missing_keys = env.get_missing_keys(config)
+    # Check what keys are missing for promo messaging (reuse x source probe)
+    missing_keys = env.get_missing_keys(config, x_source_status=x_source_status)
+    _timing_emit(
+        "main.preflight.route_and_dates",
+        route_started_at,
+        query_type=query_type,
+        search="|".join(sorted(search_sources)) if search_sources else "none",
+    )
 
     # Show NUX / promo for missing keys BEFORE research
     if missing_keys != 'none':
@@ -1894,9 +1970,6 @@ def main():
     else:
         mode = sources
 
-    # Detect query type for source tiering and scoring adjustments
-    query_type = qt.detect_query_type(args.topic)
-
     # Apply --search flag: restrict sources to the specified subset
     # Source defaults are query-type-aware (Truth Social always opt-in,
     # Bluesky only for query types where it adds signal)
@@ -1907,7 +1980,11 @@ def main():
     search_run_youtube = has_ytdlp and qt.is_source_enabled("youtube", query_type)
     search_run_tiktok = has_tiktok and qt.is_source_enabled("tiktok", query_type)
     search_run_instagram = has_instagram and qt.is_source_enabled("instagram", query_type)
-    search_run_xiaohongshu = has_xiaohongshu
+    search_run_xiaohongshu = qt.is_source_enabled(
+        "xiaohongshu",
+        query_type,
+        explicitly_requested=("xiaohongshu" in search_sources),
+    )
 
     # INCLUDE_SOURCES override: force specific sources on regardless of tier
     _include_sources = {s.strip().lower() for s in (config.get('INCLUDE_SOURCES') or '').split(',') if s.strip()}
@@ -1921,7 +1998,6 @@ def main():
                 sys.stderr.write("[Config] INCLUDE_SOURCES override: forcing instagram\n")
                 search_run_instagram = True
     if args.search:
-        search_sources = parse_search_flag(args.search)
         has_reddit = "reddit" in search_sources
         has_x = "x" in search_sources
         search_do_hackernews = "hn" in search_sources
@@ -1945,6 +2021,14 @@ def main():
         else:
             sources = "web"  # hn/polymarket only; no Reddit/X
 
+    # Network-heavy probe: only run when Xiaohongshu may be used.
+    if search_run_xiaohongshu or args.diagnose:
+        preflight_xhs_started_at = time.perf_counter()
+        has_xiaohongshu = env.is_xiaohongshu_available(config)
+        _timing_emit("main.preflight.capability_xiaohongshu", preflight_xhs_started_at, available=has_xiaohongshu)
+    else:
+        has_xiaohongshu = False
+
     # Source plan diagnostics: show why some sources are not active.
     def _source_reason(source: str, available_flag: bool, enabled_flag: bool) -> str:
         if args.search:
@@ -1965,6 +2049,9 @@ def main():
     planned_reddit = sources in ("both", "reddit", "all", "reddit-web")
     planned_x = sources in ("both", "x", "all", "x-web")
     planned_web = sources in ("all", "web", "reddit-web", "x-web")
+    # If Xiaohongshu is not enabled for this query, we may skip probing it.
+    # Preserve readable diagnostics by prioritizing "disabled_by_query_type".
+    xiaohongshu_available_for_reason = has_xiaohongshu if search_run_xiaohongshu else True
 
     tiktok_reason = _source_reason("tiktok", has_tiktok, search_run_tiktok)
     instagram_reason = _source_reason("instagram", has_instagram, search_run_instagram)
@@ -1972,6 +2059,7 @@ def main():
     bluesky_reason = _source_reason("bluesky", has_bluesky, search_do_bluesky)
     truthsocial_reason = _source_reason("truthsocial", has_truthsocial, search_do_truthsocial)
     polymarket_reason = _source_reason("polymarket", True, search_do_polymarket)
+    xiaohongshu_reason = _source_reason("xiaohongshu", xiaohongshu_available_for_reason, search_run_xiaohongshu)
 
     sys.stderr.write(
         f"[SourcePlan] query_type={query_type} mode={sources} "
@@ -1984,6 +2072,7 @@ def main():
         f"youtube={search_run_youtube}({youtube_reason}) "
         f"tiktok={search_run_tiktok}({tiktok_reason}) "
         f"instagram={search_run_instagram}({instagram_reason}) "
+        f"xiaohongshu={search_run_xiaohongshu}({xiaohongshu_reason}) "
         f"bluesky={search_do_bluesky}({bluesky_reason}) "
         f"truthsocial={search_do_truthsocial}({truthsocial_reason}) "
         f"polymarket={search_do_polymarket}({polymarket_reason})\n"
@@ -2045,6 +2134,19 @@ def main():
     normalized_ts = normalize.normalize_truthsocial_items(truthsocial_items, from_date, to_date) if truthsocial_items else []
     normalized_pm = normalize.normalize_polymarket_items(polymarket_items, from_date, to_date) if polymarket_items else []
     normalized_web = websearch.normalize_websearch_items(web_items, from_date, to_date) if web_items else []
+    _emit_stage_snapshot(
+        "normalize",
+        reddit=normalized_reddit,
+        x=normalized_x,
+        youtube=normalized_youtube,
+        tiktok=normalized_tiktok,
+        instagram=normalized_ig,
+        hn=normalized_hn,
+        bluesky=normalized_bsky,
+        truthsocial=normalized_ts,
+        polymarket=normalized_pm,
+        web=normalized_web,
+    )
 
     # Hard date filter: exclude items with verified dates outside the range
     # This is the safety net - even if prompts let old content through, this filters it
@@ -2064,6 +2166,19 @@ def main():
     # Polymarket: skip hard date filter - markets are active/traded, updatedAt is fine
     filtered_pm = normalized_pm
     filtered_web = normalize.filter_by_date_range(normalized_web, from_date, to_date) if normalized_web else []
+    _emit_stage_snapshot(
+        "filter_date",
+        reddit=filtered_reddit,
+        x=filtered_x,
+        youtube=filtered_youtube,
+        tiktok=filtered_tiktok,
+        instagram=filtered_ig,
+        hn=filtered_hn,
+        bluesky=filtered_bsky,
+        truthsocial=filtered_ts,
+        polymarket=filtered_pm,
+        web=filtered_web,
+    )
 
     # Score items
     scored_reddit = score.score_reddit_items(filtered_reddit)
@@ -2076,6 +2191,19 @@ def main():
     scored_ts = score.score_truthsocial_items(filtered_ts) if filtered_ts else []
     scored_pm = score.score_polymarket_items(filtered_pm) if filtered_pm else []
     scored_web = score.score_websearch_items(filtered_web, query_type=query_type) if filtered_web else []
+    _emit_stage_snapshot(
+        "score",
+        reddit=scored_reddit,
+        x=scored_x,
+        youtube=scored_youtube,
+        tiktok=scored_tiktok,
+        instagram=scored_ig,
+        hn=scored_hn,
+        bluesky=scored_bsky,
+        truthsocial=scored_ts,
+        polymarket=scored_pm,
+        web=scored_web,
+    )
 
     # Sort items (query-type-aware tiebreaker ordering)
     sorted_reddit = score.sort_items(scored_reddit, query_type=query_type)
@@ -2100,6 +2228,19 @@ def main():
     deduped_ts = dedupe.dedupe_truthsocial(sorted_ts) if sorted_ts else []
     deduped_pm = dedupe.dedupe_polymarket(sorted_pm) if sorted_pm else []
     deduped_web = websearch.dedupe_websearch(sorted_web) if sorted_web else []
+    _emit_stage_snapshot(
+        "dedupe",
+        reddit=deduped_reddit,
+        x=deduped_x,
+        youtube=deduped_youtube,
+        tiktok=deduped_tiktok,
+        instagram=deduped_ig,
+        hn=deduped_hn,
+        bluesky=deduped_bsky,
+        truthsocial=deduped_ts,
+        polymarket=deduped_pm,
+        web=deduped_web,
+    )
 
     # Post-retrieval relevance filter: drop low-relevance items per source
     deduped_reddit = score.relevance_filter(deduped_reddit, "REDDIT")
@@ -2111,6 +2252,19 @@ def main():
     deduped_bsky = score.relevance_filter(deduped_bsky, "BLUESKY")
     deduped_ts = score.relevance_filter(deduped_ts, "TRUTHSOCIAL")
     deduped_pm = score.relevance_filter(deduped_pm, "POLYMARKET") if deduped_pm else []
+    _emit_stage_snapshot(
+        "relevance_filter",
+        reddit=deduped_reddit,
+        x=deduped_x,
+        youtube=deduped_youtube,
+        tiktok=deduped_tiktok,
+        instagram=deduped_ig,
+        hn=deduped_hn,
+        bluesky=deduped_bsky,
+        truthsocial=deduped_ts,
+        polymarket=deduped_pm,
+        web=deduped_web,
+    )
 
     # Cross-source linking: annotate items that discuss the same story
     dedupe.cross_source_link(

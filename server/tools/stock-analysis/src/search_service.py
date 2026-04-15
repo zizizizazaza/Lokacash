@@ -15,6 +15,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -2613,15 +2614,24 @@ class SearchService:
                 return cached
 
         try:
-            # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
+            # 并行请求所有可用搜索引擎，再按 provider 优先级顺序择优返回。
             had_provider_success = False
             fallback_response: Optional[SearchResponse] = None
             best_preferred_response: Optional[SearchResponse] = None
             best_preferred_count = 0
-            for provider in self._providers:
-                if not provider.is_available:
-                    continue
+            available_providers = [provider for provider in self._providers if provider.is_available]
+            if not available_providers:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider="None",
+                    success=False,
+                    error_message="所有搜索引擎都不可用或搜索失败",
+                )
 
+            provider_results: Dict[str, Dict[str, Any]] = {}
+
+            def _run_provider(provider: BaseSearchProvider) -> Dict[str, Any]:
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
@@ -2633,14 +2643,25 @@ class SearchService:
                         )
                     )
 
-                response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
+                try:
+                    response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
+                except Exception as exc:
+                    response = SearchResponse(
+                        query=query,
+                        results=[],
+                        provider=provider.name,
+                        success=False,
+                        error_message=str(exc),
+                    )
+
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
                     max_results=provider_max_results,
                     log_scope=f"{stock_code}:{provider.name}:stock_news",
                 )
-                had_provider_success = had_provider_success or bool(response.success)
+                preferred_count = 0
+                limited_response: Optional[SearchResponse] = None
 
                 if filtered_response.success and filtered_response.results:
                     prioritized_response, preferred_count = self._prioritize_news_language(
@@ -2651,8 +2672,63 @@ class SearchService:
                         prioritized_response,
                         max_results=max_results,
                     )
-                    visible_preferred_count = min(preferred_count, len(limited_response.results))
 
+                return {
+                    "provider": provider,
+                    "response": response,
+                    "filtered_response": filtered_response,
+                    "limited_response": limited_response,
+                    "visible_preferred_count": (
+                        min(preferred_count, len(limited_response.results))
+                        if limited_response is not None
+                        else 0
+                    ),
+                }
+
+            max_workers = min(len(available_providers), 6)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_provider = {
+                    pool.submit(_run_provider, provider): provider
+                    for provider in available_providers
+                }
+                for future in as_completed(future_to_provider):
+                    provider = future_to_provider[future]
+                    try:
+                        provider_results[provider.name] = future.result()
+                    except Exception as exc:
+                        provider_results[provider.name] = {
+                            "provider": provider,
+                            "response": SearchResponse(
+                                query=query,
+                                results=[],
+                                provider=provider.name,
+                                success=False,
+                                error_message=str(exc),
+                            ),
+                            "filtered_response": SearchResponse(
+                                query=query,
+                                results=[],
+                                provider=provider.name,
+                                success=False,
+                                error_message=str(exc),
+                            ),
+                            "limited_response": None,
+                            "visible_preferred_count": 0,
+                        }
+
+            # 继续按照 provider 优先级顺序做决策，保持原有行为稳定。
+            for provider in available_providers:
+                payload = provider_results.get(provider.name)
+                if payload is None:
+                    continue
+
+                response = payload["response"]
+                filtered_response = payload["filtered_response"]
+                limited_response = payload["limited_response"]
+                visible_preferred_count = int(payload["visible_preferred_count"] or 0)
+                had_provider_success = had_provider_success or bool(response.success)
+
+                if limited_response is not None and filtered_response.success and filtered_response.results:
                     if not prefer_chinese:
                         logger.info(f"使用 {provider.name} 搜索成功")
                         self._put_cache(cache_key, limited_response)

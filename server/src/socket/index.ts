@@ -926,11 +926,19 @@ Text: "${query}"`;
         });
         const signalResearchLogLines: string[] = [];
         let logHintSources: any[] = [];
+        // Faster default for SuperAgent chat: focus on X + web, skip slower auxiliary sources unless overridden.
+        const superagentSearchSources = (process.env.SUPERAGENT_LAST30DAYS_SEARCH || 'x,web').trim();
 
         promises.push(
           researchService.runDeepResearch(
             plan.capabilities.search.query || [userContent, plan.imageDigest].filter(Boolean).join(' ; '),
-            { deep: false },
+            {
+              deep: false,
+              searchSources: superagentSearchSources || undefined,
+              // Skip last30days internal synthesis to avoid double summarization latency;
+              // SuperAgent already performs final synthesis after all tools settle.
+              skipInnerSynthesis: true,
+            },
             {
               onResearchLine: (line) => {
                 const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '');
@@ -959,6 +967,17 @@ Text: "${query}"`;
             }
             // Fallback: log-based platform hints
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
+            const sourceDomains = Array.from(new Set((socialSources || []).map((s) => s.domain).filter(Boolean)));
+            const sourcePreview = (socialSources || [])
+              .slice(0, 3)
+              .map((s) => `${s.domain || 'unknown'}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
+              .join(' || ');
+            console.log(
+              `[sources] final extraction: count=${socialSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
+            );
+            if (sourcePreview) {
+              console.log(`[sources] final extraction preview: ${sourcePreview}`);
+            }
 
             finalSocialSources = socialSources;
             emitter.emitModule('search', 'completed', {
@@ -2250,6 +2269,19 @@ The HTML must:
       };
 
       const synthStartedAt = Date.now();
+      const shouldLogSynthesisText =
+        /^(1|true|yes|on)$/i.test(String(process.env.SUPERAGENT_LOG_SYNTHESIS_TEXT || '').trim());
+      const logSynthesisFinalText = (kind: 'primary' | 'fallback', content: string) => {
+        if (!shouldLogSynthesisText) return;
+        const text = String(content ?? '');
+        console.log(
+          `[agent:chat:synthesis_text] kind=${kind} sessionId=${sessionId} chars=${text.length} BEGIN`,
+        );
+        console.log(text);
+        console.log(
+          `[agent:chat:synthesis_text] kind=${kind} sessionId=${sessionId} END`,
+        );
+      };
       try {
         console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
         const synthesisStream = await aiService.chatStream(
@@ -2514,6 +2546,7 @@ Research context:\n${synFullContent}${langInstruction}`;
             })
           }
         });
+        logSynthesisFinalText('primary', finalDbContent);
 
         emitter.emitModule('done', 'completed', { duration: dur });
         const streamDoneSources = finalSocialSources.length > 0 ? finalSocialSources : undefined;
@@ -2594,6 +2627,7 @@ Research context:\n${synFullContent}${langInstruction}`;
             }),
           },
         });
+        logSynthesisFinalText('fallback', fallbackContent);
 
         streamToChat(fallbackContent);
         emitter.emitModule('done', 'completed', { duration: dur, degraded: true, cause: 'synthesis_error' });

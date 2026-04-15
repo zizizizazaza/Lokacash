@@ -127,7 +127,7 @@ export type DeepResearchProgress =
 export const researchService = {
   runDeepResearch(
     topic: string,
-    options: { deep?: boolean; days?: number } = {},
+    options: { deep?: boolean; days?: number; searchSources?: string; skipInnerSynthesis?: boolean } = {},
     progress?: DeepResearchProgress,
   ) {
     const args = [
@@ -150,6 +150,10 @@ export const researchService = {
 
     if (process.env.EXA_API_KEY) {
       args.push('--include-web');
+    }
+    const searchSources = typeof options.searchSources === 'string' ? options.searchSources.trim() : '';
+    if (searchSources) {
+      args.push('--search', searchSources);
     }
 
     return new Promise<{
@@ -305,19 +309,30 @@ export const researchService = {
         const parseStartedAt = Date.now();
         let finalSummary = stdoutData.trim();
         const extractedSources = sourcesFromLast30DaysCompact(stdoutData);
+        const extractedPreview = extractedSources
+          .slice(0, 3)
+          .map((s) => `${s.domain}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
+          .join(' || ');
         console.log(
           `[researchService:timing] parse_output_s=${asSeconds(Date.now() - parseStartedAt)} total_s=${asSeconds(
             sinceStart(),
           )} topic="${topic}" sources=${extractedSources.length} stdout_len=${stdoutData.length}`,
         );
+        if (extractedPreview) {
+          console.log(`[researchService:sources] extraction_preview=${extractedPreview}`);
+        }
 
         // Optional AI synthesis — tokens go to emitSynthToken only (main chat stream); status lines → research log
-        if (process.env.LOKA_AI_API_KEY && process.env.LOKA_AI_BASE_URL && process.env.LOKA_AI_MODEL) {
+        const aiApiKey = process.env.LOKA_AI_API_KEY;
+        const aiBaseUrl = process.env.LOKA_AI_BASE_URL;
+        const aiModel = process.env.LOKA_AI_MODEL;
+        const shouldRunInnerSynthesis = !options.skipInnerSynthesis && Boolean(aiApiKey && aiBaseUrl && aiModel);
+        if (shouldRunInnerSynthesis && aiApiKey && aiBaseUrl && aiModel) {
           const aiSynthesisStartedAt = Date.now();
           try {
             emitResearchLine('⏳ AI Synthesis：Generating final report…');
 
-            let apiUrl = process.env.LOKA_AI_BASE_URL.replace(/\/$/, '');
+            let apiUrl = aiBaseUrl.replace(/\/$/, '');
             if (!apiUrl.endsWith('/chat/completions')) {
               apiUrl += '/chat/completions';
             }
@@ -369,10 +384,10 @@ ${finalSummary}`,
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
-                  Authorization: `Bearer ${process.env.LOKA_AI_API_KEY}`,
+                  Authorization: `Bearer ${aiApiKey}`,
                 },
                 body: JSON.stringify({
-                  model: process.env.LOKA_AI_MODEL,
+                  model: aiModel,
                   messages: synthesisMessages,
                   temperature: 0.3,
                 }),
@@ -417,8 +432,8 @@ ${finalSummary}`,
               try {
                 const streamResult = await streamChatCompletion(
                   apiUrl,
-                  process.env.LOKA_AI_API_KEY,
-                  process.env.LOKA_AI_MODEL!,
+                  aiApiKey,
+                  aiModel,
                   synthesisMessages,
                   0.3,
                   (chunk) => emitSynthToken(chunk),
@@ -460,6 +475,8 @@ ${finalSummary}`,
               )} total_s=${asSeconds(sinceStart())} topic="${topic}" error=true`,
             );
           }
+        } else if (options.skipInnerSynthesis) {
+          emitResearchLine('ℹ️ AI Synthesis skipped (SuperAgent will synthesize with all tools later).');
         }
 
         const finalCleanStartedAt = Date.now();

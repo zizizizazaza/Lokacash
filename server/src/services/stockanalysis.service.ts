@@ -264,6 +264,8 @@ class StockAnalysisService extends EventEmitter {
     let providerListSuppressedCount = 0;
     let agentMaxStepSeen = 0;
     let agentTotalStepsFromDone: number | null = null;
+    const toolDurationSeconds = new Map<string, number>();
+    const toolCallCount = new Map<string, number>();
 
     // stdout: JSONL structured events (one JSON per line)
     pythonProcess.stdout.on('data', (data: Buffer) => {
@@ -286,6 +288,14 @@ class StockAnalysisService extends EventEmitter {
           }
           if (event.type === 'done' && typeof event.totalSteps === 'number' && Number.isFinite(event.totalSteps)) {
             agentTotalStepsFromDone = event.totalSteps;
+          }
+          if (event.type === 'tool_done') {
+            const name = (event.tool || event.displayName || 'unknown_tool').trim();
+            const durationSec = Number(event.duration);
+            if (Number.isFinite(durationSec) && durationSec >= 0) {
+              toolDurationSeconds.set(name, (toolDurationSeconds.get(name) || 0) + durationSec);
+            }
+            toolCallCount.set(name, (toolCallCount.get(name) || 0) + 1);
           }
 
           const isUiMetadata = (e: StepEvent) =>
@@ -393,6 +403,20 @@ class StockAnalysisService extends EventEmitter {
       console.log(
         `[StockAnalysis Timing] total_s=${(elapsedMs / 1000).toFixed(3)} first_stdout_s=${firstStdoutMs >= 0 ? (firstStdoutMs / 1000).toFixed(3) : 'n/a'} first_stderr_s=${firstStderrMs >= 0 ? (firstStderrMs / 1000).toFixed(3) : 'n/a'} stdout_chunks=${stdoutChunks} stdout_bytes=${stdoutBytes} stderr_chunks=${stderrChunks} stderr_bytes=${stderrBytes} provider_list_logs=${providerListLogCount} provider_list_suppressed=${providerListSuppressedCount} agent_rounds=${agentRounds} agent_rounds_source=${agentTotalStepsFromDone != null ? 'done.totalSteps' : 'max(step)'} exit_code=${code}`,
       );
+      const toolBreakdown = Array.from(toolCallCount.entries())
+        .map(([name, calls]) => ({
+          name,
+          calls,
+          total: Number((toolDurationSeconds.get(name) || 0).toFixed(3)),
+        }))
+        .sort((a, b) => b.total - a.total);
+      if (toolBreakdown.length > 0) {
+        const top = toolBreakdown
+          .slice(0, 8)
+          .map((item) => `${item.name}:total=${item.total}s,calls=${item.calls}`)
+          .join(' | ');
+        console.log(`[StockAnalysis Timing] tool_breakdown_top=${top}`);
+      }
 
       this.scheduleCleanup(sessionId);
     });

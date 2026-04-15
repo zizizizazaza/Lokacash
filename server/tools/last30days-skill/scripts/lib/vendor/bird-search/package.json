@@ -12,6 +12,7 @@
   "attribution": "Based on @steipete/bird v0.8.0 by Peter Steinberger (MIT License)",
   "dependencies": {
     "@steipete/sweet-cookie": "0.1.0",
+    "loka-aiusd-server": "file:../../../../../..",
     "undici": "^6.21.2"
   }
 }

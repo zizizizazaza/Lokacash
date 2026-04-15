@@ -8,6 +8,7 @@ API docs: https://docs.exa.ai/reference/search
 
 import sys
 import time
+import os
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -48,7 +49,29 @@ def search_web(
     Returns:
         List of result dicts with keys: url, title, snippet, source_domain, date, relevance
     """
-    num_results = {"quick": 8, "default": 15, "deep": 25}.get(depth, 15)
+    # quick 模式默认给更多网页结果，减少 "x=8, web=8" 的单一观感。
+    base_num_results = {"quick": 12, "default": 15, "deep": 25}
+    num_results = base_num_results.get(depth, 15)
+    # 可选覆盖：
+    #   EXA_NUM_RESULTS_QUICK / EXA_NUM_RESULTS_DEFAULT / EXA_NUM_RESULTS_DEEP
+    #   LAST30DAYS_WEB_NUM_RESULTS_QUICK / ..._DEFAULT / ..._DEEP
+    # 只接受 1~50 的整数，避免意外配置导致请求过重。
+    depth_upper = str(depth or "default").upper()
+    env_candidates = [
+        os.getenv(f"EXA_NUM_RESULTS_{depth_upper}"),
+        os.getenv(f"LAST30DAYS_WEB_NUM_RESULTS_{depth_upper}"),
+    ]
+    for raw in env_candidates:
+        if raw is None:
+            continue
+        try:
+            parsed = int(str(raw).strip())
+        except Exception:
+            continue
+        if 1 <= parsed <= 50:
+            num_results = parsed
+            break
+
     max_chars = {"quick": 1000, "default": 2000, "deep": 3000}.get(depth, 2000)
 
     payload = {
