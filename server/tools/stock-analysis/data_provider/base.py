@@ -806,6 +806,7 @@ class DataFetcherManager:
           4. YfinanceFetcher (Priority 4)
           5. LongbridgeFetcher (Priority 5) - 长桥（美股/港股兜底）
         """
+        from src.config import get_config
         from .efinance_fetcher import EfinanceFetcher
         from .akshare_fetcher import AkshareFetcher
         from .tushare_fetcher import TushareFetcher
@@ -813,11 +814,14 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        config = get_config()
+        enable_tushare_fetcher = bool(getattr(config, "enable_tushare_fetcher", True))
+        enable_pytdx_fetcher = bool(getattr(config, "enable_pytdx_fetcher", True))
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
         akshare = AkshareFetcher()
-        tushare = TushareFetcher()  # 会根据 Token 配置自动调整优先级
-        pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
+        tushare = TushareFetcher() if enable_tushare_fetcher else None
+        pytdx = PytdxFetcher() if enable_pytdx_fetcher else None
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
         longbridge = LongbridgeFetcher()  # 长桥（美股/港股兜底，懒加载）
@@ -828,12 +832,18 @@ class DataFetcherManager:
             self._fetchers = [
                 efinance,
                 akshare,
-                tushare,
-                pytdx,
                 baostock,
                 yfinance,
                 longbridge,
             ]
+            if tushare is not None:
+                self._fetchers.append(tushare)
+            else:
+                logger.info("TushareFetcher disabled by ENABLE_TUSHARE_FETCHER=false")
+            if pytdx is not None:
+                self._fetchers.append(pytdx)
+            else:
+                logger.info("PytdxFetcher disabled by ENABLE_PYTDX_FETCHER=false")
 
             # 按优先级排序（Tushare 如果配置了 Token 且初始化成功，优先级为 0）
             self._fetchers.sort(key=lambda f: f.priority)

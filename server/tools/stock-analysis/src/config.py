@@ -671,6 +671,9 @@ class Config:
     enable_chip_distribution: bool = True
     # 东财接口补丁开关
     enable_eastmoney_patch: bool = False
+    # 数据源总开关：关闭后初始化时不注册对应 Fetcher
+    enable_tushare_fetcher: bool = True
+    enable_pytdx_fetcher: bool = True
     # 实时行情数据源优先级（逗号分隔）
     # 推荐顺序：tencent > akshare_sina > efinance > akshare_em > tushare
     # - tencent: 腾讯财经，有量比/换手率/市盈率等，单股查询稳定（推荐）
@@ -1328,6 +1331,8 @@ class Config:
             enable_chip_distribution=os.getenv('ENABLE_CHIP_DISTRIBUTION', 'true').lower() == 'true',
             # 东财接口补丁开关
             enable_eastmoney_patch=os.getenv('ENABLE_EASTMONEY_PATCH', 'false').lower() == 'true',
+            enable_tushare_fetcher=os.getenv('ENABLE_TUSHARE_FETCHER', 'true').lower() == 'true',
+            enable_pytdx_fetcher=os.getenv('ENABLE_PYTDX_FETCHER', 'true').lower() == 'true',
             # 实时行情数据源优先级：
             # - tencent: 腾讯财经，有量比/换手率/PE/PB等，单股查询稳定（推荐）
             # - akshare_sina: 新浪财经，基本行情稳定，但无量比
@@ -1839,13 +1844,23 @@ class Config:
         """
         explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
         default_priority = 'tencent,akshare_sina,efinance,akshare_em'
+        enable_tushare_fetcher = os.getenv('ENABLE_TUSHARE_FETCHER', 'true').strip().lower() == 'true'
+
+        def _strip_tushare(value: str) -> str:
+            parts = [p.strip() for p in str(value or '').split(',') if p.strip()]
+            filtered = [p for p in parts if p.lower() != 'tushare']
+            return ','.join(filtered)
 
         if explicit:
-            # User explicitly set priority, respect it
-            return explicit
+            # User explicitly set priority, respect it.
+            # When tushare fetcher is disabled, strip it from explicit priority.
+            resolved = explicit
+            if not enable_tushare_fetcher:
+                resolved = _strip_tushare(resolved) or default_priority
+            return resolved
 
         tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
-        if tushare_token:
+        if tushare_token and enable_tushare_fetcher:
             # Token configured but no explicit priority override
             # Prepend tushare so the paid source is tried first
             import logging
