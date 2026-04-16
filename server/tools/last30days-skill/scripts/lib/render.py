@@ -3,12 +3,70 @@
 import json
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from . import schema
 
 OUTPUT_DIR = Path.home() / ".local" / "share" / "last30days" / "out"
+
+
+def _format_x_joined_display(raw: Optional[str]) -> Optional[str]:
+    """Format Twitter user legacy created_at to a short 'Feb 2021' label."""
+    if not raw or not str(raw).strip():
+        return None
+    s = str(raw).strip()
+    try:
+        if len(s) > 10 and s[10] == "T":
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.strftime("%b %Y")
+    except ValueError:
+        pass
+    try:
+        dt = datetime.strptime(s, "%a %b %d %H:%M:%S %z %Y")
+        return dt.strftime("%b %Y")
+    except ValueError:
+        return s[:32]
+
+
+def _collect_x_profile_payload(x_items: List[schema.XItem]) -> List[Dict[str, Any]]:
+    """Merge X rows by handle; keep the row with the highest follower count."""
+    by_h: Dict[str, schema.XItem] = {}
+    for item in x_items:
+        h = (item.author_handle or "").strip().lstrip("@").lower()
+        if not h:
+            continue
+        if (
+            item.author_followers is None
+            and item.author_following is None
+            and not item.author_joined_raw
+        ):
+            continue
+        prev = by_h.get(h)
+        if prev is None:
+            by_h[h] = item
+            continue
+        pf0 = prev.author_followers or 0
+        pf1 = item.author_followers or 0
+        if pf1 > pf0:
+            by_h[h] = item
+
+    out: List[Dict[str, Any]] = []
+    for h in sorted(by_h.keys()):
+        item = by_h[h]
+        rec: Dict[str, Any] = {"handle": h}
+        if item.author_followers is not None:
+            rec["followers"] = item.author_followers
+        if item.author_following is not None:
+            rec["following"] = item.author_following
+        if item.author_joined_raw:
+            rec["joinedRaw"] = item.author_joined_raw
+            jd = _format_x_joined_display(item.author_joined_raw)
+            if jd:
+                rec["joinedDisplay"] = jd
+        out.append(rec)
+    return out
 
 
 def _xref_tag(item) -> str:
@@ -516,6 +574,24 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
             lines.append(f"  {item.snippet[:150]}...")
             lines.append(f"  *{item.why_relevant}*")
             lines.append("")
+
+    prof_payload = _collect_x_profile_payload(report.x) if report.x else []
+    if prof_payload:
+        lines.append("### X account profiles (API snapshot)")
+        lines.append("")
+        for rec in prof_payload:
+            parts: List[str] = [f"- **@{rec['handle']}**"]
+            if rec.get("followers") is not None:
+                parts.append(f"Followers: {int(rec['followers']):,}")
+            if rec.get("following") is not None:
+                parts.append(f"Following: {int(rec['following']):,}")
+            if rec.get("joinedDisplay"):
+                parts.append(f"Joined: {rec['joinedDisplay']}")
+            lines.append(" · ".join(parts))
+        lines.append("")
+        lines.append("[INTERNAL_X_PROFILES]")
+        lines.append(json.dumps({"profiles": prof_payload}, ensure_ascii=False))
+        lines.append("[/INTERNAL_X_PROFILES]")
 
     return "\n".join(lines)
 

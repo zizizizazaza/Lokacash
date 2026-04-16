@@ -161,19 +161,6 @@ export const FEATURED_AGENTS = [
     agentId: 'invest',
   },
   {
-    id: 'signal-reader',
-    name: 'Signal Radar',
-    desc: 'Real-time signals, news monitoring, and cross-platform sentiment.',
-    icon: () => (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-        <circle cx="12" cy="12" r="2" /><path d="M16.24 7.76a6 6 0 010 8.49M7.76 16.24a6 6 0 010-8.49" /><path d="M19.07 4.93a10 10 0 010 14.14M4.93 19.07a10 10 0 010-14.14" />
-      </svg>
-    ),
-    prompt: null as string | null,
-    route: null as string | null,
-    agentId: 'research',
-  },
-  {
     id: 'guru-council',
     name: 'Guru Council',
     desc: "Get Buffett, Lynch, and Dalio's perspective on any stock.",
@@ -190,19 +177,6 @@ export const FEATURED_AGENTS = [
     agentId: 'guru-council',
   },
   {
-    id: 'daily-news',
-    name: 'Daily News',
-    desc: 'Daily A/H/US stock briefing with LLM-powered analysis and key movers.',
-    icon: () => (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-        <path d="M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8a2 2 0 00-2 2v16a2 2 0 01-2 2zm0 0a2 2 0 01-2-2V9" /><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z" />
-      </svg>
-    ),
-    prompt: null as string | null,
-    route: null as string | null,
-    agentId: 'daily-news',
-  },
-  {
     id: 'project-scout',
     name: 'Project Scout',
     desc: 'Deep-dive due diligence on any company, startup, or project.',
@@ -214,6 +188,32 @@ export const FEATURED_AGENTS = [
     prompt: null as string | null,
     route: null as string | null,
     agentId: 'scout',
+  },
+  {
+    id: 'signal-reader',
+    name: 'Signal Radar',
+    desc: 'Real-time signals, news monitoring, and cross-platform sentiment.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <circle cx="12" cy="12" r="2" /><path d="M16.24 7.76a6 6 0 010 8.49M7.76 16.24a6 6 0 010-8.49" /><path d="M19.07 4.93a10 10 0 010 14.14M4.93 19.07a10 10 0 010-14.14" />
+      </svg>
+    ),
+    prompt: null as string | null,
+    route: null as string | null,
+    agentId: 'research',
+  },
+  {
+    id: 'daily-news',
+    name: 'Daily News',
+    desc: 'Daily A/H/US stock briefing with LLM-powered analysis and key movers.',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+        <path d="M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8a2 2 0 00-2 2v16a2 2 0 01-2 2zm0 0a2 2 0 01-2-2V9" /><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z" />
+      </svg>
+    ),
+    prompt: null as string | null,
+    route: null as string | null,
+    agentId: 'daily-news',
   },
 ];
 

@@ -199,15 +199,10 @@ export function QuoteCard({ quote }: { quote: QuoteData }) {
 
 // ─── Markdown Rendering ─────────────────────────────────────────
 
-const LINK_CHIP =
-  'inline-flex items-center align-middle gap-0.5 max-w-[min(100%,13rem)] mx-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium leading-tight ' +
-  'text-indigo-700 bg-indigo-50/90 hover:bg-indigo-100 border border-indigo-200/70 shadow-sm ' +
-  'transition-colors cursor-pointer no-underline hover:no-underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50';
-
 /** Citation tag style — small inline badge with source name */
 const CITE_TAG =
   'group/cite relative inline-flex items-center align-middle gap-1 mx-0.5 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight ' +
-  'text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200/60 ' +
+  'text-gray-500 bg-gray-50 hover:bg-gray-100 border border-gray-200/60 ' +
   'transition-all cursor-pointer no-underline hover:no-underline';
 
 function safeHttpUrl(href: string): string | null {
@@ -238,22 +233,12 @@ function urlDomain(href: string): string {
   }
 }
 
-function ExternalGlyph() {
-  return (
-    <svg className="w-3 h-3 shrink-0 opacity-75" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-    </svg>
-  );
-}
-
 function InlineCitation({
   href,
   label,
-  variant,
 }: {
   href: string;
   label: string;
-  variant: 'chip' | 'markdown';
 }) {
   const sources = useContext(SourcesContext);
   const safe = safeHttpUrl(href);
@@ -272,52 +257,43 @@ function InlineCitation({
     return false;
   });
 
-  // Citation tag style: small rounded badge with hover tooltip
-  if (variant === 'markdown') {
-    const snippetText = matchedSource?.snippet;
-    const titleText = matchedSource?.title || show;
-    return (
-      <a
-        href={safe}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={CITE_TAG}
-      >
-        <svg className="w-2.5 h-2.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-        </svg>
-        <span className="truncate max-w-[8rem]">{show}</span>
-        {/* Rich hover tooltip */}
-        <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
-          {/* Row 1: favicon + domain */}
-          <span className="flex items-center gap-1.5">
-            <img
-              src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
-              alt=""
-              className="w-3.5 h-3.5 rounded-sm shrink-0"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-            />
-            <span className="text-[10px] text-gray-400 truncate">{domain}</span>
-          </span>
-          {/* Row 2: title */}
-          <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
-            {titleText}
-          </span>
-          {/* Row 3: snippet */}
-          {snippetText && (
-            <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
-              {snippetText}
-            </span>
-          )}
-          <span className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-gray-900" />
-        </span>
-      </a>
-    );
-  }
+  const snippetText = matchedSource?.snippet;
+  const titleText = matchedSource?.title || show;
   return (
-    <a href={safe} target="_blank" rel="noopener noreferrer" title={safe} className={LINK_CHIP}>
-      <ExternalGlyph />
-      <span className="truncate">{show}</span>
+    <a
+      href={safe}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={CITE_TAG}
+    >
+      <svg className="w-2.5 h-2.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+      </svg>
+      <span className="truncate max-w-[8rem]">{show}</span>
+      {/* Rich hover tooltip */}
+      <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
+        {/* Row 1: favicon + domain */}
+        <span className="flex items-center gap-1.5">
+          <img
+            src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
+            alt=""
+            className="w-3.5 h-3.5 rounded-sm shrink-0"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+          />
+          <span className="text-[10px] text-gray-400 truncate">{domain}</span>
+        </span>
+        {/* Row 2: title */}
+        <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
+          {titleText}
+        </span>
+        {/* Row 3: snippet */}
+        {snippetText && (
+          <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
+            {snippetText}
+          </span>
+        )}
+        <span className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-gray-900" />
+      </span>
     </a>
   );
 }
@@ -369,7 +345,7 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
     if (m) {
       const url = m[2].trim();
       if (safeHttpUrl(url)) {
-        out.push(<InlineCitation key={k++} href={url} label={m[1]} variant="markdown" />);
+        out.push(<InlineCitation key={k++} href={url} label={m[1]} />);
         pos += m[0].length;
         continue;
       }
@@ -379,7 +355,7 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
     if (m) {
       const url = m[1];
       if (safeHttpUrl(url)) {
-        out.push(<InlineCitation key={k++} href={url} label={url} variant="chip" />);
+        out.push(<InlineCitation key={k++} href={url} label={url} />);
         pos += m[0].length;
         continue;
       }
@@ -390,7 +366,7 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
       let url = m[1];
       url = url.replace(/[.,;:!?]+$/g, '');
       if (safeHttpUrl(url)) {
-        out.push(<InlineCitation key={k++} href={url} label={url} variant="chip" />);
+        out.push(<InlineCitation key={k++} href={url} label={url} />);
         pos += m[0].length;
         continue;
       }
@@ -466,10 +442,31 @@ export function extractHeadings(text: string, msgIdx?: number): { level: number;
   return headings;
 }
 
+/** Split inline numbered lists into separate lines.
+ *  e.g. "1. aaa 2. bbb 3. ccc" → "1. aaa\n2. bbb\n3. ccc"
+ *  Only triggers when 3+ sequential numbered items appear on one line. */
+function splitInlineNumberedLists(text: string): string {
+  return text.replace(/^(.*?)(\d+\.\s.+)$/gm, (_match, prefix, listPart) => {
+    // Split on " N. " boundaries where N is sequential
+    const items = listPart.split(/\s+(?=\d+\.\s)/);
+    if (items.length < 3) return _match; // Need at least 3 items to be confident it's a list
+    // Verify they're roughly sequential (1,2,3 or 2,3,4 etc.)
+    const nums = items.map((it: string) => parseInt(it.match(/^(\d+)\./)?.[1] || '0', 10));
+    let sequential = true;
+    for (let j = 1; j < nums.length; j++) {
+      if (nums[j] !== nums[j - 1] + 1) { sequential = false; break; }
+    }
+    if (!sequential) return _match;
+    const joined = items.join('\n');
+    return prefix ? prefix.trimEnd() + '\n' + joined : joined;
+  });
+}
+
 export function renderMarkdownContent(text: string, msgIdx?: number): React.ReactNode {
   if (!text) return null;
   const prefix = msgIdx != null ? `m${msgIdx}-` : '';
-  const lines = text.split('\n');
+
+  const lines = splitInlineNumberedLists(text).split('\n');
   const elements: React.ReactNode[] = [];
   let i = 0;
 

@@ -404,6 +404,15 @@ def search_handles(
     return all_items
 
 
+def _safe_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_bird_response(response: Dict[str, Any], query: str = "") -> List[Dict[str, Any]]:
     """Parse Bird response to match xai_x output format.
 
@@ -489,6 +498,24 @@ def parse_bird_response(response: Dict[str, Any], query: str = "") -> List[Dict[
             "why_relevant": "",  # Bird doesn't provide relevance explanations
             "relevance": _compute_relevance(query, str(tweet.get("text", ""))) if query else 0.7,
         }
+
+        # Author profile (from GraphQL user legacy — search timeline includes these when available)
+        af = _safe_int(
+            author.get("followersCount")
+            or author.get("followers_count")
+        )
+        aw = _safe_int(
+            author.get("followingCount")
+            or author.get("friends_count")
+            or author.get("following_count")
+        )
+        acct_created = author.get("accountCreatedAt") or author.get("created_at")
+        if isinstance(acct_created, str) and acct_created.strip():
+            item["author_joined_raw"] = acct_created.strip()
+        if af is not None:
+            item["author_followers"] = af
+        if aw is not None:
+            item["author_following"] = aw
 
         items.append(item)
 
