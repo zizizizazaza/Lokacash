@@ -2,7 +2,7 @@
  * SuperAgentChat — Chat Detail Page
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
@@ -14,6 +14,18 @@ import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCom
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
 }
+
+/** Space above the bottom of the chat column reserved for the floating input bar (padding + field + controls). TOC must stay above this. */
+const TOC_BOTTOM_RESERVE_PX = 148;
+
+/** Minimum TOC panel height so the list isn’t collapsed to ~3 rows before layout stabilizes */
+const TOC_MIN_VIEWPORT_PX = 220;
+
+/** Keep the TOC close to the viewport top on first paint instead of dropping beside large hero cards. */
+const TOC_PREFERRED_TOP_PX = 72;
+
+/** Small top gutter so the floating TOC never touches the container edge. */
+const TOC_TOP_GUTTER_PX = 8;
 
 // ─── Types and Interfaces ────────────────────────────────────
 
@@ -2897,6 +2909,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
+    /** Normalize one follow-up line: drop citations/links, keep a single interrogative sentence only. */
+    const sanitizeFollowUpQuestionLine = useCallback((raw: string): string | null => {
+        let s = raw
+            .replace(/\[[^\]]*]\([^)]*\)/g, '')
+            .replace(/\([^)]*https?:\/\/[^)]+\)/gi, '')
+            .replace(/https?:\/\/[^\s\])]+/gi, '')
+            .replace(/\*\*/g, '')
+            .replace(/`/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const qIdx = s.search(/[?？]/);
+        if (qIdx >= 0) {
+            s = s.slice(0, qIdx + 1).trim();
+        } else {
+            return null;
+        }
+        if (s.length < 4) return null;
+        return s;
+    }, []);
+
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
         // Only match explicit "follow-up question" blocks near the tail to avoid truncating main report sections.
@@ -2908,16 +2940,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             const questions = match[1].split('\n')
                 .map(l => l.trim())
                 .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
-                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').replace(/\*\*/g, '').trim())
-                .filter(Boolean);
+                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
+                .map((l) => sanitizeFollowUpQuestionLine(l))
+                .filter((q): q is string => Boolean(q));
             // Guardrail: only strip when the follow-up block is at the end and contains multiple items.
             const isTailBlock = typeof match.index === 'number' && match.index > content.length * 0.6;
-            if (questions.length >= 2 && isTailBlock) {
+            if (questions.length >= 1 && isTailBlock) {
                 return { body: content.slice(0, match.index).trimEnd(), questions };
             }
         }
         return { body: content, questions: [] };
-    }, []);
+    }, [sanitizeFollowUpQuestionLine]);
 
     // Chat title: summarize the user's question into a short topic label
     const chatTitle = useMemo(() => {
@@ -3002,13 +3035,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
 
     // Scroll-spy: track which heading is currently in view + TOC position + which message's TOC to show
     const [tocTopPx, setTocTopPx] = useState(0);
-    useEffect(() => {
+    useLayoutEffect(() => {
         const container = scrollContainerRef.current;
         if (!container) return;
         const tocIndices = Object.keys(allTocHeadings).map(Number);
         if (tocIndices.length === 0) return;
 
-        const onScroll = () => {
+        let rafId = 0;
+        const scheduleRecalc = () => {
+            cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(() => {
+                rafId = 0;
+                recalcToc();
+            });
+        };
+
+        const recalcToc = () => {
             const containerRect = container.getBoundingClientRect();
 
             // Determine which assistant message's TOC to show:
@@ -3040,28 +3082,62 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             }
             setActiveTocId(current);
 
-            // Float position – clamp between the answer's h1 title and its action-bar
+            // Float position – align with first heading inside the scroll viewport.
+            // IMPORTANT: do NOT use offsetTop − scrollTop (offsetTop is relative to offsetParent, not this container).
             const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
             if (firstEl) {
-                let floatTop = Math.max(8, firstEl.offsetTop - container.scrollTop);
+                const firstHeadingTop = firstEl.getBoundingClientRect().top - containerRect.top;
+                let floatTop = Math.max(
+                    TOC_TOP_GUTTER_PX,
+                    Math.min(firstHeadingTop, TOC_PREFERRED_TOP_PX)
+                );
 
-                // Bottom boundary: when TOC would overlap the action bar, let it scroll away with content
+                // Bottom boundary: when TOC would overlap the action bar, pin it above
                 const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
                 const tocH = tocNavRef.current?.offsetHeight || 0;
                 if (actionsEl && tocH > 0) {
-                    const pinnedTop = actionsEl.offsetTop - container.scrollTop - tocH - 16;
+                    const pinnedTop = actionsEl.getBoundingClientRect().top - containerRect.top - tocH - 16;
                     floatTop = Math.min(floatTop, pinnedTop);
                 }
-                // Ensure TOC doesn't overlap the input bar (reserve 80px at bottom)
-                const maxTop = container.clientHeight - 80;
-                floatTop = Math.min(floatTop, maxTop);
+                // Ensure TOC panel top stays above the reserved input strip
+                const maxTop = Math.max(TOC_TOP_GUTTER_PX, container.clientHeight - TOC_BOTTOM_RESERVE_PX);
+                floatTop = Math.max(TOC_TOP_GUTTER_PX, Math.min(floatTop, maxTop));
                 setTocTopPx(floatTop);
             }
         };
-        container.addEventListener('scroll', onScroll, { passive: true });
-        onScroll();
-        return () => container.removeEventListener('scroll', onScroll);
-    }, [allTocHeadings]);
+
+        container.addEventListener('scroll', scheduleRecalc, { passive: true });
+        window.addEventListener('resize', scheduleRecalc);
+        scheduleRecalc();
+
+        // Observe late layout shifts from markdown, quote cards, fonts, and the TOC panel itself.
+        const resizeObserver = typeof ResizeObserver !== 'undefined'
+            ? new ResizeObserver(() => scheduleRecalc())
+            : null;
+        if (resizeObserver) {
+            resizeObserver.observe(container);
+            if (container.firstElementChild instanceof HTMLElement) {
+                resizeObserver.observe(container.firstElementChild);
+            }
+            if (tocNavRef.current) {
+                resizeObserver.observe(tocNavRef.current);
+            }
+        }
+
+        const delayedRecalcIds = [120, 360, 900].map(delay =>
+            window.setTimeout(scheduleRecalc, delay)
+        );
+        const fontSet = typeof document !== 'undefined' ? (document as Document & { fonts?: FontFaceSet }).fonts : undefined;
+        fontSet?.ready?.then(() => scheduleRecalc()).catch(() => undefined);
+
+        return () => {
+            cancelAnimationFrame(rafId);
+            delayedRecalcIds.forEach(id => window.clearTimeout(id));
+            resizeObserver?.disconnect();
+            window.removeEventListener('resize', scheduleRecalc);
+            container.removeEventListener('scroll', scheduleRecalc);
+        };
+    }, [allTocHeadings, showToc]);
 
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
@@ -4039,8 +4115,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     {showToc && (
                         <nav
                             ref={tocNavRef}
-                            className="absolute left-3 z-30 hidden md:block transition-all duration-150"
-                            style={{ top: tocTopPx, maxHeight: `calc(100% - ${Math.max(tocTopPx, 0)}px - 80px)`, overflow: 'hidden' }}
+                            className="absolute left-3 z-20 hidden md:block transition-all duration-150"
+                            style={{
+                                top: tocTopPx,
+                                maxHeight: `max(${TOC_MIN_VIEWPORT_PX}px, calc(100% - ${Math.max(tocTopPx, 0)}px - ${TOC_BOTTOM_RESERVE_PX}px))`,
+                                overflow: 'hidden',
+                            }}
                         >
                             <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
                                 <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
@@ -4729,7 +4809,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     </div>
 
                     {/* Input */}
-                    <div className="absolute bottom-0 left-0 right-0 pt-2 pb-4 px-4 md:px-8 pointer-events-none" style={{ zIndex: 10 }}>
+                    <div className="absolute bottom-0 left-0 right-0 z-40 pt-2 pb-4 px-4 md:px-8 pointer-events-none">
                         <div className="max-w-2xl mx-auto pointer-events-auto">
                             <div className="bg-white/90 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-gray-100" style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06)' }}>
                                 {/* Voice overlay: Recording */}

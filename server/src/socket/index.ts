@@ -1982,7 +1982,9 @@ Tags (translate to user's language)
 Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 - Translate heading to user's language (e.g. "值得关注的问题：")
 - Format as **bold heading** followed by 3-5 bullet points
-- Each bullet: forward-looking question tied to a specific data point or event with a time horizon
+- Each bullet: ONE standalone question only — a single interrogative sentence ending with ? (English) or ？ (Chinese). Embed the metric or time horizon inside the question wording if needed.
+- Do NOT add answers, explanations, "If… then…" clauses, second sentences, or any text after the question mark.
+- Do NOT put markdown links, bare URLs, or [Source](url) in this section (no citations here).
 - CRITICAL: No text, tags, or sections may appear after this list
 
 ═══ ABSOLUTE RULES ═══
@@ -1993,7 +1995,7 @@ Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs in a separate references section. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 1500-3500 words. Depth over brevity, but no padding. Every sentence must earn its place. Cover ALL analysis dimensions — fundamental, valuation, financial, technical, and actionable trade setup.
-8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
+8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers; each bullet question-only (one sentence, ? or ？), no follow-on prose and no links.
 9. REDUCE qualitative statements, INCREASE quantitative data. "Margins are important" is worthless. "Margin below 72% = thesis broken" is actionable.
 10. SECTION FLEXIBILITY: For non-stock topics (macro, crypto, general questions), adapt sections naturally — skip stock-specific sections like Quote Snapshot, Valuation, Financial Health. Focus on sections that fit the topic.
 
@@ -2062,6 +2064,7 @@ Conclusion & Recommendations — Clear, actionable takeaways. What should the re
 
 Questions to Watch (LAST SECTION)
 - 3-5 forward-looking questions with specific triggers or data points to monitor.
+- Each bullet: one question sentence only (? or ？). No explanations, answers, or markdown links/URLs in this section.
 
 ═══ ABSOLUTE RULES ═══
 1. HEADING LEVELS: # for title only. ## for sections. Use **bold** for subsections and key terms, figures, and conclusions throughout the text. NEVER prefix headings with numbers like "1.", "2.", "3." — the frontend auto-generates numbering in the Table of Contents.
@@ -2167,6 +2170,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 
 ## Questions to Watch
 - 3-5 forward-looking questions with specific data triggers and time horizons
+- Each line: one interrogative sentence only; no answers or citations (no [Name](url), no URLs) in this section
 
 ═══ RULES ═══
 1. Each guru MUST use their actual known framework — not generic "analysis". Buffett talks about moats and margin of safety. Lynch talks about PEG and growth categories. Burry talks about asymmetric bets and overlooked data.
