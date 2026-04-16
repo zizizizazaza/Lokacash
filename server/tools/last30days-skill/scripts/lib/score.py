@@ -757,6 +757,15 @@ def sort_items(items: List[Union[schema.RedditItem, schema.XItem, schema.WebSear
     return sorted(items, key=sort_key)
 
 
+SOURCE_RELEVANCE_THRESHOLDS = {
+    "X": 0.42,
+}
+
+SOURCE_MINIMUM_KEEP = {
+    "X": 0,
+}
+
+
 def relevance_filter(items, source_name: str, threshold: float = 0.3):
     """Filter items below relevance threshold with minimum-result guarantee.
 
@@ -765,11 +774,25 @@ def relevance_filter(items, source_name: str, threshold: float = 0.3):
     Lists with 3 or fewer items are returned unchanged.
     """
     import sys
-    if len(items) <= 3:
+
+    effective_threshold = max(threshold, SOURCE_RELEVANCE_THRESHOLDS.get(source_name, threshold))
+    minimum_keep = SOURCE_MINIMUM_KEEP.get(source_name, 3)
+
+    if len(items) <= 3 and minimum_keep >= 3:
         return items
-    passed = [i for i in items if getattr(i, 'relevance', 0.0) >= threshold]
+
+    passed = [i for i in items if getattr(i, 'relevance', 0.0) >= effective_threshold]
     if not passed:
-        print(f"[{source_name} WARNING] All results below relevance {threshold}, keeping top 3", file=sys.stderr)
+        if minimum_keep <= 0:
+            print(
+                f"[{source_name} WARNING] All results below relevance {effective_threshold}, dropping all low-confidence items",
+                file=sys.stderr,
+            )
+            return []
+        print(
+            f"[{source_name} WARNING] All results below relevance {effective_threshold}, keeping top {minimum_keep}",
+            file=sys.stderr,
+        )
         by_rel = sorted(items, key=lambda x: getattr(x, 'relevance', 0.0), reverse=True)
-        return by_rel[:3]
+        return by_rel[:minimum_keep]
     return passed

@@ -233,6 +233,45 @@ function urlDomain(href: string): string {
   }
 }
 
+function decodeHtmlEntities(text: string): string {
+  if (!text) return text;
+  if (typeof document !== 'undefined') {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = text;
+    return textarea.value;
+  }
+  return text
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+}
+
+function isLowValueSourceTitle(title: string): boolean {
+  const t = title.trim().toLowerCase();
+  if (!t) return true;
+  if (t.length <= 2) return true;
+  if (/^news\s*&\s*disclaimer$/.test(t)) return true;
+  if (/^disclaimer$/.test(t)) return true;
+  if (/^untitled$/.test(t)) return true;
+  return false;
+}
+
+function normalizeCitationLabel(label: string, href: string): string {
+  const domain = urlDomain(href).toLowerCase();
+  const cleaned = decodeHtmlEntities(label || '').trim();
+  if (/(^|\.)(x\.com|t\.co|twitter\.com)$/.test(domain)) {
+    if (!cleaned || cleaned.length <= 2 || /^t$/i.test(cleaned) || /^x$/i.test(cleaned)) {
+      return 'X';
+    }
+  }
+  if (!cleaned || cleaned === href || cleaned.length <= 1) {
+    return urlChipLabel(href);
+  }
+  return cleaned;
+}
+
 function InlineCitation({
   href,
   label,
@@ -243,7 +282,7 @@ function InlineCitation({
   const sources = useContext(SourcesContext);
   const safe = safeHttpUrl(href);
   if (!safe) return <span className="text-gray-600">{label}</span>;
-  const show = label.trim() && label !== href ? label : urlChipLabel(safe);
+  const show = normalizeCitationLabel(label, safe);
   const domain = urlDomain(safe);
 
   // Look up source from context for rich tooltip
@@ -257,8 +296,9 @@ function InlineCitation({
     return false;
   });
 
-  const snippetText = matchedSource?.snippet;
-  const titleText = matchedSource?.title || show;
+  const snippetText = matchedSource?.snippet ? decodeHtmlEntities(matchedSource.snippet) : undefined;
+  const decodedTitle = decodeHtmlEntities(matchedSource?.title || '');
+  const titleText = !isLowValueSourceTitle(decodedTitle) ? decodedTitle : show;
   return (
     <a
       href={safe}
@@ -598,29 +638,31 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       const bodyRows = tableRows.slice(bodyStart).map(parseRow);
 
       elements.push(
-        <div key={`tbl-${i}`} className="my-4 overflow-x-auto rounded-lg border border-gray-200">
-          <table className="w-full text-[13.5px] text-left">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                {headerCells.map((cell, ci) => (
-                  <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
-                    {parseLine(cell)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {bodyRows.map((cells, ri) => (
-                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                  {cells.map((cell, ci) => (
-                    <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
+        <div key={`tbl-${i}`} className="my-4 overflow-visible">
+          <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <table className="w-full text-[13.5px] text-left">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  {headerCells.map((cell, ci) => (
+                    <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
                       {parseLine(cell)}
-                    </td>
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {bodyRows.map((cells, ri) => (
+                  <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                    {cells.map((cell, ci) => (
+                      <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
+                        {parseLine(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>,
       );
       continue;

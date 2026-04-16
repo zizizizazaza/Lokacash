@@ -96,6 +96,13 @@ function isNoisePrevLine(t: string): boolean {
   if (/^FIRST_RUN:\s*/i.test(t)) return true;
   if (/^#{1,6}\s+/.test(t)) return true;
   if (/^={3,}$/.test(t)) return true;
+  if (/^\*\*date range:\*\*/i.test(t)) return true;
+  if (/^\*\*mode:\*\*/i.test(t)) return true;
+  if (/^\*\*openai model:\*\*/i.test(t)) return true;
+  if (/^\*\*xai model:\*\*/i.test(t)) return true;
+  if (/^\*\*resolved x handle:\*\*/i.test(t)) return true;
+  if (/^\*\*⚠️/.test(t)) return true;
+  if (/^\*💡\s*tip:/i.test(t)) return true;
   return false;
 }
 
@@ -110,11 +117,33 @@ function polymarketOutcomeLine(t: string): boolean {
   return /\|/.test(t) && /\d+%/.test(t);
 }
 
+function isSectionHeaderLine(t: string): boolean {
+  return /^#{2,6}\s+/.test(t) || /^\*{0,2}(Reddit Threads|X Posts|YouTube Videos|TikTok Videos|Instagram Reels|Hacker News Stories|Bluesky Posts|Truth Social Posts|Polymarket|Web Results)\*{0,2}$/i.test(t);
+}
+
+function isItemBoundaryLine(t: string): boolean {
+  if (!t) return true;
+  if (isSectionHeaderLine(t)) return true;
+  if (isResearchItemHeaderLine(t)) return true;
+  return /^\*\*[A-Z]{1,4}\d+\*\*/.test(t);
+}
+
+function lineBelongsToCurrentItem(lines: string[], currentIndex: number, candidateIndex: number): boolean {
+  for (let j = currentIndex - 1; j > candidateIndex; j--) {
+    const trimmed = lines[j].trim();
+    if (!trimmed) continue;
+    if (isItemBoundaryLine(trimmed)) return false;
+  }
+  return true;
+}
+
 function pickTitleForCompactUrl(lines: string[], urlIndex: number): string {
   const maxLookback = 10;
   for (let j = urlIndex - 1; j >= 0 && j >= urlIndex - maxLookback; j--) {
     const t = lines[j].trimEnd();
     const trimmed = t.trim();
+    if (isItemBoundaryLine(trimmed) && j !== urlIndex - 1) break;
+    if (!lineBelongsToCurrentItem(lines, urlIndex, j)) break;
     if (isNoisePrevLine(trimmed)) continue;
     if (isResearchItemHeaderLine(trimmed)) continue;
     if (polymarketOutcomeLine(trimmed)) continue;
@@ -131,6 +160,8 @@ function pickSnippetForCompactUrl(lines: string[], urlIndex: number, title: stri
   const maxLookback = 8;
   for (let j = urlIndex - 1; j >= 0 && j >= urlIndex - maxLookback; j--) {
     const trimmed = lines[j].trim();
+    if (isItemBoundaryLine(trimmed) && j !== urlIndex - 1) break;
+    if (!lineBelongsToCurrentItem(lines, urlIndex, j)) break;
     if (!trimmed) continue;
     if (isNoisePrevLine(trimmed)) continue;
     if (isResearchItemHeaderLine(trimmed)) continue;
