@@ -2,7 +2,7 @@
  * SuperAgentChat — Chat Detail Page
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
@@ -14,6 +14,15 @@ import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCom
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
 }
+
+/** Space above the bottom of the chat column reserved for the floating input bar (padding + field + controls). TOC must stay above this. */
+const TOC_BOTTOM_RESERVE_PX = 148;
+
+/** Minimum TOC panel height so the list isn’t collapsed to ~3 rows before layout stabilizes */
+const TOC_MIN_VIEWPORT_PX = 220;
+
+/** Standard sticky offset for the left TOC rail. */
+const TOC_STICKY_TOP_PX = 24;
 
 // ─── Types and Interfaces ────────────────────────────────────
 
@@ -2660,7 +2669,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
-    const tocNavRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
     const restoredFromPendingRef = useRef(
@@ -2897,6 +2905,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
+    /** Normalize one follow-up line: drop citations/links, keep a single interrogative sentence only. */
+    const sanitizeFollowUpQuestionLine = useCallback((raw: string): string | null => {
+        let s = raw
+            .replace(/\[[^\]]*]\([^)]*\)/g, '')
+            .replace(/\([^)]*https?:\/\/[^)]+\)/gi, '')
+            .replace(/https?:\/\/[^\s\])]+/gi, '')
+            .replace(/\*\*/g, '')
+            .replace(/`/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const qIdx = s.search(/[?？]/);
+        if (qIdx >= 0) {
+            s = s.slice(0, qIdx + 1).trim();
+        } else {
+            return null;
+        }
+        if (s.length < 4) return null;
+        return s;
+    }, []);
+
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
         // Only match explicit "follow-up question" blocks near the tail to avoid truncating main report sections.
@@ -2908,16 +2936,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             const questions = match[1].split('\n')
                 .map(l => l.trim())
                 .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
-                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').replace(/\*\*/g, '').trim())
-                .filter(Boolean);
+                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
+                .map((l) => sanitizeFollowUpQuestionLine(l))
+                .filter((q): q is string => Boolean(q));
             // Guardrail: only strip when the follow-up block is at the end and contains multiple items.
             const isTailBlock = typeof match.index === 'number' && match.index > content.length * 0.6;
-            if (questions.length >= 2 && isTailBlock) {
+            if (questions.length >= 1 && isTailBlock) {
                 return { body: content.slice(0, match.index).trimEnd(), questions };
             }
         }
         return { body: content, questions: [] };
-    }, []);
+    }, [sanitizeFollowUpQuestionLine]);
 
     // Chat title: summarize the user's question into a short topic label
     const chatTitle = useMemo(() => {
@@ -3000,15 +3029,23 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const tocMsgInWebMode = tocVisibleMsgIdx >= 0 && msgViewMode[tocVisibleMsgIdx] === 'web';
     const showToc = tocHeadings.length > 0 && !tocMsgInWebMode;
 
-    // Scroll-spy: track which heading is currently in view + TOC position + which message's TOC to show
-    const [tocTopPx, setTocTopPx] = useState(0);
-    useEffect(() => {
+    // Scroll-spy: track which heading is currently in view + which message's TOC to show
+    useLayoutEffect(() => {
         const container = scrollContainerRef.current;
         if (!container) return;
         const tocIndices = Object.keys(allTocHeadings).map(Number);
         if (tocIndices.length === 0) return;
 
-        const onScroll = () => {
+        let rafId = 0;
+        const scheduleRecalc = () => {
+            cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(() => {
+                rafId = 0;
+                recalcToc();
+            });
+        };
+
+        const recalcToc = () => {
             const containerRect = container.getBoundingClientRect();
 
             // Determine which assistant message's TOC to show:
@@ -3039,29 +3076,37 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 }
             }
             setActiveTocId(current);
-
-            // Float position – clamp between the answer's h1 title and its action-bar
-            const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
-            if (firstEl) {
-                let floatTop = Math.max(8, firstEl.offsetTop - container.scrollTop);
-
-                // Bottom boundary: when TOC would overlap the action bar, let it scroll away with content
-                const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
-                const tocH = tocNavRef.current?.offsetHeight || 0;
-                if (actionsEl && tocH > 0) {
-                    const pinnedTop = actionsEl.offsetTop - container.scrollTop - tocH - 16;
-                    floatTop = Math.min(floatTop, pinnedTop);
-                }
-                // Ensure TOC doesn't overlap the input bar (reserve 80px at bottom)
-                const maxTop = container.clientHeight - 80;
-                floatTop = Math.min(floatTop, maxTop);
-                setTocTopPx(floatTop);
-            }
         };
-        container.addEventListener('scroll', onScroll, { passive: true });
-        onScroll();
-        return () => container.removeEventListener('scroll', onScroll);
-    }, [allTocHeadings]);
+
+        container.addEventListener('scroll', scheduleRecalc, { passive: true });
+        window.addEventListener('resize', scheduleRecalc);
+        scheduleRecalc();
+
+        // Observe late layout shifts from markdown, quote cards, fonts, and the TOC panel itself.
+        const resizeObserver = typeof ResizeObserver !== 'undefined'
+            ? new ResizeObserver(() => scheduleRecalc())
+            : null;
+        if (resizeObserver) {
+            resizeObserver.observe(container);
+            if (container.firstElementChild instanceof HTMLElement) {
+                resizeObserver.observe(container.firstElementChild);
+            }
+        }
+
+        const delayedRecalcIds = [120, 360, 900].map(delay =>
+            window.setTimeout(scheduleRecalc, delay)
+        );
+        const fontSet = typeof document !== 'undefined' ? (document as Document & { fonts?: FontFaceSet }).fonts : undefined;
+        fontSet?.ready?.then(() => scheduleRecalc()).catch(() => undefined);
+
+        return () => {
+            cancelAnimationFrame(rafId);
+            delayedRecalcIds.forEach(id => window.clearTimeout(id));
+            resizeObserver?.disconnect();
+            window.removeEventListener('resize', scheduleRecalc);
+            container.removeEventListener('scroll', scheduleRecalc);
+        };
+    }, [allTocHeadings, showToc]);
 
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
@@ -4035,74 +4080,76 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
-                    {/* TOC floating panel */}
-                    {showToc && (
-                        <nav
-                            ref={tocNavRef}
-                            className="absolute left-3 z-30 hidden md:block transition-all duration-150"
-                            style={{ top: tocTopPx, maxHeight: `calc(100% - ${Math.max(tocTopPx, 0)}px - 80px)`, overflow: 'hidden' }}
-                        >
-                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
-                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
-                                <ul className="space-y-0.5">
-                                    {(() => {
-                                        // Filter and optimize TOC hierarchy:
-                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
-                                        const filtered = tocHeadings.filter(h => h.level >= 2);
-                                        const optimized: typeof filtered = [];
-                                        for (let fi = 0; fi < filtered.length; fi++) {
-                                            const h = filtered[fi];
-                                            if (h.level === 2) {
-                                                optimized.push(h);
-                                            } else if (h.level >= 3) {
-                                                // Count siblings: how many consecutive level-3 items follow the same level-2 parent
-                                                const parentIdx = optimized.findLastIndex(x => x.level === 2);
-                                                let siblingCount = 0;
-                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
-                                                // Only show sub-items if there are 2+ siblings
-                                                if (siblingCount >= 2) optimized.push(h);
-                                            }
-                                        }
-                                        return optimized;
-                                    })().map((h, idx, arr) => {
-                                        const isActive = activeTocId === h.id;
-                                        const sectionNum = h.level === 2
-                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
-                                            : null;
-                                        return (
-                                            <li key={idx}>
-                                                <button
-                                                    onClick={() => {
-                                                        const el = document.getElementById(h.id);
-                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                                    }}
-                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
-                                                        isActive
-                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
-                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
-                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
-                                                >
-                                                    {sectionNum !== null && (
-                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
-                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
-                                                        }`}>
-                                                            {sectionNum}
-                                                        </span>
-                                                    )}
-                                                    {h.level >= 3 && (
-                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
-                                                    )}
-                                                    <span className="break-words whitespace-normal">{h.text}</span>
-                                                </button>
-                                            </li>
-                                        );
-                                    })}
-                                </ul>
-                            </div>
-                        </nav>
-                    )}
-                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
-                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${showToc ? 'md:ml-[228px]' : ''}`}>
+                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
+                        <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
+                            <div className={`flex items-start gap-6 xl:gap-8 ${showToc ? '' : 'justify-center'}`}>
+                                {showToc && (
+                                    <aside className="hidden md:block w-[220px] shrink-0 self-start sticky" style={{ top: TOC_STICKY_TOP_PX }}>
+                                        <nav
+                                            className="overflow-hidden"
+                                            style={{
+                                                maxHeight: `max(${TOC_MIN_VIEWPORT_PX}px, calc(100dvh - ${TOC_STICKY_TOP_PX + TOC_BOTTOM_RESERVE_PX}px))`,
+                                            }}
+                                        >
+                                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
+                                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
+                                                <ul className="space-y-0.5">
+                                                    {(() => {
+                                                        // Filter and optimize TOC hierarchy:
+                                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
+                                                        const filtered = tocHeadings.filter(h => h.level >= 2);
+                                                        const optimized: typeof filtered = [];
+                                                        for (let fi = 0; fi < filtered.length; fi++) {
+                                                            const h = filtered[fi];
+                                                            if (h.level === 2) {
+                                                                optimized.push(h);
+                                                            } else if (h.level >= 3) {
+                                                                let siblingCount = 0;
+                                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
+                                                                // Only show sub-items if there are 2+ siblings
+                                                                if (siblingCount >= 2) optimized.push(h);
+                                                            }
+                                                        }
+                                                        return optimized;
+                                                    })().map((h, idx, arr) => {
+                                                        const isActive = activeTocId === h.id;
+                                                        const sectionNum = h.level === 2
+                                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
+                                                            : null;
+                                                        return (
+                                                            <li key={idx}>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const el = document.getElementById(h.id);
+                                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                                    }}
+                                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
+                                                                        isActive
+                                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
+                                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
+                                                                >
+                                                                    {sectionNum !== null && (
+                                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
+                                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
+                                                                        }`}>
+                                                                            {sectionNum}
+                                                                        </span>
+                                                                    )}
+                                                                    {h.level >= 3 && (
+                                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
+                                                                    )}
+                                                                    <span className="break-words whitespace-normal">{h.text}</span>
+                                                                </button>
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ul>
+                                            </div>
+                                        </nav>
+                                    </aside>
+                                )}
+                                <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
                             {messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -4727,9 +4774,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                             <div ref={messagesEndRef} />
                         </div>
                     </div>
+                </div>
+            </div>
 
                     {/* Input */}
-                    <div className="absolute bottom-0 left-0 right-0 pt-2 pb-4 px-4 md:px-8 pointer-events-none" style={{ zIndex: 10 }}>
+                    <div className="absolute bottom-0 left-0 right-0 z-40 pt-2 pb-4 px-4 md:px-8 pointer-events-none">
                         <div className="max-w-2xl mx-auto pointer-events-auto">
                             <div className="bg-white/90 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-gray-100" style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06)' }}>
                                 {/* Voice overlay: Recording */}
