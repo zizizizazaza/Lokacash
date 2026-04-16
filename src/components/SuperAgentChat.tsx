@@ -192,6 +192,10 @@ interface ThinkingFlow {
     planningMessage?: string;
     /** Signal Radar: last30days stderr / status lines (not shown in main chat) */
     signalResearchLog?: string;
+    /** Roundtable: selected agent IDs from summon panel */
+    selectedAgentIds?: string[];
+    /** Timestamp when thinking started */
+    startTime?: number;
 }
 
 const SA_SID_KEY = 'loka_superagent_sid';
@@ -272,26 +276,33 @@ const ROUNDTABLE_AGENTS = [
     { name: 'Quant Tracker', initials: 'QT', agentId: 'agent_3' },
 ];
 
-/* ── Summon pool — expanded analyst characters for roundtable selection ── */
-const SUMMON_POOL = [
-    // ── Core analysts (default selected) ──
-    { id: 'fundamental', name: 'Fundamental Analyst', initials: 'FA', role: 'Value & earnings analysis', color: '#3B82F6', core: true },
-    { id: 'macro', name: 'Macro Strategist', initials: 'MS', role: 'Economic trends & policy', color: '#8B5CF6', core: true },
-    { id: 'sentiment', name: 'Sentiment Engine', initials: 'SE', role: 'Market mood & social signals', color: '#F59E0B', core: true },
-    { id: 'quant', name: 'Quant Tracker', initials: 'QT', role: 'Statistical patterns & models', color: '#10B981', core: true },
-    { id: 'technical', name: 'Technical Analyst', initials: 'TA', role: 'Charts, trends & momentum', color: '#EF4444', core: true },
-    { id: 'risk', name: 'Risk Assessor', initials: 'RA', role: 'Downside scenarios & hedging', color: '#6366F1', core: true },
-    { id: 'sector', name: 'Sector Specialist', initials: 'SS', role: 'Industry dynamics & comps', color: '#EC4899', core: false },
-    { id: 'contrarian', name: "Devil's Advocate", initials: 'DA', role: 'Challenges consensus views', color: '#F97316', core: false },
-    // ── Guru advisors (not default selected, appear smaller) ──
-    { id: 'warren_buffett', name: 'Warren Buffett', initials: 'WB', role: 'Competitive moats & value', color: '#1E40AF', core: false },
-    { id: 'charlie_munger', name: 'Charlie Munger', initials: 'CM', role: 'Mental models & inversion', color: '#374151', core: false },
-    { id: 'peter_lynch', name: 'Peter Lynch', initials: 'PL', role: 'Growth at reasonable price', color: '#047857', core: false },
-    { id: 'cathie_wood', name: 'Cathie Wood', initials: 'CW', role: 'Disruptive innovation', color: '#7C3AED', core: false },
-    { id: 'michael_burry', name: 'Michael Burry', initials: 'MB', role: 'Deep value & macro shorts', color: '#B91C1C', core: false },
-    { id: 'nassim_taleb', name: 'Nassim Taleb', initials: 'NT', role: 'Tail risk & antifragility', color: '#0F766E', core: false },
+/* ── Summon pool — analyst characters for roundtable selection ── */
+/* system=true → auto-selected by system, user cannot toggle */
+const SUMMON_POOL: { id: string; name: string; nameCN: string; initials: string; role: string; roleCN: string; color: string; group: 'system' | 'enhanced' | 'master'; }[] = [
+    // ── System base agents (auto-assigned, not user-toggleable) ──
+    { id: 'fundamental_specialist',  name: 'Fundamental Analyst',      nameCN: '基本面分析师',   initials: 'FA', role: 'Financials & earnings',    roleCN: '财务与盈利分析',   color: '#3B82F6', group: 'system' },
+    { id: 'valuation_specialist',    name: 'Valuation Analyst',        nameCN: '估值分析师',     initials: 'VA', role: 'Fair value & models',      roleCN: '公允价值与模型',   color: '#6366F1', group: 'system' },
+    { id: 'macro_specialist',        name: 'Macro Analyst',            nameCN: '宏观分析师',     initials: 'MA', role: 'Macro trends & policy',     roleCN: '宏观趋势与政策',   color: '#8B5CF6', group: 'system' },
+    { id: 'risk_specialist',         name: 'Risk Analyst',             nameCN: '风险分析师',     initials: 'RA', role: 'Risk & downside scenarios', roleCN: '风险与下行场景',   color: '#EF4444', group: 'system' },
+    // ── Group 1: Enhanced / Specialized views (user-toggleable) ──
+    { id: 'allocation_specialist',   name: 'Allocation Analyst',       nameCN: '配置分析师',     initials: 'AA', role: 'ETF & asset allocation',    roleCN: 'ETF与资产配置',    color: '#14B8A6', group: 'enhanced' },
+    { id: 'fund_specialist',         name: 'Fund Analyst',             nameCN: '基金分析师',     initials: 'FD', role: 'Fund selection & review',   roleCN: '基金筛选与评审',   color: '#0EA5E9', group: 'enhanced' },
+    { id: 'options_specialist',      name: 'Options Analyst',          nameCN: '期权分析师',     initials: 'OA', role: 'Options strategy & Greeks', roleCN: '期权策略与Greeks', color: '#D946EF', group: 'enhanced' },
+    { id: 'crypto_specialist',       name: 'Crypto Analyst',           nameCN: '加密分析师',     initials: 'CA', role: 'Crypto & on-chain data',    roleCN: '加密与链上数据',   color: '#F59E0B', group: 'enhanced' },
+    { id: 'macro_enhanced',   name: 'Macro Enhanced Analyst',   nameCN: '宏观增强分析师',   initials: 'ME', role: 'Deep macro overlay',        roleCN: '深度宏观叠加',   color: '#7C3AED', group: 'enhanced' },
+    { id: 'risk_enhanced',    name: 'Risk Enhanced Analyst',    nameCN: '风险增强分析师',   initials: 'RE', role: 'Fractal risk modeling',      roleCN: '分形风险建模',   color: '#DC2626', group: 'enhanced' },
+    { id: 'event_driven',     name: 'Event-Driven Analyst',     nameCN: '事件驱动分析师',   initials: 'ED', role: 'Catalysts & events',         roleCN: '催化剂与事件',   color: '#EA580C', group: 'enhanced' },
+    { id: 'sentiment_focus',  name: 'Sentiment Analyst',        nameCN: '情绪分析师',       initials: 'SF', role: 'Social & market sentiment',  roleCN: '社交与市场情绪', color: '#0891B2', group: 'enhanced' },
+    { id: 'portfolio_view',   name: 'Portfolio Analyst',        nameCN: '组合分析师',       initials: 'PV', role: 'Portfolio impact & fit',      roleCN: '组合影响与适配', color: '#059669', group: 'enhanced' },
+    // ── Group 2: Master simulation (user-toggleable) ──
+    { id: 'buffett_style',  name: 'Warren Buffett',  nameCN: '巴菲特风格',   initials: 'WB', role: 'Competitive moats & value',    roleCN: '竞争护城河与价值', color: '#1E40AF', group: 'master' },
+    { id: 'munger_style',   name: 'Charlie Munger',  nameCN: '芒格风格',     initials: 'CM', role: 'Mental models & inversion',    roleCN: '多元思维与逆向',   color: '#374151', group: 'master' },
+    { id: 'dalio_style',    name: 'Ray Dalio',       nameCN: '达利欧风格',   initials: 'RD', role: 'Macro cycles & all-weather',   roleCN: '宏观周期与全天候', color: '#1D4ED8', group: 'master' },
+    { id: 'soros_style',    name: 'George Soros',    nameCN: '索罗斯风格',   initials: 'GS', role: 'Reflexivity & macro bets',     roleCN: '反身性与宏观博弈', color: '#7E22CE', group: 'master' },
+    { id: 'lynch_style',    name: 'Peter Lynch',     nameCN: '林奇风格',     initials: 'PL', role: 'Growth at reasonable price',   roleCN: '合理价格成长',     color: '#047857', group: 'master' },
 ];
-const DEFAULT_SUMMON_IDS = new Set(['fundamental', 'macro', 'sentiment', 'quant']);
+const SYSTEM_AGENT_IDS = new Set(SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id));
+const DEFAULT_SUMMON_IDS = new Set<string>();
 
 const AGENT_COLORS: Record<string, string> = {
     FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
@@ -299,7 +310,28 @@ const AGENT_COLORS: Record<string, string> = {
 
 /* ── Avatar mapping: name/id → JPG path ── */
 const AVATAR_MAP: Record<string, string> = {
-    // SUMMON_POOL ids
+    // SUMMON_POOL system agents
+    fundamental_specialist: '/avatars/fundamental_specialist.jpg',
+    valuation_specialist: '/avatars/valuation_specialist.jpg',
+    macro_specialist: '/avatars/macro_specialist.jpg',
+    risk_specialist: '/avatars/risk_specialist.jpg',
+    allocation_specialist: '/avatars/allocation_specialist.jpg',
+    fund_specialist: '/avatars/fund_specialist.jpg',
+    options_specialist: '/avatars/options_specialist.jpg',
+    crypto_specialist: '/avatars/crypto_specialist.jpg',
+    // SUMMON_POOL enhanced agents
+    macro_enhanced: '/avatars/macro_enhanced.jpg',
+    risk_enhanced: '/avatars/risk_enhanced.jpg',
+    event_driven: '/avatars/event_driven.jpg',
+    sentiment_focus: '/avatars/sentiment_focus.jpg',
+    portfolio_view: '/avatars/portfolio_view.jpg',
+    // SUMMON_POOL master style agents
+    buffett_style: '/avatars/warren_buffett.jpg',
+    munger_style: '/avatars/charlie_munger.jpg',
+    dalio_style: '/avatars/default.jpg',
+    soros_style: '/avatars/default.jpg',
+    lynch_style: '/avatars/peter_lynch.jpg',
+    // Legacy SUMMON_POOL ids (keep for backward compat)
     fundamental: '/avatars/fundamental_analyst.jpg',
     macro: '/avatars/default.jpg',
     sentiment: '/avatars/sentiment_analyst.jpg',
@@ -364,11 +396,16 @@ const getAgentAvatar = (nameOrId: string) => AVATAR_MAP[nameOrId] || '/avatars/d
 const prettyAgentName = (raw: string) =>
     AVATAR_MAP[raw] ? raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : raw;
 
-const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: string }> = ({ nameOrId, size = 24, className = '' }) => (
-    <img src={getAgentAvatar(nameOrId)} alt={nameOrId} width={size} height={size}
-        className={`rounded-full object-cover shrink-0 ${className}`}
-        style={{ width: size, height: size }} />
-);
+const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: string }> = ({ nameOrId, size = 24, className = '' }) => {
+    const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 3) : 1;
+    const renderSize = Math.round(size * dpr);
+    return (
+        <img src={getAgentAvatar(nameOrId)} alt={nameOrId} width={renderSize} height={renderSize}
+            className={`rounded-full object-cover shrink-0 ${className}`}
+            style={{ width: size, height: size, imageRendering: 'auto' }}
+            loading="eager" decoding="async" />
+    );
+};
 
 /** Build RoundtableData from a real consensus_done result */
 const buildRoundtableFromConsensus = (result: any): RoundtableData => {
@@ -954,14 +991,40 @@ const SummonCharactersView: React.FC<{
                 <p className="text-[12px] text-gray-500">Select analysts for this discussion, or continue directly</p>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-4">
-                <div className="flex flex-wrap justify-center gap-5 content-center min-h-full">
+                {/* ── All agents in one grid: system (locked) + toggleable ── */}
+                <div className="flex flex-wrap justify-center gap-5 content-center">
                     {SUMMON_POOL.map((agent, i) => {
+                        const isSystem = agent.group === 'system';
                         const selected = selectedIds.has(agent.id);
+                        if (isSystem) {
+                            return (
+                                <div key={agent.id}
+                                    className="flex flex-col items-center gap-1.5 relative group"
+                                    style={{ animation: `summon-pop 0.4s ease-out ${i * 0.05}s both` }}
+                                >
+                                    <div className="relative w-[56px] h-[56px] rounded-full overflow-hidden opacity-50 grayscale-[30%] cursor-default">
+                                        <AgentAvatarImg nameOrId={agent.id} size={56} />
+                                        <div className="absolute bottom-0 right-0 w-[16px] h-[16px] bg-gray-400 rounded-full flex items-center justify-center">
+                                            <svg className="w-[8px] h-[8px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                            </svg>
+                                        </div>
+                                    </div>
+                                    <span className="text-[10px] font-semibold text-gray-400 text-center leading-tight max-w-[68px]">{agent.name}</span>
+                                    <span className="text-[9px] text-gray-400 text-center leading-tight max-w-[68px]">{agent.role}</span>
+                                    {/* Tooltip */}
+                                    <div className="absolute -top-9 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-[9px] rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-30 shadow-lg">
+                                        Auto-Assigned
+                                        <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[3px] border-r-[3px] border-t-[3px] border-l-transparent border-r-transparent border-t-gray-800" />
+                                    </div>
+                                </div>
+                            );
+                        }
                         return (
                             <button key={agent.id}
                                 onClick={() => onToggle(agent.id)}
                                 className="flex flex-col items-center gap-1.5 group transition-all"
-                                style={{ animation: `summon-pop 0.4s ease-out ${i * 0.07}s both` }}
+                                style={{ animation: `summon-pop 0.4s ease-out ${i * 0.05}s both` }}
                             >
                                 <div className={`relative w-[56px] h-[56px] rounded-full overflow-hidden
                                     transition-all duration-200 cursor-pointer ${selected
@@ -1144,7 +1207,10 @@ const ThinkingProcessSidePanel: React.FC<{
     thinking: ThinkingFlow;
     onClose: () => void;
     hideHeader?: boolean;
-}> = ({ thinking, onClose, hideHeader }) => {
+    chatMode?: string;
+}> = ({ thinking, onClose, hideHeader, chatMode }) => {
+
+    const isRoundtable = thinking.routedMode === 'roundtable' || chatMode === 'roundtable';
 
     // ── Sub-section renderers for Search Module ──
     const SocialSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
@@ -1434,16 +1500,61 @@ const ThinkingProcessSidePanel: React.FC<{
     const DoneModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const dur = (mod.data as any)?.duration;
         const showDur = typeof dur === 'number' && !Number.isNaN(dur) && dur > 0;
+        // For roundtable, also compute elapsed from startTime
+        const elapsed = thinking.startTime ? ((Date.now() - thinking.startTime) / 1000).toFixed(1) : null;
+        const displayDur = showDur ? `${dur}s` : (elapsed && !thinking.isActive ? `${elapsed}s` : null);
         return (
             <div className="pt-3 border-t border-gray-100">
                 <div className="flex items-center gap-2.5">
                     <StatusIcon status="done" />
                     <span className="text-[14px] font-bold text-gray-900">Done</span>
-                    {showDur && <span className="text-[11px] text-gray-400 ml-auto">{dur}s</span>}
+                    {displayDur && <span className="text-[11px] text-gray-400 ml-auto">{displayDur}</span>}
                 </div>
             </div>
         );
     };
+
+    // ── Compute ordered modules list ──
+    const orderedModules = (() => {
+        const mods: { key: string; element: React.ReactNode }[] = [];
+
+        // Search module
+        const searchMod = thinking.modules.find(m => m.type === 'search');
+        const hasToolTrace = thinking.toolTrace && thinking.toolTrace.length > 0;
+        const hasPlanning = !!thinking.planningMessage;
+        const hasSearch = !!searchMod;
+        if (hasToolTrace || hasPlanning || hasSearch) {
+            mods.push({
+                key: 'search',
+                element: <SearchModule
+                    mod={searchMod || { type: 'search', status: 'active' }}
+                    toolTrace={thinking.toolTrace}
+                    planningMessage={thinking.planningMessage}
+                />,
+            });
+        }
+
+        // Remaining modules
+        for (const mod of thinking.modules) {
+            if (mod.type === 'search') continue;
+            if (mod.type === 'done' && mod.status !== 'completed') continue;
+            switch (mod.type) {
+                case 'analysis':
+                    mods.push({ key: 'analysis', element: <AnalysisModule mod={mod} /> });
+                    break;
+                case 'simulation':
+                    mods.push({ key: 'simulation', element: <SimulationModule mod={mod} /> });
+                    break;
+                case 'consensus':
+                    mods.push({ key: 'consensus', element: <ConsensusModule mod={mod} /> });
+                    break;
+                case 'done':
+                    mods.push({ key: 'done', element: <DoneModule mod={mod} /> });
+                    break;
+            }
+        }
+        return mods;
+    })();
 
     return (
         <div className="flex flex-col h-full bg-white">
@@ -1451,6 +1562,7 @@ const ThinkingProcessSidePanel: React.FC<{
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <div>
                     <h2 className="text-[14px] font-bold text-gray-900">Thinking Process</h2>
+                    {isRoundtable && <p className="text-[10px] text-indigo-500 font-medium mt-0.5">Roundtable Mode</p>}
                 </div>
                 <button onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
@@ -1458,30 +1570,9 @@ const ThinkingProcessSidePanel: React.FC<{
             </div>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {/* Searching module: combines Basic Data (toolTrace) + Market Data (search module) */}
-                {(() => {
-                    const searchMod = thinking.modules.find(m => m.type === 'search');
-                    const hasToolTrace = thinking.toolTrace && thinking.toolTrace.length > 0;
-                    const hasPlanning = !!thinking.planningMessage;
-                    const hasSearch = !!searchMod;
-                    if (hasToolTrace || hasPlanning || hasSearch) {
-                        return <SearchModule
-                            mod={searchMod || { type: 'search', status: 'active' }}
-                            toolTrace={thinking.toolTrace}
-                            planningMessage={thinking.planningMessage}
-                        />;
-                    }
-                    return null;
-                })()}
-                {thinking.modules.filter(m => (m.type !== 'done' && m.type !== 'search') || (m.type === 'done' && m.status === 'completed')).map((mod) => {
-                    switch (mod.type) {
-                        case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
-                        case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
-                        case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
-                        case 'done': return <DoneModule key="done" mod={mod} />;
-                        default: return null;
-                    }
-                })}
+                {orderedModules.map((item) => (
+                    <div key={item.key}>{item.element}</div>
+                ))}
             </div>
         </div>
     );
@@ -2075,9 +2166,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const onStarted = (data: { sessionId: string; mode: string; route: string }) => {
             saLog('← agent:chat:started', { expect: sessionId, got: data?.sessionId, route: data?.route, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
-            setThinkingProcesses(prev => ({
-                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: data.route }
-            }));
+            setThinkingProcesses(prev => {
+                const existing = prev[activeMsgIdxRef.current];
+                return {
+                    ...prev, [activeMsgIdxRef.current]: {
+                        modules: existing?.modules ?? [],
+                        isActive: true,
+                        route: data.route,
+                        selectedAgentIds: existing?.selectedAgentIds,
+                        startTime: existing?.startTime ?? Date.now(),
+                        routedMode: existing?.routedMode,
+                    }
+                };
+            });
         };
 
         const onModule = (data: { sessionId: string; moduleType: string; status: string; data?: any }) => {
@@ -2512,9 +2613,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         }
         setShowGraphPanel(false);
 
-        setThinkingProcesses(prev => ({
-            ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
-        }));
+        setThinkingProcesses(prev => {
+            const existing = prev[msgIdx];
+            return {
+                ...prev,
+                [msgIdx]: {
+                    modules: existing?.modules ?? [],
+                    isActive: true,
+                    route: 'Routing...',
+                    selectedAgentIds: existing?.selectedAgentIds,
+                    startTime: existing?.startTime,
+                    routedMode: existing?.routedMode,
+                },
+            };
+        });
 
         try {
             sessionStorage.setItem(
@@ -2679,6 +2791,21 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setShowGraphPanel(false);
         setSourcePanelData(null);
         setPanelTab('graph');
+        // Store roundtable context in thinking process
+        const agentIds = [...selectedSummonIds];
+        const nextMsgIdx = messages.length; // assistant message will be at this index
+        setThinkingProcesses(prev => {
+            const flow = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
+            return {
+                ...prev,
+                [nextMsgIdx]: {
+                    ...flow,
+                    selectedAgentIds: agentIds,
+                    startTime: Date.now(),
+                    routedMode: 'roundtable',
+                },
+            };
+        });
         sendToAI(text, messages);
         setTimeout(scrollUserMsgToTop, 150);
     }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop]);
@@ -3161,12 +3288,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 const t = {
                                     sensing:   isCN ? '正在感知你的问题…'              : 'Sensing your question…',
                                     attracting: isCN ? '有把握的角色正在被吸引过来 ✨'  : 'Confident analysts are being drawn in ✨',
-                                    ready:     isCN ? '相关的角色已经被吸引过来了'      : 'Relevant analysts have arrived',
-                                    selectTip: isCN ? '点选参与圆桌讨论的分析师'        : 'Tap to select who joins the roundtable',
+                                    ready:     isCN ? '选择参与圆桌讨论的分析师'        : 'Pick analysts for this roundtable',
+                                    selectTip: isCN ? '点击下方头像添加更多分析师' : 'Tap avatars below to add more analysts',
                                     btn:       isCN
-                                        ? `开始圆桌讨论 · ${selectedSummonIds.size} 位分析师`
-                                        : `Start roundtable · ${selectedSummonIds.size} analyst${selectedSummonIds.size > 1 ? 's' : ''}`,
+                                        ? `开始圆桌讨论 · ${selectedSummonIds.size + SUMMON_POOL.filter(a => a.group === 'system').length} 位分析师`
+                                        : `Start roundtable · ${selectedSummonIds.size + SUMMON_POOL.filter(a => a.group === 'system').length} analysts`,
                                     cancel:    isCN ? '取消' : 'Cancel',
+                                    systemTip: isCN ? '自动分配' : 'Auto-Assigned',
                                 };
                                 return (
                                 <div className="flex items-start gap-3">
@@ -3200,7 +3328,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     </div>
                                                 </div>
                                             ) : (
-                                                /* ── Phase 3: Two-zone selection — selected row + scatter pool ── */
+                                                /* ── Phase 3: selected row + scatter pool (system locked inline) ── */
                                                 <div>
                                                     <div className="px-5 pt-4 pb-2">
                                                         <p className="text-[13px] font-semibold text-gray-800"
@@ -3211,47 +3339,63 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         >{t.selectTip}</p>
                                                     </div>
 
-                                                    {/* ── Selected row (top) ── */}
-                                                    <div className="px-4 pt-2 pb-1">
+                                                    {/* ── Selected row: system (locked) + user-chosen, all in one row ── */}
+                                                    <div className="px-4 pt-1 pb-1">
                                                         <div className="flex flex-wrap items-center gap-3 min-h-[68px] px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-200 border-dashed"
                                                             style={{ animation: 'summon-text 0.3s ease-out both' }}
                                                         >
-                                                            {SUMMON_POOL.filter(a => selectedSummonIds.has(a.id)).length === 0 ? (
-                                                                <p className="text-[11px] text-gray-400 italic w-full text-center">
-                                                                    {/[\u4e00-\u9fff]/.test(pendingRtText || '') ? '点击下方头像来选择分析师' : 'Tap avatars below to select analysts'}
-                                                                </p>
-                                                            ) : (
-                                                                SUMMON_POOL.filter(a => selectedSummonIds.has(a.id)).map(agent => (
-                                                                    <button key={agent.id}
-                                                                        onClick={() => setSelectedSummonIds(prev => { const n = new Set(prev); n.delete(agent.id); return n; })}
-                                                                        className="flex flex-col items-center gap-0.5 group transition-all duration-300"
-                                                                        title={/[\u4e00-\u9fff]/.test(pendingRtText || '') ? '点击取消选中' : 'Click to deselect'}
-                                                                    >
-                                                                        <div className="relative w-[46px] h-[46px] rounded-full overflow-hidden ring-2 ring-offset-1 ring-emerald-500 shadow-md group-hover:ring-red-400 group-hover:shadow-red-100 transition-all duration-200"
-                                                                        >
-                                                                            <AgentAvatarImg nameOrId={agent.id} size={46} />
-                                                                            <div className="absolute inset-0 bg-red-500/0 group-hover:bg-red-500/20 transition-colors flex items-center justify-center">
-                                                                                <svg className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                                                                                </svg>
-                                                                            </div>
+                                                            {/* System agents — locked, non-interactive */}
+                                                            {SUMMON_POOL.filter(a => a.group === 'system').map((agent, i) => (
+                                                                <div key={agent.id}
+                                                                    className="flex flex-col items-center gap-0.5 relative group"
+                                                                    style={{ animation: `summon-float 0.5s cubic-bezier(0.22,1,0.36,1) ${i * 0.04}s both` }}
+                                                                >
+                                                                    <div className="relative w-[46px] h-[46px] rounded-full overflow-hidden opacity-50 grayscale-[30%] cursor-default">
+                                                                        <AgentAvatarImg nameOrId={agent.id} size={46} />
+                                                                        <div className="absolute bottom-0 right-0 w-[13px] h-[13px] bg-gray-400 rounded-full flex items-center justify-center">
+                                                                            <svg className="w-[7px] h-[7px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                                                            </svg>
                                                                         </div>
-                                                                        <span className="text-[9px] font-medium text-emerald-700 text-center leading-tight whitespace-nowrap max-w-[60px] truncate group-hover:max-w-none group-hover:overflow-visible">{agent.name}</span>
-                                                                    </button>
-                                                                ))
-                                                            )}
+                                                                    </div>
+                                                                    <span className="text-[11px] font-medium text-gray-400 text-center leading-tight whitespace-nowrap max-w-[60px] truncate">{isCN ? agent.nameCN : agent.name}</span>
+                                                                    {/* Tooltip */}
+                                                                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-[9px] rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-30 shadow-lg">
+                                                                        {t.systemTip}
+                                                                        <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[3px] border-r-[3px] border-t-[3px] border-l-transparent border-r-transparent border-t-gray-800" />
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                            {/* User-selected agents — click to deselect */}
+                                                            {SUMMON_POOL.filter(a => a.group !== 'system' && selectedSummonIds.has(a.id)).map(agent => (
+                                                                <button key={agent.id}
+                                                                    onClick={() => setSelectedSummonIds(prev => { const n = new Set(prev); n.delete(agent.id); return n; })}
+                                                                    className="flex flex-col items-center gap-0.5 group transition-all duration-300"
+                                                                    title={isCN ? '点击取消选中' : 'Click to deselect'}
+                                                                >
+                                                                    <div className="relative w-[46px] h-[46px] rounded-full overflow-hidden ring-2 ring-offset-1 ring-emerald-500 shadow-md group-hover:ring-red-400 group-hover:shadow-red-100 transition-all duration-200">
+                                                                        <AgentAvatarImg nameOrId={agent.id} size={46} />
+                                                                        <div className="absolute inset-0 bg-red-500/0 group-hover:bg-red-500/20 transition-colors flex items-center justify-center">
+                                                                            <svg className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                                                                            </svg>
+                                                                        </div>
+                                                                    </div>
+                                                                    <span className="text-[11px] font-medium text-emerald-700 text-center leading-tight whitespace-nowrap max-w-[60px] truncate group-hover:max-w-none group-hover:overflow-visible">{isCN ? agent.nameCN : agent.name}</span>
+                                                                </button>
+                                                            ))}
                                                         </div>
                                                     </div>
 
-                                                    {/* ── Scatter pool (bottom) — unselected agents in radial layout ── */}
+                                                    {/* ── Scatter pool — unselected user-toggleable agents ── */}
                                                     <div className="px-3 py-2">
-                                                        <div className="relative" style={{ height: 260 }}>
+                                                        <div className="relative" style={{ height: 320 }}>
                                                             {(() => {
-                                                                const unselected = SUMMON_POOL.filter(a => !selectedSummonIds.has(a.id));
+                                                                const unselected = SUMMON_POOL.filter(a => a.group !== 'system' && !selectedSummonIds.has(a.id));
                                                                 if (unselected.length === 0) return (
                                                                     <div className="flex items-center justify-center h-full">
                                                                         <p className="text-[12px] text-gray-300">
-                                                                            {/[\u4e00-\u9fff]/.test(pendingRtText || '') ? '全部已选中' : 'All selected'}
+                                                                            {isCN ? '全部已选中' : 'All selected'}
                                                                         </p>
                                                                     </div>
                                                                 );
@@ -3269,7 +3413,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                     return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) * 0.75 };
                                                                 });
                                                                 // Push apart
-                                                                const minDist = 17; // wider spacing to prevent text-avatar overlap
+                                                                const minDist = 22;
                                                                 for (let iter = 0; iter < 8; iter++) {
                                                                     for (let i = 0; i < pts.length; i++) {
                                                                         for (let j = i + 1; j < pts.length; j++) {
@@ -3291,7 +3435,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                     const { x: px, y: py } = pts[ui];
                                                                     const dist = Math.sqrt((px - cx) ** 2 + (py - cy) ** 2);
                                                                     const distRatio = Math.min(dist / 42, 1);
-                                                                    const avatarSize = Math.round(42 - distRatio * 8); // 42→34
+                                                                    const avatarSize = Math.round(50 - distRatio * 8);
                                                                     return (
                                                                         <button key={agent.id}
                                                                             onClick={() => setSelectedSummonIds(prev => new Set([...prev, agent.id]))}
@@ -3313,8 +3457,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                                 <AgentAvatarImg nameOrId={agent.id} size={avatarSize} />
                                                                             </div>
                                                                             <span className="mt-0.5 font-medium text-center leading-tight whitespace-nowrap transition-colors"
-                                                                                style={{ fontSize: 9, color: '#6b7280', opacity: 0.7 + (1 - distRatio) * 0.3 }}
-                                                                            >{agent.name}</span>
+                                                                                style={{ fontSize: 11, color: '#6b7280', opacity: 0.7 + (1 - distRatio) * 0.3 }}
+                                                                            >{isCN ? agent.nameCN : agent.name}</span>
                                                                         </button>
                                                                     );
                                                                 });
@@ -3528,7 +3672,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         {panelTab === 'process' ? (
                             currentThinking ? (
                                 <div className="flex-1 overflow-hidden">
-                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader />
+                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
                                 </div>
                             ) : (
                                 <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
@@ -3559,6 +3703,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         <ThinkingProcessSidePanel
                             thinking={currentThinking}
                             onClose={() => setShowThinkingPanel(false)}
+                            chatMode={chatMode}
                         />
                     </div>
                 )}

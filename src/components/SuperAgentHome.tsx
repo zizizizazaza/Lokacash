@@ -369,7 +369,6 @@ const SuperAgentHome: React.FC = () => {
           {/* Agent Guide — only when an agent is selected */}
           {selectedAgent && AGENT_GUIDES[selectedAgent] && (
             <div className="hero-guide space-y-3" style={{ animation: 'fade-up 0.35s var(--ease-out-expo) both' }}>
-              <p className="text-[13px] font-semibold text-gray-700">{AGENT_GUIDES[selectedAgent].desc}</p>
 
               {/* Guru carousel — only for guru-council, wider than input box */}
               {selectedAgent === 'guru-council' && (
