@@ -65,6 +65,8 @@ def _collect_x_profile_payload(x_items: List[schema.XItem]) -> List[Dict[str, An
             jd = _format_x_joined_display(item.author_joined_raw)
             if jd:
                 rec["joinedDisplay"] = jd
+        if item.author_avatar_url and isinstance(item.author_avatar_url, str):
+            rec["avatarUrl"] = item.author_avatar_url
         out.append(rec)
     return out
 

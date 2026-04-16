@@ -2222,8 +2222,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
     // Stock quote cards keyed by message index
     const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
-    /** X/Twitter account snapshot from research (followers / joined) */
-    const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string }>>({});
+    /** X/Twitter account snapshot from research (followers / joined / avatar) */
+    const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }>>({});
     const currentConsensus = (() => {
         // First try the active message's consensus
         if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
@@ -2641,7 +2641,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
         };
 
-        const onXProfile = (data: { sessionId: string; profile: { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string } }) => {
+        const onXProfile = (data: { sessionId: string; profile: { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string } }) => {
             if (data.sessionId !== sessionId) return;
             const msgIdx = activeMsgIdxRef.current;
             if (msgIdx < 0) return;
@@ -2984,7 +2984,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
-                    const restoredXProfiles: Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string }> = {};
+                    const restoredXProfiles: Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }> = {};
                     const restoredHtml: Record<number, string> = {};
                     const restoredViewModes: Record<number, 'docs' | 'web'> = {};
                     history.forEach(
@@ -3490,7 +3490,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                     >
                                                                         <div className="px-5 py-4 flex flex-col gap-3">
                                                                             <div className="flex items-center gap-2">
-                                                                                <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-black text-white text-[11px] font-black">𝕏</span>
+                                                                                {liveXProfile.avatarUrl ? (
+                                                                                    <img
+                                                                                        src={liveXProfile.avatarUrl}
+                                                                                        alt={`@${liveXProfile.handle}`}
+                                                                                        className="h-8 w-8 rounded-xl object-cover ring-1 ring-black/10"
+                                                                                        loading="lazy"
+                                                                                        referrerPolicy="no-referrer"
+                                                                                    />
+                                                                                ) : (
+                                                                                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-black text-white text-[11px] font-black">𝕏</span>
+                                                                                )}
                                                                                 <div className="min-w-0">
                                                                                     <p className="text-[15px] font-bold text-gray-900 leading-tight">@{liveXProfile.handle}</p>
                                                                                     <p className="text-[11px] text-gray-400 mt-0.5">{isZh ? '账号快照（来自检索数据）' : 'Account snapshot (from search)'}</p>

@@ -147,6 +147,7 @@ class XItem:
     author_followers: Optional[int] = None
     author_following: Optional[int] = None
     author_joined_raw: Optional[str] = None
+    author_avatar_url: Optional[str] = None
     cross_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -169,6 +170,8 @@ class XItem:
             d['author_following'] = self.author_following
         if self.author_joined_raw:
             d['author_joined_raw'] = self.author_joined_raw
+        if self.author_avatar_url:
+            d['author_avatar_url'] = self.author_avatar_url
         if self.cross_refs:
             d['cross_refs'] = self.cross_refs
         return d
