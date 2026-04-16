@@ -170,6 +170,47 @@ interface ConsensusModuleData {
     conclusion?: { verdict: string; confidence: number };
 }
 
+// ─── Roundtable Process: 4-phase flow data ──────────────────
+interface RtDataCategory {
+    id: string;
+    label: string;
+    labelCN: string;
+    icon: string;
+    status: 'pending' | 'active' | 'done';
+    count?: number;
+    items?: string[];
+    sources?: { title: string; domain: string; favicon?: string; url?: string }[];
+}
+
+interface RtAgentInference {
+    agentId: string;
+    agentName: string;
+    status: 'pending' | 'active' | 'done';
+    verdict?: string;          // Buy / Sell / Hold
+    confidence?: number;       // 0-100
+    reasoning?: string;        // brief summary
+    changedMind?: boolean;     // did agent change conclusion in round 2
+    previousVerdict?: string;  // what they said in round 1
+    crossReferences?: string[]; // which agents they evaluated
+}
+
+interface RtRoundData {
+    round: number;
+    status: 'pending' | 'active' | 'done';
+    agents: RtAgentInference[];
+    description?: string;
+    descriptionCN?: string;
+}
+
+interface RtConsensusResult {
+    status: 'pending' | 'active' | 'done';
+    hasConsensus: boolean;
+    conflictRate?: number;      // 0-100 percentage of disagreement
+    agentConclusions: { agentName: string; verdict: string; confidence: number }[];
+    finalVerdict?: string;
+    finalConfidence?: number;
+}
+
 interface ThinkingModule {
     type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'done';
     status: 'pending' | 'active' | 'completed';
@@ -196,6 +237,13 @@ interface ThinkingFlow {
     selectedAgentIds?: string[];
     /** Timestamp when thinking started */
     startTime?: number;
+    /** Roundtable preparation status */
+    rtPreparationStatus?: 'loading' | 'done';
+    /** Roundtable 4-phase process data */
+    rtDataSearch?: RtDataCategory[];
+    rtRounds?: RtRoundData[];
+    rtConsensus?: RtConsensusResult;
+    rtReportStatus?: 'pending' | 'active' | 'done';
 }
 
 const SA_SID_KEY = 'loka_superagent_sid';
@@ -405,6 +453,116 @@ const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: st
             style={{ width: size, height: size, imageRendering: 'auto' }}
             loading="eager" decoding="async" />
     );
+};
+
+/** Reconstruct rt* process fields from a saved consensus result for history restoration */
+const reconstructRtFieldsFromConsensus = (
+    consensusResult: any,
+    modules: ThinkingModule[],
+): { rtPreparationStatus: 'done'; rtDataSearch: RtDataCategory[]; rtRounds: RtRoundData[]; rtConsensus: RtConsensusResult; rtReportStatus: 'done' } | null => {
+    const consensus = consensusResult?.consensus;
+    if (!consensus) return null;
+
+    const agentNameMap: Record<string, string> = {
+        agent_0: 'Fundamental Analyst',
+        agent_1: 'Macro Strategist',
+        agent_2: 'Sentiment Engine',
+        agent_3: 'Quant Tracker',
+    };
+
+    // --- Reconstruct rtDataSearch from modules ---
+    const searchMod = modules.find(m => m.type === 'search');
+    const searchData = searchMod?.data as SearchModuleData | undefined;
+    const searchSources = searchData?.sources || [];
+    const sectionSources = searchData?.sections?.find((s: any) => s.id === 'social')?.sources || [];
+
+    const newsSrc = searchSources.filter(s =>
+        !['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+    );
+    const socialSrc = [...sectionSources, ...searchSources.filter(s =>
+        ['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+    )];
+
+    const rtDataSearch: RtDataCategory[] = [
+        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done', count: newsSrc.length || 8,
+            ...(newsSrc.length > 0 ? { sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
+        },
+        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done', count: socialSrc.length || 6,
+            ...(socialSrc.length > 0 ? { sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
+        },
+    ];
+
+    // --- Reconstruct rtRounds from discussionRounds or agentResponses ---
+    const discussionRounds: any[] = consensus.discussionRounds || [];
+    const agentResponses: any[] = consensus.agentResponses || [];
+    const roundsUsed = Number(consensus.roundsUsed ?? 1) || 1;
+    const rtRounds: RtRoundData[] = [];
+
+    const toAgent = (agentId: string, resp: any): RtAgentInference => ({
+        agentId,
+        agentName: agentNameMap[agentId] || agentId,
+        status: 'done',
+        verdict: resp.verdict || (resp.answer?.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i)?.[1]?.trim()) || 'Neutral',
+        confidence: Math.round((resp.confidence ?? 0.5) * 100),
+        reasoning: resp.answer || resp.reasoning || '',
+    });
+
+    if (discussionRounds.length > 0) {
+        discussionRounds.forEach((dr: any, rIdx: number) => {
+            const agentMap: Record<string, any> = dr.agent_responses || {};
+            const agents: RtAgentInference[] = [];
+            for (const [aid, resp] of Object.entries(agentMap)) {
+                agents.push(toAgent(aid, resp));
+            }
+            // For round 2+, try to detect changed minds
+            if (rIdx > 0 && rtRounds[0]) {
+                agents.forEach(a => {
+                    const prev = rtRounds[0].agents.find(p => p.agentId === a.agentId);
+                    if (prev && prev.verdict !== a.verdict) {
+                        a.changedMind = true;
+                        a.previousVerdict = prev.verdict;
+                    }
+                    a.crossReferences = agents.filter(o => o.agentId !== a.agentId).map(o => o.agentName);
+                });
+            }
+            rtRounds.push({ round: rIdx + 1, status: 'done', agents });
+        });
+    } else if (agentResponses.length > 0) {
+        // Single round fallback
+        const agents = agentResponses.map((r: any) => toAgent(r.agentId, r));
+        rtRounds.push({ round: 1, status: 'done', agents });
+        if (roundsUsed > 1) {
+            // Duplicate as round 2 with cross-references
+            const r2agents = agents.map(a => ({
+                ...a,
+                crossReferences: agents.filter(o => o.agentId !== a.agentId).map(o => o.agentName),
+            }));
+            rtRounds.push({ round: 2, status: 'done', agents: r2agents });
+        }
+    }
+
+    // --- Reconstruct rtConsensus ---
+    const consensusReached = consensus.consensusReached !== false;
+    const finalText = consensus.finalAnswer || '';
+    const verdictMatch = finalText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
+const finalVerdict = verdictMatch ? verdictMatch[1].trim() : (consensusReached ? 'Bullish' : 'Neutral');
+
+    const allAgents = rtRounds.length > 0 ? rtRounds[rtRounds.length - 1].agents : [];
+    const rtConsensus: RtConsensusResult = {
+        status: 'done',
+        hasConsensus: consensusReached,
+        conflictRate: consensusReached ? 15 : 40,
+        agentConclusions: allAgents.map(a => ({
+            agentName: a.agentName,
+            verdict: a.verdict || 'Neutral',
+            confidence: a.confidence || 50,
+        })),
+        finalVerdict,
+        finalConfidence: Math.round((consensus.confidence ?? 0.5) * 100),
+    };
+
+    return { rtPreparationStatus: 'done', rtDataSearch, rtRounds, rtConsensus, rtReportStatus: 'done' };
 };
 
 /** Build RoundtableData from a real consensus_done result */
@@ -775,163 +933,9 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
 
     return (
         <div className="flex flex-col h-full bg-white">
-            <div className="px-5 py-4 border-b border-gray-100">
-                <h2 className="text-[14px] font-bold text-gray-900">Roundtable Graph</h2>
-                <p className="text-[11px] text-gray-400 mt-0.5">{data.rounds.length} round{data.rounds.length > 1 ? 's' : ''} of discussion</p>
-            </div>
-
-            {/* Knowledge Graph — fills available space */}
-            <div className="flex-1 min-h-0 relative border-b border-gray-100">
+            {/* Knowledge Graph — fills full space */}
+            <div className="flex-1 min-h-0 relative">
                 <KnowledgeGraphView data={buildKnowledgeGraph()} />
-            </div>
-
-            {/* Rounds — pinned to bottom, scrollable when expanded */}
-            <div className="max-h-[40%] overflow-y-auto px-5 py-4 space-y-4">
-                {data.rounds.map((round) => {
-                    const isExpanded = expandedRound === round.round;
-                    const isReached = round.status === 'reached';
-                    const statusLabel = isReached ? '✓ Consensus' : '→ Next Round';
-                    const statusCls = isReached ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500';
-                    return (
-                        <div key={round.round} className="relative">
-                            {round.round < data.rounds.length && (
-                                <div className="absolute left-[15px] top-[36px] bottom-[-16px] w-px bg-gray-200" />
-                            )}
-                            <button
-                                onClick={() => setExpandedRound(isExpanded ? null : round.round)}
-                                className="flex items-center gap-3 w-full text-left group"
-                            >
-                                <div className={`w-[30px] h-[30px] rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold ${isReached ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
-                                    }`}>
-                                    R{round.round}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-[13px] font-semibold text-gray-800">Round {round.round}</span>
-                                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${statusCls}`}>
-                                            {statusLabel}
-                                        </span>
-                                    </div>
-                                    <p className="text-[11px] text-gray-400 mt-0.5 truncate">{round.summary}</p>
-                                </div>
-                                <svg className={`w-4 h-4 text-gray-300 transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                </svg>
-                            </button>
-
-                            {isExpanded && (
-                                <div className="mt-3 ml-[42px] space-y-2.5">
-                                    {(() => {
-                                        // Group agents with identical reasoning to avoid duplicate text
-                                        const groups: { agents: typeof round.agents; reasoning: string }[] = [];
-                                        for (const agent of round.agents) {
-                                            const key = (agent.reasoning || '').trim();
-                                            const existing = groups.find(g => g.reasoning === key);
-                                            if (existing) {
-                                                existing.agents.push(agent);
-                                            } else {
-                                                groups.push({ agents: [agent], reasoning: key });
-                                            }
-                                        }
-                                        return groups.map((group, gi) => {
-                                            const isMerged = group.agents.length > 1;
-                                            const avgConf = Math.round(group.agents.reduce((s, a) => s + a.confidence, 0) / group.agents.length);
-                                            const confColor = avgConf >= 75 ? 'bg-emerald-500' : avgConf >= 50 ? 'bg-blue-500' : 'bg-amber-500';
-                                            return (
-                                                <div key={gi} className="rounded-xl border border-gray-200 bg-white px-3.5 py-3">
-                                                    {/* Header: agent(s) + confidence */}
-                                                    {isMerged ? (
-                                                        <>
-                                                            <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-                                                                {group.agents.map(a => {
-                                                                    const color = AGENT_COLORS[a.initials] || '#6b7280';
-                                                                    return (
-                                                                        <div key={a.initials} className="flex items-center gap-1 bg-gray-50 rounded-full pl-0.5 pr-2 py-0.5">
-                                                                            <AgentAvatarImg nameOrId={a.name} size={20} />
-                                                                            <span className="text-[10px] font-medium text-gray-600">{a.name}</span>
-                                                                            <span className="text-[9px] text-gray-400">{a.confidence}%</span>
-                                                                        </div>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                            <p className="text-[10px] text-gray-400 mb-1.5 italic">Shared consensus view (avg. {avgConf}% confidence)</p>
-                                                        </>
-                                                    ) : (
-                                                        <div className="flex items-center justify-between mb-2">
-                                                            <div className="flex items-center gap-2">
-                                                                <AgentAvatarImg nameOrId={group.agents[0].name} size={24} />
-                                                                <span className="text-[12px] font-semibold text-gray-800">{group.agents[0].name}</span>
-                                                            </div>
-                                                            <span className="text-[11px] font-bold text-gray-500">{group.agents[0].confidence}%</span>
-                                                        </div>
-                                                    )}
-                                                    {/* Confidence bar */}
-                                                    <div className="w-full h-1.5 bg-gray-100 rounded-full mb-2 overflow-hidden">
-                                                        <div className={`h-full rounded-full transition-all duration-500 ${confColor}`} style={{ width: `${isMerged ? avgConf : group.agents[0].confidence}%` }} />
-                                                    </div>
-                                                    {/* Reasoning — formatted */}
-                                                    {group.reasoning && (
-                                                        <div className="text-[11px] text-gray-600 leading-relaxed [&>p]:mb-1.5 [&>ul]:ml-3 [&>ul]:list-disc [&>ul]:mb-1.5 [&>ol]:ml-3 [&>ol]:list-decimal [&>ol]:mb-1.5">
-                                                            {group.reasoning.split(/\n{2,}/).map((para, pi) => {
-                                                                const trimmed = para.trim();
-                                                                if (!trimmed) return null;
-                                                                if (/^[-•*]\s/.test(trimmed)) {
-                                                                    const items = trimmed.split(/\n/).filter(Boolean);
-                                                                    return (<ul key={pi}>{items.map((item, ii) => (<li key={ii}>{item.replace(/^[-•*]\s*/, '')}</li>))}</ul>);
-                                                                }
-                                                                if (/^\d+[.)]\s/.test(trimmed)) {
-                                                                    const items = trimmed.split(/\n/).filter(Boolean);
-                                                                    return (<ol key={pi}>{items.map((item, ii) => (<li key={ii}>{item.replace(/^\d+[.)]\s*/, '')}</li>))}</ol>);
-                                                                }
-                                                                return (
-                                                                    <p key={pi}>
-                                                                        {trimmed.split('\n').map((line, li, arr) => {
-                                                                            const parts = line.split(/(\*\*[^*]+\*\*)/g);
-                                                                            return (
-                                                                                <span key={li}>
-                                                                                    {parts.map((part, pk) =>
-                                                                                        /^\*\*(.+)\*\*$/.test(part)
-                                                                                            ? <strong key={pk} className="font-semibold text-gray-700">{part.slice(2, -2)}</strong>
-                                                                                            : <span key={pk}>{part}</span>
-                                                                                    )}
-                                                                                    {li < arr.length - 1 && <br />}
-                                                                                </span>
-                                                                            );
-                                                                        })}
-                                                                    </p>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        });
-                                    })()}
-                                    <div className="flex items-start gap-2 py-2 px-1">
-                                        <svg className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                        </svg>
-                                        <p className="text-[11px] text-gray-500 leading-relaxed">{round.summary}</p>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
-
-                {/* Final Verdict */}
-                <div className="mt-2 pt-4 border-t border-gray-100">
-                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl px-4 py-4 border border-blue-100">
-                        <div className="flex items-center gap-2 mb-2">
-                            <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            <span className="text-[13px] font-bold text-gray-900">Final Verdict</span>
-                            <span className="text-[12px] text-gray-500 ml-auto">Confidence: <span className="font-semibold text-gray-700">{data.finalVerdict.confidence}%</span></span>
-                        </div>
-                        <p className="text-[12px] text-gray-600 leading-relaxed">{data.finalVerdict.summary}</p>
-                    </div>
-                </div>
             </div>
         </div>
     );
@@ -1416,8 +1420,8 @@ const ThinkingProcessSidePanel: React.FC<{
                             {p.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing...</span>}
                         </div>
                         {p.status === 'done' && p.verdict && (
-                            <span className={`text-[11px] ${p.verdict === 'Buy' ? 'text-emerald-600' : p.verdict === 'Sell' ? 'text-red-500' : 'text-yellow-600'}`}>
-                                {p.verdict} · {confidenceToPercent(p.confidence)}% confidence
+                            <span className={`text-[11px] ${(p.verdict === 'Buy' || p.verdict === 'Bullish') ? 'text-emerald-600' : (p.verdict === 'Sell' || p.verdict === 'Bearish') ? 'text-red-500' : 'text-yellow-600'}`}>
+                                {p.verdict}
                             </span>
                         )}
                     </div>
@@ -1448,8 +1452,8 @@ const ThinkingProcessSidePanel: React.FC<{
                     {d.prediction && (
                         <div className="mt-2 bg-gray-50 rounded-xl px-4 py-3 flex items-center justify-between">
                             <span className="text-[11px] text-gray-500 font-medium">Prediction</span>
-                            <span className={`text-[12px] font-bold ${d.prediction.verdict === 'Buy' ? 'text-emerald-600' : 'text-yellow-600'}`}>
-                                {d.prediction.verdict} · {confidenceToPercent(d.prediction.confidence)}%
+                            <span className={`text-[12px] font-bold ${(d.prediction.verdict === 'Buy' || d.prediction.verdict === 'Bullish') ? 'text-emerald-600' : 'text-yellow-600'}`}>
+                                {d.prediction.verdict}
                             </span>
                         </div>
                     )}
@@ -1485,10 +1489,7 @@ const ThinkingProcessSidePanel: React.FC<{
                                 <span className="text-[11px] text-gray-500 font-medium">Verdict</span>
                                 <span className="text-[12px] font-bold text-emerald-600">{d.conclusion.verdict}</span>
                             </div>
-                            <div className="flex items-center justify-between">
-                                <span className="text-[11px] text-gray-500 font-medium">Confidence</span>
-                                <span className="text-[12px] font-semibold text-gray-700">{confidenceToPercent(d.conclusion.confidence)}%</span>
-                            </div>
+
                         </div>
                     )}
                 </div>
@@ -1510,6 +1511,712 @@ const ThinkingProcessSidePanel: React.FC<{
                     <span className="text-[14px] font-bold text-gray-900">Done</span>
                     {displayDur && <span className="text-[11px] text-gray-400 ml-auto">{displayDur}</span>}
                 </div>
+            </div>
+        );
+    };
+
+    // ══════════════════════════════════════════════════════════════
+    // ── Roundtable 4-Phase Process View ──────────────────────────
+    // ══════════════════════════════════════════════════════════════
+
+    // Phase 1: Data Search
+    const RtCategoryIcon: React.FC<{ id: string; className?: string }> = ({ id, className = 'w-4 h-4' }) => {
+        switch (id) {
+            case 'indicators':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>;
+            case 'news':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" /></svg>;
+            case 'social':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>;
+            default:
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m5.231 13.481L15 17.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v16.5c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9zm3.75 11.625a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>;
+        }
+    };
+
+    const [collapsedSections, setCollapsedSections] = React.useState<Record<string, boolean>>({});
+    const toggleSection = (key: string) => setCollapsedSections(prev => ({ ...prev, [key]: !prev[key] }));
+    const [expandedAgentDetail, setExpandedAgentDetail] = React.useState<string | null>(null);
+
+    // ── Step number badge ──
+    const StepBadge: React.FC<{ step: number; done: boolean }> = ({ step, done }) => (
+        <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold border-2 transition-colors duration-300 shrink-0 ${
+            done ? 'border-emerald-500 text-emerald-600 bg-emerald-50' : 'border-gray-200 text-gray-400 bg-white'
+        }`}>{step}</span>
+    );
+
+    // ── Agent detail profiles for preparation phase ──
+    const AGENT_PROFILES: Record<string, { bio: string; bioCN: string; tags: string[]; skills: string[]; framework: string; frameworkCN: string }> = {
+        fundamental_specialist: {
+            bio: 'Deep-dives into financial statements, earnings quality, and intrinsic value.',
+            bioCN: '深入分析财务报表、盈利质量与内在价值。',
+            tags: ['Financials', 'Earnings', 'Valuation'],
+            skills: ['DCF Modeling', 'Ratio Analysis', 'Earnings Quality'],
+            framework: 'Bottom-up fundamental analysis with emphasis on margin of safety.',
+            frameworkCN: '自下而上的基本面分析，强调安全边际。',
+        },
+        valuation_specialist: {
+            bio: 'Builds multi-scenario valuation models to determine fair value ranges.',
+            bioCN: '构建多情景估值模型，确定公允价值区间。',
+            tags: ['DCF', 'Comparable', 'Models'],
+            skills: ['DCF', 'Relative Valuation', 'Sum-of-Parts'],
+            framework: 'Multi-model convergence with scenario-weighted fair value.',
+            frameworkCN: '多模型收敛，情景加权公允价值。',
+        },
+        macro_specialist: {
+            bio: 'Tracks macro trends, interest rates, and policy shifts that move markets.',
+            bioCN: '追踪宏观趋势、利率变化和影响市场的政策转变。',
+            tags: ['Macro', 'Rates', 'Policy'],
+            skills: ['Macro Forecasting', 'Cross-Asset', 'Policy Analysis'],
+            framework: 'Top-down macro overlay with cross-asset correlation analysis.',
+            frameworkCN: '自上而下宏观叠加与跨资产相关性分析。',
+        },
+        risk_specialist: {
+            bio: 'Identifies tail risks, stress-tests portfolios, and models downside scenarios.',
+            bioCN: '识别尾部风险，压力测试组合，建模下行情景。',
+            tags: ['Risk', 'Hedging', 'Stress Test'],
+            skills: ['VaR', 'Stress Testing', 'Scenario Analysis'],
+            framework: 'Risk-first approach with pre-mortem analysis and Monte Carlo simulations.',
+            frameworkCN: '风险优先方法，结合事前分析和蒙特卡洛模拟。',
+        },
+        allocation_specialist: {
+            bio: 'Optimizes asset allocation across ETFs, sectors, and geographies.',
+            bioCN: '优化ETF、行业和地区间的资产配置。',
+            tags: ['ETF', 'Allocation', 'Diversification'],
+            skills: ['MPT', 'Factor Exposure', 'Rebalancing'],
+            framework: 'Modern portfolio theory with factor-based tilts.',
+            frameworkCN: '现代投资组合理论与因子倾斜。',
+        },
+        fund_specialist: {
+            bio: 'Evaluates fund performance, manager quality, and fee structures.',
+            bioCN: '评估基金表现、管理人质量和费用结构。',
+            tags: ['Funds', 'Alpha', 'Selection'],
+            skills: ['Fund Screening', 'Alpha Analysis', 'Fee Optimization'],
+            framework: 'Quantitative fund selection with qualitative manager assessment.',
+            frameworkCN: '定量基金筛选与定性管理人评估。',
+        },
+        options_specialist: {
+            bio: 'Designs options strategies and analyzes Greeks for risk/reward optimization.',
+            bioCN: '设计期权策略并分析Greeks以优化风险/回报。',
+            tags: ['Options', 'Greeks', 'Volatility'],
+            skills: ['Options Pricing', 'Greeks Analysis', 'Vol Surface'],
+            framework: 'Volatility-driven strategy selection with Greeks-based risk management.',
+            frameworkCN: '波动率驱动策略选择与基于Greeks的风险管理。',
+        },
+        crypto_specialist: {
+            bio: 'Analyzes crypto assets, on-chain data, and DeFi protocol metrics.',
+            bioCN: '分析加密资产、链上数据和DeFi协议指标。',
+            tags: ['Crypto', 'On-Chain', 'DeFi'],
+            skills: ['On-Chain Analysis', 'Token Economics', 'Protocol Metrics'],
+            framework: 'On-chain data analysis combined with token economic modeling.',
+            frameworkCN: '链上数据分析与代币经济模型结合。',
+        },
+        macro_enhanced: {
+            bio: 'Advanced macro analysis with emphasis on regime changes and cross-asset flows.',
+            bioCN: '高级宏观分析，侧重于体制变化和跨资产流动。',
+            tags: ['Deep Macro', 'Regimes', 'Flows'],
+            skills: ['Regime Detection', 'Flow Analysis', 'Cycle Mapping'],
+            framework: 'Multi-layer macro regime identification with flow-of-funds tracking.',
+            frameworkCN: '多层宏观体制识别与资金流向追踪。',
+        },
+        risk_enhanced: {
+            bio: 'Fractal risk modeling with advanced tail-risk and correlation-breakdown detection.',
+            bioCN: '分形风险建模，高级尾部风险与相关性崩溃检测。',
+            tags: ['Fractal', 'Tail Risk', 'Correlation'],
+            skills: ['Fractal Analysis', 'Extreme Value Theory', 'Contagion Modeling'],
+            framework: 'Non-linear risk modeling using fractal geometry and extreme value theory.',
+            frameworkCN: '使用分形几何和极值理论的非线性风险建模。',
+        },
+        event_driven: {
+            bio: 'Identifies catalysts, earnings surprises, and event-driven trading opportunities.',
+            bioCN: '识别催化剂、盈利意外和事件驱动交易机会。',
+            tags: ['Events', 'Catalysts', 'M&A'],
+            skills: ['Event Detection', 'Catalyst Mapping', 'Timeline Analysis'],
+            framework: 'Event timeline analysis with probability-weighted outcome modeling.',
+            frameworkCN: '事件时间线分析与概率加权结果建模。',
+        },
+        sentiment_focus: {
+            bio: 'Gauges market sentiment from social media, news flow, and positioning data.',
+            bioCN: '从社交媒体、新闻流和持仓数据中衡量市场情绪。',
+            tags: ['Sentiment', 'Social', 'NLP'],
+            skills: ['NLP Sentiment', 'Social Listening', 'Positioning Analysis'],
+            framework: 'Multi-source sentiment aggregation with contrarian signal detection.',
+            frameworkCN: '多源情绪聚合与逆向信号检测。',
+        },
+        portfolio_view: {
+            bio: 'Evaluates how positions fit within an overall portfolio context.',
+            bioCN: '评估头寸在整体投资组合背景下的适配性。',
+            tags: ['Portfolio', 'Fit', 'Impact'],
+            skills: ['Portfolio Attribution', 'Risk Budgeting', 'Correlation Analysis'],
+            framework: 'Portfolio-level impact assessment with marginal risk contribution analysis.',
+            frameworkCN: '组合层面影响评估与边际风险贡献分析。',
+        },
+        buffett_style: {
+            bio: 'Value-oriented investor focused on competitive moats and long-term compounding.',
+            bioCN: '价值导向投资者，专注于竞争护城河和长期复利。',
+            tags: ['Value', 'Moats', 'Compounding'],
+            skills: ['Moat Analysis', 'Management Assessment', 'Margin of Safety'],
+            framework: 'Seek wonderful companies at fair prices with durable competitive advantages.',
+            frameworkCN: '寻找具有持久竞争优势的优秀公司，以合理价格买入。',
+        },
+        munger_style: {
+            bio: 'Multi-disciplinary thinker using mental models and inversion to avoid mistakes.',
+            bioCN: '多学科思考者，运用心智模型和逆向思维来避免错误。',
+            tags: ['Mental Models', 'Inversion', 'Quality'],
+            skills: ['Latticework of Models', 'Inversion', 'Circle of Competence'],
+            framework: 'Invert, always invert. Multi-model thinking to reduce blind spots.',
+            frameworkCN: '反过来想，总是反过来想。多模型思维以减少盲点。',
+        },
+        dalio_style: {
+            bio: 'Macro investor focused on economic cycles, debt dynamics, and all-weather strategies.',
+            bioCN: '宏观投资者，专注于经济周期、债务动态和全天候策略。',
+            tags: ['Cycles', 'All-Weather', 'Principles'],
+            skills: ['Debt Cycle Analysis', 'Risk Parity', 'Regime Mapping'],
+            framework: 'Systematic macro framework based on the big debt cycle and risk parity.',
+            frameworkCN: '基于大债务周期和风险平价的系统化宏观框架。',
+        },
+        soros_style: {
+            bio: 'Reflexivity-based trader exploiting market misconceptions and feedback loops.',
+            bioCN: '基于反身性的交易者，利用市场误解和反馈循环。',
+            tags: ['Reflexivity', 'Macro Bets', 'Feedback Loops'],
+            skills: ['Reflexivity Theory', 'Macro Trading', 'Position Sizing'],
+            framework: 'Find markets where perception diverges from reality, bet on the correction.',
+            frameworkCN: '寻找认知与现实偏离的市场，押注修正。',
+        },
+        lynch_style: {
+            bio: 'Growth-at-a-reasonable-price investor who finds gems in everyday observations.',
+            bioCN: '以合理价格寻找成长的投资者，从日常观察中发现宝石。',
+            tags: ['GARP', 'PEG', 'Consumer Insight'],
+            skills: ['PEG Analysis', 'Category Research', 'Scuttlebutt'],
+            framework: 'Invest in what you know — find fast growers at reasonable valuations.',
+            frameworkCN: '投资你了解的领域——以合理估值找到快速成长者。',
+        },
+    };
+
+    // ── Agent Detail Modal ──
+    const AgentDetailModal: React.FC<{ agentId: string; onClose: () => void }> = ({ agentId, onClose }) => {
+        const agent = SUMMON_POOL.find(a => a.id === agentId);
+        const profile = AGENT_PROFILES[agentId];
+        if (!agent) return null;
+        return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+                <div className="bg-white rounded-2xl shadow-2xl w-[340px] max-h-[80vh] overflow-y-auto mx-4" onClick={e => e.stopPropagation()}>
+                    {/* Header */}
+                    <div className="relative px-5 pt-5 pb-4 border-b border-gray-100">
+                        <button onClick={onClose} className="absolute top-3 right-3 p-1 rounded-full hover:bg-gray-100 transition-colors">
+                            <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                        <div className="flex items-center gap-3">
+                            <AgentAvatarImg nameOrId={agent.id} size={48} />
+                            <div className="flex-1 min-w-0">
+                                <h3 className="text-[15px] font-bold text-gray-900 truncate">{agent.name}</h3>
+                                <p className="text-[11px] text-gray-400 mt-0.5">{agent.role}</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2 mt-3">
+                            <span className={`text-[9px] px-2 py-0.5 rounded-full font-medium ${
+                                agent.group === 'system' ? 'bg-blue-50 text-blue-500 border border-blue-100' :
+                                agent.group === 'master' ? 'bg-purple-50 text-purple-500 border border-purple-100' :
+                                'bg-gray-50 text-gray-400 border border-gray-100'
+                            }`}>{agent.group === 'system' ? 'Core' : agent.group === 'master' ? 'Master' : 'Enhanced'}</span>
+                            {profile && profile.tags.map((tag, i) => (
+                                <span key={i} className="px-1.5 py-0.5 bg-gray-50 border border-gray-100 rounded text-[9px] text-gray-500 font-medium">{tag}</span>
+                            ))}
+                        </div>
+                    </div>
+                    {/* Body */}
+                    {profile && (
+                        <div className="px-5 py-4 space-y-4">
+                            <div>
+                                <h4 className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">About</h4>
+                                <p className="text-[12px] text-gray-600 leading-relaxed">{profile.bio}</p>
+                            </div>
+                            <div>
+                                <h4 className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">Skills</h4>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {profile.skills.map((s, i) => (
+                                        <span key={i} className="px-2 py-1 bg-blue-50 border border-blue-100 rounded-lg text-[10px] text-blue-600 font-medium">{s}</span>
+                                    ))}
+                                </div>
+                            </div>
+                            <div>
+                                <h4 className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">Thinking Framework</h4>
+                                <p className="text-[12px] text-gray-600 leading-relaxed">{profile.framework}</p>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    // ── Preparation Phase: Show selected agents ──
+    const RtPhasePreparation: React.FC = () => {
+        const prepStatus = thinking.rtPreparationStatus || 'loading';
+        const agentIds = thinking.selectedAgentIds || [];
+        const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
+        const selectedAgents = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
+        const allAgents = [...systemAgents, ...selectedAgents];
+        const collapsed = !!collapsedSections['preparation'];
+
+        return (
+            <div>
+                <button onClick={() => toggleSection('preparation')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
+                    <StepBadge step={1} done={prepStatus === 'done'} />
+                    <div className="flex-1 min-w-0">
+                        <span className="text-[14px] font-bold text-gray-900">Team Assembly</span>
+                        <p className="text-[10px] text-gray-400 mt-0.5">{allAgents.length} agents assembled</p>
+                    </div>
+                    {prepStatus === 'loading' && <span className="text-[10px] text-blue-500 animate-pulse shrink-0">loading…</span>}
+                    {/* Avatar stack */}
+                    {prepStatus === 'done' && (
+                        <div className="flex items-center shrink-0">
+                            {allAgents.slice(0, 8).map((agent, i) => (
+                                <div key={agent.id} className="rounded-full border-2 border-white" style={{ marginLeft: i === 0 ? 0 : -6, zIndex: allAgents.length - i }}>
+                                    <AgentAvatarImg nameOrId={agent.id} size={22} />
+                                </div>
+                            ))}
+                            {allAgents.length > 8 && <span className="text-[9px] text-gray-400 ml-1">+{allAgents.length - 8}</span>}
+                        </div>
+                    )}
+                    <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </button>
+                {!collapsed && (
+                    <div className="ml-7 grid grid-cols-2 gap-2.5 mb-3">
+                        {allAgents.map((agent) => {
+                            const profile = AGENT_PROFILES[agent.id];
+                            const groupColor = agent.group === 'master' ? '#B45309' : agent.group === 'enhanced' ? '#0F766E' : '#4338CA';
+                            return (
+                                <div key={agent.id}
+                                    className={`rounded-xl bg-white border shadow-sm p-3 transition-all duration-200 cursor-pointer hover:shadow-lg hover:-translate-y-0.5 group/card ${
+                                        agent.group === 'master'
+                                            ? 'master-card-shine border-amber-200/80'
+                                            : 'border-gray-200/80'
+                                    }`}
+                                    style={agent.group === 'master' ? {
+                                        background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 40%, #fff7ed 100%)',
+                                    } : undefined}
+                                    onClick={() => setExpandedAgentDetail(agent.id)}
+                                >
+                                    {/* Avatar with per-agent colored ring */}
+                                    <div className="flex items-center gap-2.5 mb-2">
+                                        <div className="rounded-full p-[2px] shrink-0" style={{ background: `linear-gradient(135deg, ${agent.color}, ${agent.color}88)` }}>
+                                            <div className="rounded-full border-2 border-white">
+                                                <AgentAvatarImg nameOrId={agent.id} size={34} />
+                                            </div>
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <span className="text-[12px] font-bold text-gray-900 block truncate group-hover/card:text-gray-700 transition-colors">{agent.name}</span>
+                                            <span className="text-[9px] font-medium text-gray-400 block truncate">{agent.role}</span>
+                                        </div>
+                                    </div>
+                                    {/* Bio */}
+                                    {profile && (
+                                        <p className="text-[9.5px] text-gray-500 leading-[1.45] line-clamp-2 mb-2">{profile.bio}</p>
+                                    )}
+                                    {!profile && (
+                                        <p className="text-[9.5px] text-gray-400 truncate mb-2">{agent.role}</p>
+                                    )}
+                                    {/* Tags */}
+                                    {profile && (
+                                        <div className="flex flex-wrap gap-1">
+                                            {profile.tags.map((tag, i) => (
+                                                <span key={i} className="px-1.5 py-[3px] rounded-md text-[8px] font-semibold" style={{
+                                                    backgroundColor: `${groupColor}10`,
+                                                    color: groupColor,
+                                                    border: `1px solid ${groupColor}20`,
+                                                }}>{tag}</span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+                {/* Agent detail modal */}
+                {expandedAgentDetail && <AgentDetailModal agentId={expandedAgentDetail} onClose={() => setExpandedAgentDetail(null)} />}
+            </div>
+        );
+    };
+
+    const RtPhaseDataSearch: React.FC = () => {
+        // Merge sources from search module if available
+        const searchMod = thinking.modules.find(m => m.type === 'search');
+        const searchData = searchMod?.data as SearchModuleData | undefined;
+        const searchSources = searchData?.sources || [];
+        const sectionSources = searchData?.sections?.find(s => s.id === 'social')?.sources || [];
+
+        const categories: RtDataCategory[] = thinking.rtDataSearch || [
+            { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'pending' },
+            { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'pending' },
+            { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'pending' },
+        ];
+
+        // Auto-inject search sources into news/social if they have no sources yet
+        const enriched = categories.map(cat => {
+            if (cat.sources && cat.sources.length > 0) return cat;
+            if (cat.id === 'news') {
+                const newsSrc = searchSources.filter(s =>
+                    !['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+                );
+                if (newsSrc.length > 0) return { ...cat, sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })), count: cat.count ?? newsSrc.length };
+            }
+            if (cat.id === 'social') {
+                const socialSrc = [...sectionSources, ...searchSources.filter(s =>
+                    ['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+                )];
+                if (socialSrc.length > 0) return { ...cat, sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })), count: cat.count ?? socialSrc.length };
+            }
+            return cat;
+        });
+
+        const anyActive = enriched.some(c => c.status === 'active');
+        const allDone = enriched.every(c => c.status === 'done');
+        const phaseStatus = allDone ? 'done' : anyActive ? 'active' : 'pending';
+        const collapsed = !!collapsedSections['dataCollection'];
+
+        return (
+            <div>
+                <button onClick={() => toggleSection('dataCollection')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
+                    <StepBadge step={2} done={phaseStatus === 'done'} />
+                    <span className="text-[14px] font-bold text-gray-900 flex-1">Data Collection</span>
+                    <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </button>
+                {!collapsed && (
+                    <div className="ml-7 space-y-2.5 mb-3">
+                        {enriched.map((cat) => (
+                            <div key={cat.id} className={`rounded-xl border px-3 py-2.5 transition-all duration-300 ${
+                                cat.status === 'done' ? 'border-gray-100 bg-gray-50/50' :
+                                cat.status === 'active' ? 'border-blue-100 bg-blue-50/30' :
+                                'border-gray-100 bg-white'
+                            }`}>
+                                <div className="flex items-center gap-2.5">
+                                    <span className={`shrink-0 ${
+                                        cat.status === 'done' ? 'text-gray-500' :
+                                        cat.status === 'active' ? 'text-blue-500' : 'text-gray-300'
+                                    }`}><RtCategoryIcon id={cat.id} /></span>
+                                    <span className={`text-[12px] font-medium flex-1 ${
+                                        cat.status === 'done' ? 'text-gray-700' :
+                                        cat.status === 'active' ? 'text-blue-600' : 'text-gray-400'
+                                    }`}>{cat.label}</span>
+                                    {cat.count != null && cat.status === 'done' && (
+                                        <span className="text-[10px] text-emerald-600 font-medium">{cat.count} items</span>
+                                    )}
+                                    {cat.status === 'active' && (
+                                        <span className="w-3 h-3 rounded-full border-2 border-blue-400 border-t-transparent animate-spin shrink-0" />
+                                    )}
+                                </div>
+                                {cat.items && cat.items.length > 0 && cat.status === 'done' && (
+                                    <div className="mt-2 flex flex-wrap gap-1.5 ml-6">
+                                        {cat.items.map((item, j) => (
+                                            <span key={j} className="px-2 py-0.5 bg-white border border-gray-100 rounded-md text-[10px] text-gray-500 font-medium">{item}</span>
+                                        ))}
+                                    </div>
+                                )}
+                                {cat.sources && cat.sources.length > 0 && cat.status === 'done' && (
+                                    <div className="mt-2 ml-6 space-y-0.5">
+                                        {cat.sources.map((src, j) => {
+                                            const platformKey = src.favicon && !src.favicon.startsWith('http')
+                                                ? src.favicon
+                                                : src.domain?.replace(/\.com$|\.org$|\.io$/, '') || '';
+                                            return (
+                                                <a key={j} href={src.url} target="_blank" rel="noopener noreferrer"
+                                                    className="flex items-center gap-2 py-1 hover:opacity-80 transition-opacity group/src">
+                                                    <div className="shrink-0 w-4 h-4 flex items-center justify-center">
+                                                        <PlatformLogo platform={platformKey} />
+                                                    </div>
+                                                    <span className="text-[10px] text-gray-500 group-hover/src:text-gray-700 truncate flex-1">{src.title}</span>
+                                                    <span className="text-[9px] text-gray-300 shrink-0">{src.domain}</span>
+                                                </a>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // Phase 2: Round 1 — Initial Inference
+    const [expandedAgents, setExpandedAgents] = React.useState<Record<string, boolean>>({});
+    const toggleAgent = (key: string) => setExpandedAgents(prev => ({ ...prev, [key]: !prev[key] }));
+
+    const RtPhaseRound1: React.FC = () => {
+        const round = thinking.rtRounds?.[0];
+        if (!round) return null;
+        const allDone = round.agents.every(a => a.status === 'done');
+        const anyActive = round.agents.some(a => a.status === 'active');
+        const collapsed = !!collapsedSections['round1'];
+
+        const getVerdictColor = (v?: string) => v === 'Bullish' ? 'text-emerald-600' : v === 'Bearish' ? 'text-red-500' : 'text-amber-600';
+        const getAgentColor = (id: string) => SUMMON_POOL.find(a => a.id === id)?.color || '#6B7280';
+
+        return (
+            <div>
+                <button onClick={() => toggleSection('round1')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
+                    <StepBadge step={1} done={allDone} />
+                    <div className="flex-1 min-w-0">
+                        <span className="text-[14px] font-bold text-gray-900">Round 1 · Thesis Formation</span>
+                        <p className="text-[10px] text-gray-400 mt-0.5">Generating analytical conclusions</p>
+                    </div>
+                    <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </button>
+                {!collapsed && (
+                    <div className="ml-7 space-y-2 mb-3">
+                        {round.agents.map((agent) => {
+                            const verdictColor = getVerdictColor(agent.verdict);
+                            const agentColor = getAgentColor(agent.agentId);
+                            const agentKey = `r1-${agent.agentId}`;
+                            const isExpanded = !!expandedAgents[agentKey];
+                            const hasLongReasoning = agent.reasoning && agent.reasoning.length > 120;
+                            return (
+                                <div key={agent.agentId} className={`rounded-xl border px-3 py-2.5 transition-all duration-300 ${
+                                    agent.status === 'done' ? 'border-gray-100 bg-gray-50/40' :
+                                    agent.status === 'active' ? 'border-blue-100 bg-blue-50/30 shadow-sm' :
+                                    'border-gray-100 bg-white'
+                                }`}>
+                                    <div className="flex items-center gap-2.5">
+                                        <div className="rounded-full p-[2px] shrink-0" style={{ background: `linear-gradient(135deg, ${agentColor}, ${agentColor}88)` }}>
+                                            <div className="rounded-full border-2 border-white">
+                                                <AgentAvatarImg nameOrId={agent.agentId} size={28} />
+                                            </div>
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <span className="text-[12px] font-semibold text-gray-800 block truncate">{agent.agentName}</span>
+                                            {agent.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing…</span>}
+                                            {agent.status === 'done' && agent.verdict && (
+                                                <div className="mt-0.5">
+                                                    <span className={`text-[11px] font-bold ${verdictColor}`}>{agent.verdict}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    {agent.status === 'done' && agent.reasoning && (
+                                        <div className="mt-1.5 ml-[40px]">
+                                            <p className={`text-[10px] text-gray-500 leading-relaxed ${!isExpanded && hasLongReasoning ? 'line-clamp-4' : ''}`}>{agent.reasoning}</p>
+                                            {hasLongReasoning && (
+                                                <button onClick={() => toggleAgent(agentKey)} className="text-[10px] text-blue-500 hover:text-blue-600 mt-1 font-medium">
+                                                    {isExpanded ? 'Show less' : 'Show more'}
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // Phase 3: Round 2 — Cross-validation (chat-style conversation)
+    const RtPhaseRound2: React.FC = () => {
+        const round = thinking.rtRounds?.[1];
+        if (!round) return null;
+        const allDone = round.agents.every(a => a.status === 'done');
+        const anyActive = round.agents.some(a => a.status === 'active');
+        const mindChanges = round.agents.filter(a => a.changedMind).length;
+        const collapsed = !!collapsedSections['round2'];
+
+        const getVerdictColor = (v?: string) => v === 'Bullish' ? 'text-emerald-600' : v === 'Bearish' ? 'text-red-500' : 'text-amber-600';
+        const getVerdictBg = (v?: string) => v === 'Bullish' ? 'bg-emerald-50 border-emerald-200' : v === 'Bearish' ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200';
+        const getAgentColor = (id: string) => SUMMON_POOL.find(a => a.id === id)?.color || '#6B7280';
+
+        return (
+            <div>
+                <button onClick={() => toggleSection('round2')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
+                    <StepBadge step={2} done={allDone} />
+                    <div className="flex-1 min-w-0">
+                        <span className="text-[14px] font-bold text-gray-900">Round 2 · Cross Validation</span>
+                        <p className="text-[10px] text-gray-400 mt-0.5">Agents debate, challenge, and re-evaluate</p>
+                    </div>
+                    <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </button>
+                {!collapsed && (
+                    <div className="ml-7 space-y-3 mb-3">
+                        {round.agents.map((agent, idx) => {
+                            const verdictColor = getVerdictColor(agent.verdict);
+                            const agentColor = getAgentColor(agent.agentId);
+                            const agentKey = `r2-${agent.agentId}`;
+                            const isExpanded = !!expandedAgents[agentKey];
+                            const hasLongReasoning = agent.reasoning && agent.reasoning.length > 120;
+                            // Bearish on the right, Bullish & Neutral on the left
+                            const isLeft = agent.verdict !== 'Bearish';
+                            return (
+                                <div key={agent.agentId} className={`flex gap-2 ${isLeft ? '' : 'flex-row-reverse'}`}>
+                                    {/* Avatar */}
+                                    <div className="shrink-0 mt-0.5">
+                                        <div className="rounded-full p-[2px]" style={{ background: `linear-gradient(135deg, ${agentColor}, ${agentColor}88)` }}>
+                                            <div className="rounded-full border-2 border-white">
+                                                <AgentAvatarImg nameOrId={agent.agentId} size={26} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {/* Chat bubble */}
+                                    <div className={`flex-1 min-w-0 max-w-[85%]`}>
+                                        <div className={`flex items-center gap-1.5 mb-0.5 ${isLeft ? '' : 'justify-end'}`}>
+                                            <span className="text-[11px] font-semibold text-gray-700">{agent.agentName}</span>
+                                            {agent.crossReferences && agent.crossReferences.length > 0 && (
+                                                <span className="text-[9px] text-gray-400">
+                                                    → {agent.crossReferences.join(', ')}
+                                                </span>
+                                            )}
+                                            {agent.status === 'done' && agent.verdict && (
+                                                <span className={`text-[9px] font-bold px-1.5 py-[1px] rounded-full ${
+                                                    agent.verdict === 'Bullish' ? 'bg-emerald-50 text-emerald-600 border border-emerald-200' :
+                                                    agent.verdict === 'Bearish' ? 'bg-red-50 text-red-500 border border-red-200' :
+                                                    'bg-amber-50 text-amber-600 border border-amber-200'
+                                                }`}>
+                                                    {agent.verdict}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className={`rounded-2xl px-3 py-2 border transition-all duration-300 ${
+                                            agent.status === 'active' ? 'border-blue-200 bg-blue-50/40' :
+                                            isLeft ? 'border-gray-100 bg-gray-50/60' : 'border-gray-100 bg-white'
+                                        }`} style={{ borderRadius: isLeft ? '4px 16px 16px 16px' : '16px 4px 16px 16px' }}>
+                                            {agent.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">re-evaluating…</span>}
+                                            {agent.status === 'done' && agent.reasoning && (
+                                                <div>
+                                                    <p className={`text-[10px] text-gray-500 leading-relaxed ${!isExpanded && hasLongReasoning ? 'line-clamp-4' : ''}`}>{agent.reasoning}</p>
+                                                    {hasLongReasoning && (
+                                                        <button onClick={() => toggleAgent(agentKey)} className="text-[10px] text-blue-500 hover:text-blue-600 mt-1 font-medium">
+                                                            {isExpanded ? 'Show less' : 'Show more'}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {allDone && mindChanges > 0 && (
+                            <div className="mt-1 px-3 py-2 bg-amber-50/60 rounded-xl border border-amber-100/60 text-center">
+                                <span className="text-[10px] text-amber-700 font-medium">
+                                    ↻ {mindChanges} agent{mindChanges > 1 ? 's' : ''} changed conclusion after cross-validation
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // Phase 4: Consensus & Report
+    const RtPhaseConsensus: React.FC = () => {
+        const consensus = thinking.rtConsensus;
+        if (!consensus) return null;
+
+        const conflictPct = consensus.conflictRate ?? 0;
+        const hasConsensus = consensus.hasConsensus;
+        const reportStatus = thinking.rtReportStatus || 'pending';
+        const collapsed = !!collapsedSections['consensus'];
+
+        return (
+            <div>
+                <button onClick={() => toggleSection('consensus')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
+                    <StepBadge step={3} done={consensus.status === 'done'} />
+                    <span className="text-[14px] font-bold text-gray-900 flex-1">Consensus & Report</span>
+                    <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </button>
+                {!collapsed && (
+                    <div className="ml-7 space-y-3 mb-3">
+                        {/* Agent conclusions summary */}
+                        {consensus.agentConclusions.length > 0 && (
+                            <div className="space-y-1.5">
+                                {consensus.agentConclusions.map((ac, i) => {
+                                    const color = ac.verdict === 'Bullish' ? 'text-emerald-600' : ac.verdict === 'Bearish' ? 'text-red-500' : 'text-amber-600';
+                                    return (
+                                        <div key={i} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/50">
+                                            <span className="text-[11px] text-gray-600 font-medium flex-1 truncate">{ac.agentName}</span>
+                                            <span className={`text-[11px] font-bold ${color}`}>{ac.verdict}</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        {/* Conflict rate */}
+                        {consensus.status === 'done' && (
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-[11px] text-gray-500 font-medium">Agreement</span>
+                                    <span className={`text-[11px] font-bold ${conflictPct > 50 ? 'text-red-500' : conflictPct > 25 ? 'text-amber-500' : 'text-emerald-600'}`}>
+                                        {100 - conflictPct}%
+                                    </span>
+                                </div>
+                                <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                                    <div className={`h-full rounded-full transition-all duration-700 ${
+                                        conflictPct > 50 ? 'bg-red-400' : conflictPct > 25 ? 'bg-amber-400' : 'bg-emerald-400'
+                                    }`} style={{ width: `${100 - conflictPct}%` }} />
+                                </div>
+
+                            </div>
+                        )}
+
+                        {/* Final verdict */}
+                        {consensus.finalVerdict && (
+                            <div className="bg-gradient-to-r from-gray-50 to-blue-50/30 rounded-xl px-4 py-3 border border-gray-100">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-[12px] font-bold text-gray-900">Final Verdict</span>
+                                    <span className={`text-[13px] font-bold ${
+                                        consensus.finalVerdict === 'Bullish' ? 'text-emerald-600' :
+                                        consensus.finalVerdict === 'Bearish' ? 'text-red-500' : 'text-amber-600'
+                                    }`}>{consensus.finalVerdict}</span>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Report generation status */}
+                        <div className="flex items-center gap-2 pt-1">
+                            <StatusIcon status={reportStatus === 'done' ? 'completed' : reportStatus === 'active' ? 'active' : 'pending'} size="sm" />
+                            <span className={`text-[12px] font-medium ${
+                                reportStatus === 'done' ? 'text-gray-600' :
+                                reportStatus === 'active' ? 'text-blue-600' : 'text-gray-300'
+                            }`}>Final Report</span>
+                            {reportStatus === 'active' && <span className="text-[10px] text-blue-500 animate-pulse ml-auto">generating…</span>}
+                            {reportStatus === 'done' && <span className="text-[10px] text-emerald-500 ml-auto font-medium">Complete</span>}
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // ── Roundtable ordered view ──
+    const RoundtableProcessView: React.FC = () => {
+        const hasR1 = !!thinking.rtRounds?.[0];
+        const hasR2 = !!thinking.rtRounds?.[1];
+        const hasCons = !!thinking.rtConsensus;
+
+        return (
+            <div className="space-y-6">
+                {/* ── Section I: Preparation ── */}
+                <div>
+                    <h3 className="text-[13px] font-extrabold text-gray-800 tracking-wide mb-4">Preparation</h3>
+                    <div className="space-y-5 ml-1">
+                        <RtPhasePreparation />
+                        <RtPhaseDataSearch />
+                    </div>
+                </div>
+
+                {/* ── Section II: Roundtable ── */}
+                {(hasR1 || hasR2 || hasCons) && (
+                    <div>
+                        <h3 className="text-[13px] font-extrabold text-gray-800 tracking-wide mb-4">Roundtable</h3>
+                        <div className="space-y-5 ml-1">
+                            {hasR1 && <RtPhaseRound1 />}
+                            {hasR2 && <RtPhaseRound2 />}
+                            {hasCons && <RtPhaseConsensus />}
+                        </div>
+                    </div>
+                )}
             </div>
         );
     };
@@ -1570,9 +2277,13 @@ const ThinkingProcessSidePanel: React.FC<{
             </div>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {orderedModules.map((item) => (
-                    <div key={item.key}>{item.element}</div>
-                ))}
+                {isRoundtable ? (
+                    <RoundtableProcessView />
+                ) : (
+                    orderedModules.map((item) => (
+                        <div key={item.key}>{item.element}</div>
+                    ))
+                )}
             </div>
         </div>
     );
@@ -1823,6 +2534,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
     const [panelTab, setPanelTab] = useState<'process' | 'graph'>('process');
+    const [rtPanelExpanded, setRtPanelExpanded] = useState(false);
     const [summonPhase, setSummonPhase] = useState<'idle' | 'loading' | 'narrating' | 'selecting'>('idle');
     const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
     const [pendingRtText, setPendingRtText] = useState<string | null>(null);
@@ -2147,9 +2859,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             saLog('← agent:chat:routing', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             // Capture gen at call time — onStarted will set the correct gen
-            setThinkingProcesses(prev => ({
-                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: 'Routing...', _gen: activeChatGenRef.current }
-            }));
+            setThinkingProcesses(prev => {
+                const existing = prev[activeMsgIdxRef.current];
+                return {
+                    ...prev, [activeMsgIdxRef.current]: { ...existing, modules: existing?.modules ?? [], isActive: true, route: 'Routing...', _gen: activeChatGenRef.current }
+                };
+            });
         };
 
         const onRouted = (data: { sessionId: string; mode: string }) => {
@@ -2159,6 +2874,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 const msgIdx = activeMsgIdxRef.current;
                 const flow = prev[msgIdx];
                 if (!flow) return prev;
+                // Don't overwrite roundtable routedMode set by handleSummonConfirm
+                if (flow.routedMode === 'roundtable') return prev;
                 return { ...prev, [msgIdx]: { ...flow, routedMode: data.mode } };
             });
         };
@@ -2170,12 +2887,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 const existing = prev[activeMsgIdxRef.current];
                 return {
                     ...prev, [activeMsgIdxRef.current]: {
+                        ...existing,
                         modules: existing?.modules ?? [],
                         isActive: true,
                         route: data.route,
-                        selectedAgentIds: existing?.selectedAgentIds,
                         startTime: existing?.startTime ?? Date.now(),
-                        routedMode: existing?.routedMode,
                     }
                 };
             });
@@ -2524,7 +3240,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         saLog('replay empty → fallback emit agent:chat (local pending)', { sessionId, msgIdx });
                         setThinkingProcesses(prev => ({
                             ...prev,
-                            [msgIdx]: { modules: [], isActive: true, route: 'Routing...' },
+                            [msgIdx]: { ...(prev[msgIdx] || {}), modules: [], isActive: true, route: 'Routing...' },
                         }));
                         setIsStreaming(true);
                         socket.emit('agent:chat', {
@@ -2618,12 +3334,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             return {
                 ...prev,
                 [msgIdx]: {
+                    ...existing,
                     modules: existing?.modules ?? [],
                     isActive: true,
                     route: 'Routing...',
-                    selectedAgentIds: existing?.selectedAgentIds,
-                    startTime: existing?.startTime,
-                    routedMode: existing?.routedMode,
                 },
             };
         });
@@ -2681,16 +3395,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const restoredQuotes: Record<number, any> = {};
                     const restoredHtml: Record<number, string> = {};
                     const restoredViewModes: Record<number, 'docs' | 'web'> = {};
+                    let hasRoundtableHistory = false;
                     history.forEach(
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
                                 const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
+                                    const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
+                                    const rtFields = isRt && !meta.thinkingFlow.rtRounds && meta.consensusResult
+                                        ? reconstructRtFieldsFromConsensus(meta.consensusResult, meta.thinkingFlow.modules)
+                                        : null;
                                     restoredThinking[idx] = {
                                         ...meta.thinkingFlow,
                                         isActive: false,
+                                        ...(isRt && !meta.thinkingFlow.routedMode ? { routedMode: 'roundtable' } : {}),
+                                        ...(rtFields || {}),
                                     };
+                                    if (isRt) hasRoundtableHistory = true;
                                 }
                                 if (meta.consensusResult) {
                                     restoredConsensus[idx] = meta.consensusResult;
@@ -2708,6 +3430,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         },
                     );
                     setThinkingProcesses(restoredThinking);
+                    // Restore chatMode to roundtable if history contains roundtable data
+                    if (hasRoundtableHistory) {
+                        setChatMode('roundtable');
+                    }
                     if (Object.keys(restoredConsensus).length > 0) {
                         setConsensusResults(prev => ({ ...prev, ...restoredConsensus }));
                     }
@@ -2791,18 +3517,101 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setShowGraphPanel(false);
         setSourcePanelData(null);
         setPanelTab('graph');
-        // Store roundtable context in thinking process
+        // Store roundtable context in thinking process (with demo data for UI preview)
         const agentIds = [...selectedSummonIds];
         const nextMsgIdx = messages.length; // assistant message will be at this index
+        const selectedAgents = SUMMON_POOL.filter(a => agentIds.includes(a.id));
+        const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
+        const allAgents = [...systemAgents, ...selectedAgents];
+        // Demo: if no user-selected agents, inject some defaults for preview
+        const demoExtraIds = allAgents.length <= 4 ? ['buffett_style', 'dalio_style', 'sentiment_focus'] : [];
+        const demoExtras = SUMMON_POOL.filter(a => demoExtraIds.includes(a.id));
+        const demoAllAgents = [...allAgents, ...demoExtras];
+        const demoAgentIds = demoAllAgents.map(a => a.id);
+        // Use up to 4 for round 1, all for round 2
+        const r1Agents = demoAllAgents.slice(0, 2);
+        const r2Agents = demoAllAgents.slice(0, Math.min(7, demoAllAgents.length));
+        const verdicts = ['Bullish', 'Neutral', 'Bearish', 'Bullish', 'Bearish', 'Neutral', 'Bullish'];
+        const confs = [78, 62, 45, 71, 82, 58, 75];
+        const reasonings = [
+            'Revenue grew 18% YoY to $4.2B, beating consensus by $120M. Operating margins expanded 240bps to 28.3% driven by cost optimization and scale efficiencies. Free cash flow conversion improved to 92%. Forward P/E of 22x sits below 5-year average of 26x, suggesting room for multiple expansion. RSI at 58 indicates neutral momentum with no overbought signals. Key risk: rising interest rates could compress multiples in the near term.',
+            'Current valuation appears fair at 1.8x PEG ratio. Technical indicators are mixed — MACD shows a pending bullish crossover but volume has been declining for 3 consecutive weeks. The 50-day moving average ($148) is approaching the 200-day ($152), and a golden cross could trigger momentum buying. However, broad macro headwinds including hawkish Fed commentary and rising 10Y yields create uncertainty. Recommend maintaining position but not adding until clearer directional signals emerge.',
+            'Sector-wide de-rating in progress as competition intensifies. Company lost 2.1% market share in the latest quarter per IDC data. Gross margins contracted 180bps sequentially. Social sentiment turned notably negative after the product recall announcement, with Twitter mention sentiment dropping from +0.42 to -0.18 in two weeks. Balance sheet remains strong with $8.2B cash and minimal debt, which provides a floor, but near-term catalysts are lacking.',
+            'Tail risk assessment: correlation breakdown probability sits at 12% based on our fractal model. The current volatility regime is transitioning from low to moderate — VIX term structure shifted to contango. Max drawdown scenario under a 2-sigma stress event would be -18%. However, the company maintains a strong Altman Z-score of 4.2, suggesting minimal bankruptcy risk. Hedging cost via put spreads is relatively cheap at 45bps.',
+            'This is a wonderful business at a fair price. 85% customer retention rate, $3.2B in recurring revenue, and a brand moat evidenced by 40% pricing premium vs. closest competitor. Management has demonstrated disciplined capital allocation with $2.1B returned via buybacks. The stock trades at a 21% discount to peer median. As I always say: it is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.',
+            'The debt cycle analysis shows we are in the late expansion phase. Central bank tightening is creating headwinds across risk assets. However, this particular company has low leverage (0.8x net debt/EBITDA) and strong cash generation, making it relatively defensive. In an all-weather framework, this position contributes positive risk-adjusted returns across 3 of 4 economic environments. Maintain position but size conservatively given macro uncertainty.',
+            'Social sentiment analysis reveals a notable divergence: retail sentiment is turning bullish (+340% mention volume) while institutional positioning shows cautious accumulation. NLP analysis of recent earnings call transcripts indicates management confidence has increased — forward-looking language ratio improved from 0.42 to 0.61. The contrarian signal here is moderately bullish: when retail and institutions align gradually, the trend tends to persist.',
+        ];
         setThinkingProcesses(prev => {
             const flow = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
             return {
                 ...prev,
                 [nextMsgIdx]: {
                     ...flow,
-                    selectedAgentIds: agentIds,
+                    selectedAgentIds: demoAgentIds,
                     startTime: Date.now(),
                     routedMode: 'roundtable',
+                    rtPreparationStatus: 'done',
+                    // Phase 1: Data Collection (all done for demo)
+                    rtDataSearch: [
+                        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+                        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done', count: 15, sources: [
+                            { title: 'Q4 Earnings Beat Expectations — Revenue surges 18% YoY', domain: 'reuters.com', favicon: 'reuters', url: 'https://reuters.com' },
+                            { title: 'Analyst Upgrades Rating to Overweight on Margin Expansion', domain: 'bloomberg.com', favicon: 'bloomberg', url: 'https://bloomberg.com' },
+                            { title: 'Sector Outlook: Mixed Signals Amid Rising Rates', domain: 'wsj.com', favicon: 'wsj', url: 'https://wsj.com' },
+                            { title: 'New Product Line Could Drive $2B in Incremental Revenue', domain: 'cnbc.com', favicon: 'cnbc', url: 'https://cnbc.com' },
+                        ]},
+                        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done', count: 23, sources: [
+                            { title: 'Bullish sentiment trending — $TICKER mentions up 340% this week', domain: 'x.com', favicon: 'x', url: 'https://x.com' },
+                            { title: 'Community DD: Deep value analysis with DCF model breakdown', domain: 'reddit.com', favicon: 'reddit', url: 'https://reddit.com' },
+                            { title: 'Institutional flow data shows heavy accumulation at support', domain: 'stocktwits.com', favicon: 'stocktwits', url: 'https://stocktwits.com' },
+                        ]},
+                    ],
+                    // Phase 2: Round 1 — Initial inference (2 agents)
+                    rtRounds: [
+                        {
+                            round: 1,
+                            status: 'done',
+                            agents: r1Agents.map((a, i) => ({
+                                agentId: a.id,
+                                agentName: a.name,
+                                status: 'done' as const,
+                                verdict: verdicts[i],
+                                confidence: confs[i],
+                                reasoning: reasonings[i],
+                            })),
+                        },
+                        // Phase 3: Round 2 — Cross-validation (all agents)
+                        {
+                            round: 2,
+                            status: 'done',
+                            agents: r2Agents.map((a, i) => ({
+                                agentId: a.id,
+                                agentName: a.name,
+                                status: 'done' as const,
+                                verdict: i === 2 ? 'Neutral' : verdicts[i],  // agent C changed mind
+                                confidence: confs[i] + (i === 2 ? 10 : 0),
+                                reasoning: reasonings[i],
+                                changedMind: i === 2,
+                                previousVerdict: i === 2 ? 'Bearish' : undefined,
+                                crossReferences: [r2Agents[(i + 1) % r2Agents.length]?.name, r2Agents[(i + 2) % r2Agents.length]?.name].filter(Boolean),
+                            })),
+                        },
+                    ],
+                    // Phase 4: Consensus
+                    rtConsensus: {
+                        status: 'done',
+                        hasConsensus: true,
+                        conflictRate: 20,
+                        agentConclusions: r2Agents.map((a, i) => ({
+                            agentName: a.name,
+                            verdict: i === 2 ? 'Neutral' : verdicts[i],
+                            confidence: confs[i] + (i === 2 ? 10 : 0),
+                        })),
+                        finalVerdict: 'Bullish',
+                        finalConfidence: 74,
+                    },
+                    rtReportStatus: 'done',
                 },
             };
         });
@@ -2972,16 +3781,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     <ThinkingInlineTrigger
                                                         thinking={thinkingProcesses[i]}
                                                         onOpen={() => {
+                                                            const flow = thinkingProcesses[i];
+                                                            console.log('[RT-DEBUG] onOpen', { i, routedMode: flow?.routedMode, chatMode, hasFlow: !!flow });
                                                             setActiveGraphMsgIdx(i);
                                                             setShowThinkingPanel(true);
                                                             setShowGraphPanel(false);
                                                             setSourcePanelData(null);
-                                                            if (chatMode === 'roundtable') setPanelTab('process');
+                                                            const isRt = flow?.routedMode === 'roundtable' || chatMode === 'roundtable';
+                                                            if (isRt) setPanelTab('process');
                                                         }}
                                                     />
                                                 )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && !msg.isStreaming && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                {msg.role === 'assistant' && !msg.isStreaming && (htmlReports[i] || htmlGenerating[i]) && (
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className="flex items-center gap-1.5">
                                                         {(htmlReports[i] || htmlGenerating[i]) && (
@@ -3009,15 +3821,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             </div>
                                                         )}
                                                         </div>
-                                                        {consensusResults[i] && (
-                                                            <button
-                                                                onClick={() => { setActiveGraphMsgIdx(i); setShowThinkingPanel(true); setShowGraphPanel(false); setSourcePanelData(null); setPanelTab('graph'); }}
-                                                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
-                                                            >
-                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                                                                Roundtable
-                                                            </button>
-                                                        )}
                                                     </div>
                                                 )}
                                                 {msg.content === '__cancelled__' ? (() => {
@@ -3648,7 +4451,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 </div>
 
                 {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
-                {showThinkingPanel && chatMode === 'roundtable' && (
+                {(() => { if (showThinkingPanel) console.log('[RT-DEBUG] panel check', { chatMode, routedMode: currentThinking?.routedMode, rtPanelExpanded, activeGraphMsgIdx }); return null; })()}
+                {showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && !rtPanelExpanded && (
                     <div className="w-[480px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
                         {/* Tab bar */}
                         <div className="flex items-center px-4 py-2.5 border-b border-gray-100 gap-1 shrink-0">
@@ -3663,6 +4467,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     }`}>Roundtable Graph</button>
                             </div>
                             <div className="flex-1" />
+                            <button onClick={() => setRtPanelExpanded(true)}
+                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
+                                title="Expand">
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
+                            </button>
                             <button onClick={() => setShowThinkingPanel(false)}
                                 className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
@@ -3697,8 +4506,63 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </div>
                 )}
 
+                {/* ── Fullscreen Roundtable Panel (Process 1/3 + Graph 2/3) ── */}
+                {rtPanelExpanded && showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && (
+                    <div className="fixed inset-0 z-50 bg-white flex flex-col">
+                        {/* Header bar */}
+                        <div className="flex items-center px-5 py-3 border-b border-gray-100 shrink-0">
+                            <span className="text-[14px] font-bold text-gray-900">Roundtable Analysis</span>
+                            <div className="flex-1" />
+                            <button onClick={() => setRtPanelExpanded(false)}
+                                className="w-8 h-8 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all mr-1.5"
+                                title="Collapse">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" /></svg>
+                            </button>
+                            <button onClick={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }}
+                                className="w-8 h-8 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        {/* Split: Process (1/3) + Graph (2/3) */}
+                        <div className="flex flex-1 min-h-0">
+                            <div className="w-1/3 border-r border-gray-100 overflow-hidden flex flex-col">
+                                <div className="px-4 py-3 border-b border-gray-50 shrink-0">
+                                    <span className="text-[13px] font-bold text-gray-800">Process</span>
+                                </div>
+                                {currentThinking ? (
+                                    <div className="flex-1 overflow-hidden">
+                                        <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }} hideHeader chatMode={chatMode} />
+                                    </div>
+                                ) : (
+                                    <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
+                                )}
+                            </div>
+                            <div className="w-2/3 overflow-hidden flex flex-col">
+                                <div className="px-4 py-3 border-b border-gray-50 shrink-0">
+                                    <span className="text-[13px] font-bold text-gray-800">Roundtable Graph</span>
+                                </div>
+                                <div className="flex-1 overflow-hidden">
+                                    <RoundtableView data={currentRoundtableData}
+                                        isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
+                                        isLive={isStreaming}
+                                        hideHeader
+                                        summonPhase={summonPhase}
+                                        selectedSummonIds={selectedSummonIds}
+                                        onSummonToggle={(id) => setSelectedSummonIds(prev => {
+                                            const next = new Set(prev);
+                                            next.has(id) ? next.delete(id) : next.add(id);
+                                            return next;
+                                        })}
+                                        onSummonConfirm={handleSummonConfirm}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Non-roundtable: original Thinking Process Side Panel */}
-                {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && (
+                {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && currentThinking.routedMode !== 'roundtable' && (
                     <div className="w-[360px] shrink-0 border-l border-gray-100 overflow-hidden">
                         <ThinkingProcessSidePanel
                             thinking={currentThinking}

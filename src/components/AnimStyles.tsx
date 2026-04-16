@@ -153,6 +153,36 @@ const AnimStyles = () => (
     .rt-counter-orbit { animation: rt-counter-orbit 12s linear infinite; }
     .rt-pulse-dot { animation: rt-pulse 1s ease-in-out infinite; }
 
+    /* ── Master card shimmer / shine sweep ── */
+    @keyframes card-shine {
+      0%   { transform: translateX(-100%) skewX(-15deg); }
+      100% { transform: translateX(250%) skewX(-15deg); }
+    }
+    .master-card-shine {
+      position: relative;
+      overflow: hidden;
+    }
+    .master-card-shine::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0;
+      width: 45%;
+      height: 100%;
+      background: linear-gradient(
+        90deg,
+        rgba(255,255,255,0) 0%,
+        rgba(255,255,255,0.45) 40%,
+        rgba(255,255,255,0.8) 50%,
+        rgba(255,255,255,0.45) 60%,
+        rgba(255,255,255,0) 100%
+      );
+      transform: translateX(-100%) skewX(-15deg);
+      animation: card-shine 3s ease-in-out infinite;
+      animation-delay: 1s;
+      pointer-events: none;
+      z-index: 1;
+    }
+
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {

@@ -2120,7 +2120,8 @@ Research context:\n${synFullContent}${langInstruction}`;
               thinkingFlow: {
                 modules: flowModules,
                 isActive: false,
-                route: 'Super Agent Orchestrator'
+                route: 'Super Agent Orchestrator',
+                ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
               },
               consensusResult: savedConsensusResult ?? undefined,
               quoteCard: savedQuoteCard ?? undefined,
