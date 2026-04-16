@@ -198,7 +198,7 @@ const App: React.FC = () => {
         </div>
         <div className={`flex-1 overflow-y-auto flex flex-col md:m-0 ${location.pathname.startsWith('/market/startup/') ? 'bg-gray-50 md:bg-gray-100/80' : ''}`}>
           <Routes>
-            <Route path="/" element={<SuperAgentHome />} />
+            <Route path="/" element={<SuperAgentHome isLoggedIn={isLoggedIn} onRequireLogin={() => setShowAuthModal(true)} />} />
             <Route path="/chat" element={<RealChatsPage />} />
             <Route path="/contacts" element={<RealContactsPage />} />
             <Route path="/market/*" element={<Market />} />
