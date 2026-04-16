@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
@@ -20,7 +20,15 @@ interface PendingHomeImage extends ChatImagePayload {
   status: 'uploading' | 'uploaded' | 'error';
 }
 
-const SuperAgentHome: React.FC = () => {
+interface SuperAgentHomeProps {
+  isLoggedIn?: boolean;
+  onRequireLogin?: () => void;
+}
+
+const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
+  isLoggedIn = false,
+  onRequireLogin,
+}) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [input, setInput] = useState('');
@@ -55,6 +63,24 @@ const SuperAgentHome: React.FC = () => {
       }
     };
   }, []);
+
+  const promptLogin = useCallback(() => {
+    if (onRequireLogin) {
+      onRequireLogin();
+      return;
+    }
+    window.dispatchEvent(new Event('show-auth-modal'));
+  }, [onRequireLogin]);
+
+  const beginHomeChat = useCallback((text: string, images: ChatImagePayload[] = []) => {
+    if (!isLoggedIn) {
+      promptLogin();
+      return false;
+    }
+    setChatInitialImages(images);
+    setChatMessage(text);
+    return true;
+  }, [isLoggedIn, promptLogin]);
 
   const clearHomeImages = () => {
     setHomeImageAttachments(prev => {
@@ -211,8 +237,8 @@ const SuperAgentHome: React.FC = () => {
       .map(img => ({ url: img.url, mime: img.mime, name: img.name }));
     const text = input.trim();
     if (!text && uploadedImages.length === 0) return;
-    setChatInitialImages(uploadedImages);
-    setChatMessage(text);
+    const started = beginHomeChat(text, uploadedImages);
+    if (!started) return;
     setInput('');
     clearHomeImages();
   };
@@ -565,13 +591,11 @@ const SuperAgentHome: React.FC = () => {
                       if ((a as any).agentId) {
                         setSelectedAgent((a as any).agentId);
                         setSelectedScenario(null);
-                          setChatInitialImages([]);
-                        if (a.prompt) setChatMessage(a.prompt);
+                        if (a.prompt) beginHomeChat(a.prompt, []);
                       } else if (a.route) {
                         navigate(a.route);
                       } else if (a.prompt) {
-                          setChatInitialImages([]);
-                        setChatMessage(a.prompt);
+                        beginHomeChat(a.prompt, []);
                       }
                     }}
                     className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:border-gray-300 hover:text-gray-900 hover:shadow-sm whitespace-nowrap">
@@ -596,7 +620,7 @@ const SuperAgentHome: React.FC = () => {
             {USE_CASES.map(uc => (
               <button
                 key={uc.id}
-                onClick={() => { setChatInitialImages([]); setChatMessage(uc.prompt); }}
+                onClick={() => { beginHomeChat(uc.prompt, []); }}
                 className="usecase-card group text-left bg-white border border-gray-100 rounded-xl p-3 cursor-pointer"
               >
                 <div className="w-6 h-6 rounded-md bg-gray-50 flex items-center justify-center text-gray-400 mb-2">{UseCaseIcons[uc.id] ? React.createElement(UseCaseIcons[uc.id]) : null}</div>
