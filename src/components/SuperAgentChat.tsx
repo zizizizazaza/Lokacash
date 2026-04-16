@@ -21,11 +21,8 @@ const TOC_BOTTOM_RESERVE_PX = 148;
 /** Minimum TOC panel height so the list isn’t collapsed to ~3 rows before layout stabilizes */
 const TOC_MIN_VIEWPORT_PX = 220;
 
-/** Keep the TOC close to the viewport top on first paint instead of dropping beside large hero cards. */
-const TOC_PREFERRED_TOP_PX = 72;
-
-/** Small top gutter so the floating TOC never touches the container edge. */
-const TOC_TOP_GUTTER_PX = 8;
+/** Standard sticky offset for the left TOC rail. */
+const TOC_STICKY_TOP_PX = 24;
 
 // ─── Types and Interfaces ────────────────────────────────────
 
@@ -2672,7 +2669,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
-    const tocNavRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
     const restoredFromPendingRef = useRef(
@@ -3033,8 +3029,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const tocMsgInWebMode = tocVisibleMsgIdx >= 0 && msgViewMode[tocVisibleMsgIdx] === 'web';
     const showToc = tocHeadings.length > 0 && !tocMsgInWebMode;
 
-    // Scroll-spy: track which heading is currently in view + TOC position + which message's TOC to show
-    const [tocTopPx, setTocTopPx] = useState(0);
+    // Scroll-spy: track which heading is currently in view + which message's TOC to show
     useLayoutEffect(() => {
         const container = scrollContainerRef.current;
         if (!container) return;
@@ -3081,29 +3076,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 }
             }
             setActiveTocId(current);
-
-            // Float position – align with first heading inside the scroll viewport.
-            // IMPORTANT: do NOT use offsetTop − scrollTop (offsetTop is relative to offsetParent, not this container).
-            const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
-            if (firstEl) {
-                const firstHeadingTop = firstEl.getBoundingClientRect().top - containerRect.top;
-                let floatTop = Math.max(
-                    TOC_TOP_GUTTER_PX,
-                    Math.min(firstHeadingTop, TOC_PREFERRED_TOP_PX)
-                );
-
-                // Bottom boundary: when TOC would overlap the action bar, pin it above
-                const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
-                const tocH = tocNavRef.current?.offsetHeight || 0;
-                if (actionsEl && tocH > 0) {
-                    const pinnedTop = actionsEl.getBoundingClientRect().top - containerRect.top - tocH - 16;
-                    floatTop = Math.min(floatTop, pinnedTop);
-                }
-                // Ensure TOC panel top stays above the reserved input strip
-                const maxTop = Math.max(TOC_TOP_GUTTER_PX, container.clientHeight - TOC_BOTTOM_RESERVE_PX);
-                floatTop = Math.max(TOC_TOP_GUTTER_PX, Math.min(floatTop, maxTop));
-                setTocTopPx(floatTop);
-            }
         };
 
         container.addEventListener('scroll', scheduleRecalc, { passive: true });
@@ -3118,9 +3090,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             resizeObserver.observe(container);
             if (container.firstElementChild instanceof HTMLElement) {
                 resizeObserver.observe(container.firstElementChild);
-            }
-            if (tocNavRef.current) {
-                resizeObserver.observe(tocNavRef.current);
             }
         }
 
@@ -4111,78 +4080,76 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
-                    {/* TOC floating panel */}
-                    {showToc && (
-                        <nav
-                            ref={tocNavRef}
-                            className="absolute left-3 z-20 hidden md:block transition-all duration-150"
-                            style={{
-                                top: tocTopPx,
-                                maxHeight: `max(${TOC_MIN_VIEWPORT_PX}px, calc(100% - ${Math.max(tocTopPx, 0)}px - ${TOC_BOTTOM_RESERVE_PX}px))`,
-                                overflow: 'hidden',
-                            }}
-                        >
-                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
-                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
-                                <ul className="space-y-0.5">
-                                    {(() => {
-                                        // Filter and optimize TOC hierarchy:
-                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
-                                        const filtered = tocHeadings.filter(h => h.level >= 2);
-                                        const optimized: typeof filtered = [];
-                                        for (let fi = 0; fi < filtered.length; fi++) {
-                                            const h = filtered[fi];
-                                            if (h.level === 2) {
-                                                optimized.push(h);
-                                            } else if (h.level >= 3) {
-                                                // Count siblings: how many consecutive level-3 items follow the same level-2 parent
-                                                const parentIdx = optimized.findLastIndex(x => x.level === 2);
-                                                let siblingCount = 0;
-                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
-                                                // Only show sub-items if there are 2+ siblings
-                                                if (siblingCount >= 2) optimized.push(h);
-                                            }
-                                        }
-                                        return optimized;
-                                    })().map((h, idx, arr) => {
-                                        const isActive = activeTocId === h.id;
-                                        const sectionNum = h.level === 2
-                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
-                                            : null;
-                                        return (
-                                            <li key={idx}>
-                                                <button
-                                                    onClick={() => {
-                                                        const el = document.getElementById(h.id);
-                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                                    }}
-                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
-                                                        isActive
-                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
-                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
-                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
-                                                >
-                                                    {sectionNum !== null && (
-                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
-                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
-                                                        }`}>
-                                                            {sectionNum}
-                                                        </span>
-                                                    )}
-                                                    {h.level >= 3 && (
-                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
-                                                    )}
-                                                    <span className="break-words whitespace-normal">{h.text}</span>
-                                                </button>
-                                            </li>
-                                        );
-                                    })}
-                                </ul>
-                            </div>
-                        </nav>
-                    )}
-                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
-                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${showToc ? 'md:ml-[228px]' : ''}`}>
+                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
+                        <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
+                            <div className={`flex items-start gap-6 xl:gap-8 ${showToc ? '' : 'justify-center'}`}>
+                                {showToc && (
+                                    <aside className="hidden md:block w-[220px] shrink-0 self-start sticky" style={{ top: TOC_STICKY_TOP_PX }}>
+                                        <nav
+                                            className="overflow-hidden"
+                                            style={{
+                                                maxHeight: `max(${TOC_MIN_VIEWPORT_PX}px, calc(100dvh - ${TOC_STICKY_TOP_PX + TOC_BOTTOM_RESERVE_PX}px))`,
+                                            }}
+                                        >
+                                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
+                                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
+                                                <ul className="space-y-0.5">
+                                                    {(() => {
+                                                        // Filter and optimize TOC hierarchy:
+                                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
+                                                        const filtered = tocHeadings.filter(h => h.level >= 2);
+                                                        const optimized: typeof filtered = [];
+                                                        for (let fi = 0; fi < filtered.length; fi++) {
+                                                            const h = filtered[fi];
+                                                            if (h.level === 2) {
+                                                                optimized.push(h);
+                                                            } else if (h.level >= 3) {
+                                                                let siblingCount = 0;
+                                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
+                                                                // Only show sub-items if there are 2+ siblings
+                                                                if (siblingCount >= 2) optimized.push(h);
+                                                            }
+                                                        }
+                                                        return optimized;
+                                                    })().map((h, idx, arr) => {
+                                                        const isActive = activeTocId === h.id;
+                                                        const sectionNum = h.level === 2
+                                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
+                                                            : null;
+                                                        return (
+                                                            <li key={idx}>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const el = document.getElementById(h.id);
+                                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                                    }}
+                                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
+                                                                        isActive
+                                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
+                                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
+                                                                >
+                                                                    {sectionNum !== null && (
+                                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
+                                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
+                                                                        }`}>
+                                                                            {sectionNum}
+                                                                        </span>
+                                                                    )}
+                                                                    {h.level >= 3 && (
+                                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
+                                                                    )}
+                                                                    <span className="break-words whitespace-normal">{h.text}</span>
+                                                                </button>
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ul>
+                                            </div>
+                                        </nav>
+                                    </aside>
+                                )}
+                                <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
                             {messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -4807,6 +4774,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                             <div ref={messagesEndRef} />
                         </div>
                     </div>
+                </div>
+            </div>
 
                     {/* Input */}
                     <div className="absolute bottom-0 left-0 right-0 z-40 pt-2 pb-4 px-4 md:px-8 pointer-events-none">
