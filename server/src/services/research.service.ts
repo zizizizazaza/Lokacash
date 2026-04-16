@@ -13,6 +13,7 @@ export type XProfileSnapshot = {
   following?: number;
   joinedRaw?: string;
   joinedDisplay?: string;
+  avatarUrl?: string;
 };
 
 const INTERNAL_X_PROFILE_RE = /\[INTERNAL_X_PROFILES\]\s*([\s\S]*?)\s*\[\/INTERNAL_X_PROFILES\]/i;

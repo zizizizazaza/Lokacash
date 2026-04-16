@@ -50,14 +50,78 @@ function wantsTwitterProjectProfileHint(q: string): boolean {
   );
 }
 
+const SOCIAL_HANDLE_STOPWORDS = new Set([
+  'twitter',
+  'x',
+  'com',
+  'project',
+  'account',
+  'profile',
+  'analysis',
+  'research',
+  'about',
+  'the',
+  'and',
+  'for',
+  'with',
+  'what',
+  'how',
+]);
+
+function toSafeNumber(n: unknown): number {
+  return typeof n === 'number' && Number.isFinite(n) ? n : 0;
+}
+
+function candidateTokensFromQuery(userContent: string): string[] {
+  const q = (userContent || '').toLowerCase();
+  const explicit = Array.from(new Set((q.match(/@([a-z0-9_]{1,15})\b/gi) || [])
+    .map((x) => x.replace(/^@/, '').toLowerCase())));
+  if (explicit.length) return explicit;
+
+  const words = Array.from(new Set((q.match(/\b[a-z][a-z0-9_]{2,30}\b/g) || [])
+    .map((w) => w.toLowerCase())
+    .filter((w) => !SOCIAL_HANDLE_STOPWORDS.has(w))));
+  return words.slice(0, 8);
+}
+
+function explicitHandlesFromText(text: string): string[] {
+  const q = (text || '').toLowerCase();
+  return Array.from(
+    new Set(
+      (q.match(/@([a-z0-9_]{1,15})\b/gi) || [])
+        .map((x) => x.replace(/^@/, '').toLowerCase()),
+    ),
+  );
+}
+
 function pickXProfileForUser(profiles: XProfileSnapshot[], userContent: string): XProfileSnapshot | null {
   if (!profiles.length) return null;
-  const q = userContent.toLowerCase();
-  for (const p of profiles) {
-    const h = p.handle.toLowerCase();
-    if (q.includes(h) || q.includes(`@${h}`)) return p;
+  const q = (userContent || '').toLowerCase();
+  const explicitHandles = Array.from(new Set((q.match(/@([a-z0-9_]{1,15})\b/gi) || [])
+    .map((x) => x.replace(/^@/, '').toLowerCase())));
+  const normalizedProfiles = profiles.map((p) => ({
+    profile: p,
+    handle: (p.handle || '').trim().toLowerCase(),
+    followers: toSafeNumber(p.followers),
+  })).filter((x) => x.handle.length > 0);
+
+  // High-confidence path: explicit @handle must match exactly, otherwise do not show card.
+  if (explicitHandles.length > 0) {
+    const exactMatches = normalizedProfiles.filter((p) => explicitHandles.includes(p.handle));
+    if (!exactMatches.length) return null;
+    exactMatches.sort((a, b) => b.followers - a.followers);
+    return exactMatches[0].profile;
   }
-  return profiles[0];
+
+  // Soft path (e.g. "twitter 的 Erebor"): try token containment, pick highest-followers candidate.
+  const tokens = candidateTokensFromQuery(userContent);
+  if (!tokens.length) return null;
+  const softMatches = normalizedProfiles.filter((p) =>
+    tokens.some((t) => p.handle.includes(t) || t.includes(p.handle)),
+  );
+  if (!softMatches.length) return null;
+  softMatches.sort((a, b) => b.followers - a.followers);
+  return softMatches[0].profile;
 }
 
 function normalizeIncomingImages(images: unknown): AgentChatImage[] {
@@ -957,10 +1021,24 @@ Text: "${query}"`;
         let logHintSources: any[] = [];
         // Faster default for SuperAgent chat: focus on X + web, skip slower auxiliary sources unless overridden.
         const superagentSearchSources = (process.env.SUPERAGENT_LAST30DAYS_SEARCH || 'x,web').trim();
+        const routedSearchQuery = plan.capabilities.search.query || [userContent, plan.imageDigest].filter(Boolean).join(' ; ');
+        const explicitHandles = explicitHandlesFromText(userContent);
+        let effectiveSearchQuery = routedSearchQuery;
+        if (explicitHandles.length > 0) {
+          const missingHandles = explicitHandles.filter(
+            (h) => !new RegExp(`@?${h}\\b`, 'i').test(routedSearchQuery),
+          );
+          if (missingHandles.length > 0) {
+            effectiveSearchQuery = `${routedSearchQuery} ${missingHandles.map((h) => `@${h}`).join(' ')}`.trim();
+            console.log(
+              `[search_query] patched handles into routed query. original="${routedSearchQuery}" patched="${effectiveSearchQuery}"`,
+            );
+          }
+        }
 
         promises.push(
           researchService.runDeepResearch(
-            plan.capabilities.search.query || [userContent, plan.imageDigest].filter(Boolean).join(' ; '),
+            effectiveSearchQuery,
             {
               deep: false,
               searchSources: superagentSearchSources || undefined,
@@ -1032,9 +1110,17 @@ Text: "${query}"`;
                   followers: picked.followers,
                   following: picked.following,
                   joinedDisplay: picked.joinedDisplay || picked.joinedRaw || '',
+                  avatarUrl: picked.avatarUrl || '',
                 };
                 savedXProfileCard = payload;
                 emitToUser(userId, 'agent:chat:x_profile', { sessionId, profile: payload });
+                console.log(
+                  `[x_profile] selected handle=@${payload.handle} followers=${payload.followers ?? 'n/a'} following=${payload.following ?? 'n/a'} query="${userContent.slice(0, 120)}"`,
+                );
+              } else {
+                console.log(
+                  `[x_profile] skipped: no high-confidence profile match for query="${userContent.slice(0, 120)}" profiles=${xProfiles.length}`,
+                );
               }
             }
             return { type: 'SEARCH', data: res.summary, sources: socialSources };
@@ -1198,7 +1284,7 @@ Text: "${query}"`;
                           if (/\.(US|NASDAQ|NYSE)$/i.test(t)) return isZh ? '美股' : 'US';
                         }
                         // Check user query for market hints
-                        const query = data.content.toLowerCase();
+                        const query = (userContent || '').toLowerCase();
                         if (/港股|hk\b|恒生|腾讯|美团|小米|阿里巴巴|京东|网易|百度/.test(query))
                           return isZh ? '港股' : 'HK';
                         if (/a\s*股|沪深|上证|深证|创业板|科创板|茅台|平安|招商/.test(query))
@@ -1231,7 +1317,7 @@ Text: "${query}"`;
                       savedQuoteCard = quotePayload;
                       // Validate: only emit the quote card if the stock name or symbol
                       // reasonably matches the user's query (prevent wrong-stock cards)
-                      const queryLower = data.content.toLowerCase();
+                      const queryLower = (userContent || '').toLowerCase();
                       const nameMatch = q.name && queryLower.includes(q.name.toLowerCase());
                       const symMatch = q.symbol && queryLower.includes(q.symbol.toLowerCase());
                       const tickerMatch = (plan.capabilities.analysis.tickers || []).some(

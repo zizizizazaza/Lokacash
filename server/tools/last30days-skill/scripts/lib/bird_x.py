@@ -510,12 +510,19 @@ def parse_bird_response(response: Dict[str, Any], query: str = "") -> List[Dict[
             or author.get("following_count")
         )
         acct_created = author.get("accountCreatedAt") or author.get("created_at")
+        avatar_url = (
+            author.get("profileImageUrl")
+            or author.get("profile_image_url_https")
+            or author.get("profile_image_url")
+        )
         if isinstance(acct_created, str) and acct_created.strip():
             item["author_joined_raw"] = acct_created.strip()
         if af is not None:
             item["author_followers"] = af
         if aw is not None:
             item["author_following"] = aw
+        if isinstance(avatar_url, str) and avatar_url.strip():
+            item["author_avatar_url"] = avatar_url.strip()
 
         items.append(item)
 

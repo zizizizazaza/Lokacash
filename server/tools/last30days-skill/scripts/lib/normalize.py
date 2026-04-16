@@ -153,6 +153,7 @@ def normalize_x_items(
             author_followers=item.get("author_followers"),
             author_following=item.get("author_following"),
             author_joined_raw=item.get("author_joined_raw"),
+            author_avatar_url=item.get("author_avatar_url"),
         ))
 
     return normalized
