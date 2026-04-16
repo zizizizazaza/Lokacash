@@ -362,7 +362,10 @@ export function unwrapTweetResult(result) {
 export function mapTweetResult(result, quoteDepthOrOptions) {
     const options = typeof quoteDepthOrOptions === 'number' ? { quoteDepth: quoteDepthOrOptions } : quoteDepthOrOptions;
     const { quoteDepth, includeRaw = false } = options;
-    const userResult = result?.core?.user_results?.result;
+    const rawUserResult = result?.core?.user_results?.result;
+    const userResult = rawUserResult?.__typename === 'UserWithVisibilityResults' && rawUserResult.user
+        ? rawUserResult.user
+        : rawUserResult;
     const userLegacy = userResult?.legacy;
     const userCore = userResult?.core;
     const username = userLegacy?.screen_name ?? userCore?.screen_name;
@@ -396,6 +399,13 @@ export function mapTweetResult(result, quoteDepthOrOptions) {
         author: {
             username,
             name: name || username,
+            ...(typeof userLegacy?.followers_count === 'number'
+                ? { followersCount: userLegacy.followers_count }
+                : {}),
+            ...(typeof userLegacy?.friends_count === 'number' ? { followingCount: userLegacy.friends_count } : {}),
+            ...(typeof userLegacy?.created_at === 'string' && userLegacy.created_at
+                ? { accountCreatedAt: userLegacy.created_at }
+                : {}),
         },
         authorId: userId,
         quotedTweet,

@@ -225,6 +225,51 @@ interface ThinkingFlow {
     planningMessage?: string;
     /** Signal Radar: last30days stderr / status lines (not shown in main chat) */
     signalResearchLog?: string;
+    /** Roundtable: selected agent IDs from summon panel */
+    selectedAgentIds?: string[];
+    /** Timestamp when thinking started */
+    startTime?: number;
+}
+
+function mergeSearchSources(primary?: SearchSource[], secondary?: SearchSource[]): SearchSource[] {
+    const out: SearchSource[] = [];
+    const byKey = new Map<string, number>();
+    const list = [...(primary || []), ...(secondary || [])];
+
+    for (const s of list) {
+        const key = `${s.url || ''}|${s.domain || ''}|${s.title || ''}`.toLowerCase();
+        const idx = byKey.get(key);
+        if (idx == null) {
+            byKey.set(key, out.length);
+            out.push({ ...s });
+            continue;
+        }
+        // Prefer richer record when duplicated key appears.
+        const prev = out[idx];
+        out[idx] = {
+            ...prev,
+            ...s,
+            snippet: prev.snippet || s.snippet,
+            url: prev.url || s.url,
+        };
+    }
+    return out;
+}
+
+function collectThinkingSearchSources(flow?: ThinkingFlow): SearchSource[] {
+    if (!flow?.modules?.length) return [];
+    const gathered: SearchSource[] = [];
+    for (const m of flow.modules) {
+        if (m.type !== 'search' || !m.data) continue;
+        const data = m.data as SearchModuleData;
+        if (Array.isArray(data.sources)) gathered.push(...data.sources);
+        if (Array.isArray(data.sections)) {
+            for (const sec of data.sections) {
+                if (Array.isArray(sec.sources)) gathered.push(...sec.sources);
+            }
+        }
+    }
+    return mergeSearchSources(gathered, []);
 }
 
 const SA_SID_KEY = 'loka_superagent_sid';
@@ -305,20 +350,136 @@ const ROUNDTABLE_AGENTS = [
     { name: 'Quant Tracker', initials: 'QT', agentId: 'agent_3' },
 ];
 
+/* ── Summon pool — analyst characters for roundtable selection ── */
+/* system=true → auto-selected by system, user cannot toggle */
+const SUMMON_POOL: { id: string; name: string; nameCN: string; initials: string; role: string; roleCN: string; color: string; group: 'system' | 'enhanced' | 'master'; }[] = [
+    // ── System base agents (auto-assigned, not user-toggleable) ──
+    { id: 'fundamental_specialist',  name: 'Fundamental Analyst',      nameCN: '基本面分析师',   initials: 'FA', role: 'Financials & earnings',    roleCN: '财务与盈利分析',   color: '#3B82F6', group: 'system' },
+    { id: 'valuation_specialist',    name: 'Valuation Analyst',        nameCN: '估值分析师',     initials: 'VA', role: 'Fair value & models',      roleCN: '公允价值与模型',   color: '#6366F1', group: 'system' },
+    { id: 'macro_specialist',        name: 'Macro Analyst',            nameCN: '宏观分析师',     initials: 'MA', role: 'Macro trends & policy',     roleCN: '宏观趋势与政策',   color: '#8B5CF6', group: 'system' },
+    { id: 'risk_specialist',         name: 'Risk Analyst',             nameCN: '风险分析师',     initials: 'RA', role: 'Risk & downside scenarios', roleCN: '风险与下行场景',   color: '#EF4444', group: 'system' },
+    // ── Group 1: Enhanced / Specialized views (user-toggleable) ──
+    { id: 'allocation_specialist',   name: 'Allocation Analyst',       nameCN: '配置分析师',     initials: 'AA', role: 'ETF & asset allocation',    roleCN: 'ETF与资产配置',    color: '#14B8A6', group: 'enhanced' },
+    { id: 'fund_specialist',         name: 'Fund Analyst',             nameCN: '基金分析师',     initials: 'FD', role: 'Fund selection & review',   roleCN: '基金筛选与评审',   color: '#0EA5E9', group: 'enhanced' },
+    { id: 'options_specialist',      name: 'Options Analyst',          nameCN: '期权分析师',     initials: 'OA', role: 'Options strategy & Greeks', roleCN: '期权策略与Greeks', color: '#D946EF', group: 'enhanced' },
+    { id: 'crypto_specialist',       name: 'Crypto Analyst',           nameCN: '加密分析师',     initials: 'CA', role: 'Crypto & on-chain data',    roleCN: '加密与链上数据',   color: '#F59E0B', group: 'enhanced' },
+    { id: 'macro_enhanced',   name: 'Macro Enhanced Analyst',   nameCN: '宏观增强分析师',   initials: 'ME', role: 'Deep macro overlay',        roleCN: '深度宏观叠加',   color: '#7C3AED', group: 'enhanced' },
+    { id: 'risk_enhanced',    name: 'Risk Enhanced Analyst',    nameCN: '风险增强分析师',   initials: 'RE', role: 'Fractal risk modeling',      roleCN: '分形风险建模',   color: '#DC2626', group: 'enhanced' },
+    { id: 'event_driven',     name: 'Event-Driven Analyst',     nameCN: '事件驱动分析师',   initials: 'ED', role: 'Catalysts & events',         roleCN: '催化剂与事件',   color: '#EA580C', group: 'enhanced' },
+    { id: 'sentiment_focus',  name: 'Sentiment Analyst',        nameCN: '情绪分析师',       initials: 'SF', role: 'Social & market sentiment',  roleCN: '社交与市场情绪', color: '#0891B2', group: 'enhanced' },
+    { id: 'portfolio_view',   name: 'Portfolio Analyst',        nameCN: '组合分析师',       initials: 'PV', role: 'Portfolio impact & fit',      roleCN: '组合影响与适配', color: '#059669', group: 'enhanced' },
+    // ── Group 2: Master simulation (user-toggleable) ──
+    { id: 'buffett_style',  name: 'Warren Buffett',  nameCN: '巴菲特风格',   initials: 'WB', role: 'Competitive moats & value',    roleCN: '竞争护城河与价值', color: '#1E40AF', group: 'master' },
+    { id: 'munger_style',   name: 'Charlie Munger',  nameCN: '芒格风格',     initials: 'CM', role: 'Mental models & inversion',    roleCN: '多元思维与逆向',   color: '#374151', group: 'master' },
+    { id: 'dalio_style',    name: 'Ray Dalio',       nameCN: '达利欧风格',   initials: 'RD', role: 'Macro cycles & all-weather',   roleCN: '宏观周期与全天候', color: '#1D4ED8', group: 'master' },
+    { id: 'soros_style',    name: 'George Soros',    nameCN: '索罗斯风格',   initials: 'GS', role: 'Reflexivity & macro bets',     roleCN: '反身性与宏观博弈', color: '#7E22CE', group: 'master' },
+    { id: 'lynch_style',    name: 'Peter Lynch',     nameCN: '林奇风格',     initials: 'PL', role: 'Growth at reasonable price',   roleCN: '合理价格成长',     color: '#047857', group: 'master' },
+];
+const SYSTEM_AGENT_IDS = new Set(SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id));
+const DEFAULT_SUMMON_IDS = new Set<string>();
+
 const AGENT_COLORS: Record<string, string> = {
     FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
 };
 
-// Unified robot icon for all agent avatars
-const ROBOT_ICON = <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-    {/* antenna */}<line x1="12" y1="2" x2="12" y2="6" /><circle cx="12" cy="2" r="1" fill="currentColor" />
-    {/* head */}<rect x="4" y="6" width="16" height="12" rx="3" />
-    {/* eyes */}<circle cx="9" cy="12" r="1.5" fill="currentColor" /><circle cx="15" cy="12" r="1.5" fill="currentColor" />
-    {/* mouth */}<line x1="9" y1="16" x2="15" y2="16" />
-    {/* ears */}<line x1="2" y1="10" x2="4" y2="10" /><line x1="20" y1="10" x2="22" y2="10" />
-</svg>;
+/* ── Avatar mapping: name/id → JPG path ── */
+const AVATAR_MAP: Record<string, string> = {
+    // SUMMON_POOL system agents
+    fundamental_specialist: '/avatars/fundamental_specialist.jpg',
+    valuation_specialist: '/avatars/valuation_specialist.jpg',
+    macro_specialist: '/avatars/macro_specialist.jpg',
+    risk_specialist: '/avatars/risk_specialist.jpg',
+    allocation_specialist: '/avatars/allocation_specialist.jpg',
+    fund_specialist: '/avatars/fund_specialist.jpg',
+    options_specialist: '/avatars/options_specialist.jpg',
+    crypto_specialist: '/avatars/crypto_specialist.jpg',
+    // SUMMON_POOL enhanced agents
+    macro_enhanced: '/avatars/macro_enhanced.jpg',
+    risk_enhanced: '/avatars/risk_enhanced.jpg',
+    event_driven: '/avatars/event_driven.jpg',
+    sentiment_focus: '/avatars/sentiment_focus.jpg',
+    portfolio_view: '/avatars/portfolio_view.jpg',
+    // SUMMON_POOL master style agents
+    buffett_style: '/avatars/warren_buffett.jpg',
+    munger_style: '/avatars/charlie_munger.jpg',
+    dalio_style: '/avatars/default.jpg',
+    soros_style: '/avatars/default.jpg',
+    lynch_style: '/avatars/peter_lynch.jpg',
+    // Legacy SUMMON_POOL ids (keep for backward compat)
+    fundamental: '/avatars/fundamental_analyst.jpg',
+    macro: '/avatars/default.jpg',
+    sentiment: '/avatars/sentiment_analyst.jpg',
+    quant: '/avatars/default.jpg',
+    technical: '/avatars/technical_analyst.jpg',
+    risk: '/avatars/default.jpg',
+    sector: '/avatars/default.jpg',
+    contrarian: '/avatars/default.jpg',
+    // ROUNDTABLE_AGENTS initials
+    FA: '/avatars/fundamental_analyst.jpg',
+    MS: '/avatars/default.jpg',
+    SE: '/avatars/sentiment_analyst.jpg',
+    QT: '/avatars/default.jpg',
+    TA: '/avatars/technical_analyst.jpg',
+    RA: '/avatars/default.jpg',
+    SS: '/avatars/default.jpg',
+    DA: '/avatars/default.jpg',
+    // Backend analyst snake_case keys (from hedge-fund agent)
+    technical_analyst: '/avatars/technical_analyst.jpg',
+    fundamentals_analyst: '/avatars/fundamental_analyst.jpg',
+    sentiment_analyst: '/avatars/sentiment_analyst.jpg',
+    news_sentiment_analyst: '/avatars/sentiment_analyst.jpg',
+    valuation_analyst: '/avatars/default.jpg',
+    growth_analyst: '/avatars/default.jpg',
+    risk_management_analyst: '/avatars/default.jpg',
+    // Guru snake_case keys (from hedge-fund agent)
+    warren_buffett: '/avatars/warren_buffett.jpg',
+    ben_graham: '/avatars/ben_graham.jpg',
+    peter_lynch: '/avatars/peter_lynch.jpg',
+    charlie_munger: '/avatars/charlie_munger.jpg',
+    aswath_damodaran: '/avatars/aswath_damodaran.jpg',
+    cathie_wood: '/avatars/cathie_wood.jpg',
+    michael_burry: '/avatars/michael_burry.jpg',
+    stanley_druckenmiller: '/avatars/stanley_druckenmiller.jpg',
+    nassim_taleb: '/avatars/nassim_taleb.jpg',
+    bill_ackman: '/avatars/bill_ackman.jpg',
+    phil_fisher: '/avatars/phil_fisher.jpg',
+    mohnish_pabrai: '/avatars/mohnish_pabrai.jpg',
+    rakesh_jhunjhunwala: '/avatars/rakesh_jhunjhunwala.jpg',
+    // Pretty display names (fallback)
+    'Warren Buffett': '/avatars/warren_buffett.jpg',
+    'Ben Graham': '/avatars/ben_graham.jpg',
+    'Peter Lynch': '/avatars/peter_lynch.jpg',
+    'Charlie Munger': '/avatars/charlie_munger.jpg',
+    'Aswath Damodaran': '/avatars/aswath_damodaran.jpg',
+    'Cathie Wood': '/avatars/cathie_wood.jpg',
+    'Michael Burry': '/avatars/michael_burry.jpg',
+    'Stanley Druckenmiller': '/avatars/stanley_druckenmiller.jpg',
+    'Nassim Taleb': '/avatars/nassim_taleb.jpg',
+    'Bill Ackman': '/avatars/bill_ackman.jpg',
+    'Phil Fisher': '/avatars/phil_fisher.jpg',
+    'Mohnish Pabrai': '/avatars/mohnish_pabrai.jpg',
+    'Rakesh Jhunjhunwala': '/avatars/rakesh_jhunjhunwala.jpg',
+    'Fundamental Analyst': '/avatars/fundamental_analyst.jpg',
+    'Technical Analyst': '/avatars/technical_analyst.jpg',
+    'Sentiment Engine': '/avatars/sentiment_analyst.jpg',
+};
 
-const AGENT_ICON = (_initials: string) => ROBOT_ICON;
+const getAgentAvatar = (nameOrId: string) => AVATAR_MAP[nameOrId] || '/avatars/default.jpg';
+
+/** Convert snake_case key to display name: "fundamentals_analyst" → "Fundamentals Analyst" */
+const prettyAgentName = (raw: string) =>
+    AVATAR_MAP[raw] ? raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : raw;
+
+const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: string }> = ({ nameOrId, size = 24, className = '' }) => {
+    const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 3) : 1;
+    const renderSize = Math.round(size * dpr);
+    return (
+        <img src={getAgentAvatar(nameOrId)} alt={nameOrId} width={renderSize} height={renderSize}
+            className={`rounded-full object-cover shrink-0 ${className}`}
+            style={{ width: size, height: size, imageRendering: 'auto' }}
+            loading="eager" decoding="async" />
+    );
+};
 
 /** Build RoundtableData from a real consensus_done result */
 const buildRoundtableFromConsensus = (result: any): RoundtableData => {
@@ -638,92 +799,48 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) =>
 };
 
 // ─── RoundtableView Component ──────────────────────────
-const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean }> = ({ data, isWaiting, isLive }) => {
-    // Empty / waiting state: show the roundtable graphic with agents but no rounds
+const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean; hideHeader?: boolean;
+    summonPhase?: 'idle' | 'loading' | 'narrating' | 'selecting'; selectedSummonIds?: Set<string>;
+    onSummonToggle?: (id: string) => void; onSummonConfirm?: () => void;
+}> = ({ data, isWaiting, isLive, hideHeader,
+    summonPhase = 'idle', selectedSummonIds, onSummonToggle, onSummonConfirm }) => {
+    // Empty / waiting state: show summon flow OR waiting placeholder
     if (data.rounds.length === 0) {
-        const emptyAgents = ROUNDTABLE_AGENTS;
-        const E_SIZE = 220, E_CTR = E_SIZE / 2, E_R = 72, E_AV = 38, E_HALF = E_AV / 2;
-        const emptyPositions = emptyAgents.map((_, i) => {
-            const a = (i / emptyAgents.length) * 2 * Math.PI - Math.PI / 2;
-            return { x: E_CTR + E_R * Math.cos(a), y: E_CTR + E_R * Math.sin(a) };
-        });
         return (
             <div className="flex flex-col h-full bg-white">
-                <div className="px-5 py-4 border-b border-gray-100">
-                    <h2 className="text-[14px] font-bold text-gray-900">Roundtable Consensus</h2>
-                    <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
-                </div>
-                <div className="flex-1 flex flex-col items-center justify-center px-5">
-                    <div className="relative" style={{ width: E_SIZE, height: E_SIZE + 24 }}>
-                        <svg className="absolute pointer-events-none" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE }} viewBox={`0 0 ${E_SIZE} ${E_SIZE}`}>
-                            <circle cx={E_CTR} cy={E_CTR} r={E_R + 26} fill="none" stroke="#f5f5f5" strokeWidth="1" />
-                            <circle cx={E_CTR} cy={E_CTR} r={E_R} fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4 4" />
-                            {emptyPositions.map((p, i) => (
-                                <line key={i} x1={E_CTR} y1={E_CTR} x2={p.x} y2={p.y} stroke="#f0f0f0" strokeWidth="1" strokeDasharray="3 3" />
-                            ))}
-                        </svg>
-                        {/* Center indicator */}
-                        <div className="absolute flex items-center justify-center" style={{ left: E_CTR - 26, top: E_CTR - 26, width: 52, height: 52 }}>
+                {!hideHeader && (
+                    <div className="px-5 py-4 border-b border-gray-100">
+                        <h2 className="text-[14px] font-bold text-gray-900">Roundtable Graph</h2>
+                        <p className="text-[11px] text-gray-400 mt-0.5">Multi-agent discussion panel</p>
+                    </div>
+                )}
+                {summonPhase !== 'idle' && selectedSummonIds && onSummonToggle && onSummonConfirm ? (
+                    <SummonCharactersView
+                        phase={summonPhase as 'loading' | 'selecting'}
+                        selectedIds={selectedSummonIds}
+                        onToggle={onSummonToggle}
+                        onConfirm={onSummonConfirm}
+                    />
+                ) : (
+                    <div className="flex-1 flex flex-col items-center justify-center px-5">
+                        <div className="w-16 h-16 rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center mb-4">
                             {isWaiting ? (
-                                <div className="w-[52px] h-[52px] rounded-full bg-blue-50/80 border-2 border-blue-200 flex flex-col items-center justify-center">
-                                    <div className="flex gap-[3px] mb-1">
-                                        {[0, 1, 2].map(d => (
-                                            <div key={d} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${d * 0.2}s` }} />
-                                        ))}
-                                    </div>
-                                    <span className="text-[8px] text-blue-400 font-bold">PREP</span>
+                                <div className="flex gap-[3px]">
+                                    {[0, 1, 2].map(d => (
+                                        <div key={d} className="w-[5px] h-[5px] rounded-full bg-blue-400 rt-pulse-dot" style={{ animationDelay: `${d * 0.2}s` }} />
+                                    ))}
                                 </div>
                             ) : (
-                                <div className="w-[52px] h-[52px] rounded-full bg-gray-50 border-2 border-gray-200 flex items-center justify-center">
-                                    <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
-                                </div>
+                                <span className="text-[10px] text-gray-300 font-bold">IDLE</span>
                             )}
                         </div>
-                        {/* Agent avatars — orbit when waiting */}
                         {isWaiting ? (
-                            <div className="absolute rt-orbit" style={{ left: 0, top: 0, width: E_SIZE, height: E_SIZE + 24, transformOrigin: `${E_CTR}px ${E_CTR}px` }}>
-                                {emptyAgents.map((agent, i) => {
-                                    const pos = emptyPositions[i];
-                                    const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                                    return (
-                                        <div key={agent.initials} className="absolute flex flex-col items-center rt-counter-orbit"
-                                            style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV, transformOrigin: `${E_HALF}px ${E_HALF}px` }}>
-                                            <div className="rounded-full flex items-center justify-center text-white shadow-sm ring-2 ring-blue-200/40 ring-offset-1"
-                                                style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.8 }}>
-                                                {AGENT_ICON(agent.initials)}
-                                            </div>
-                                            <span className="text-[8px] text-gray-500 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                                {agent.name}
-                                            </span>
-                                        </div>
-                                    );
-                                })}
-                            </div>
+                            <p className="text-[12px] font-medium text-blue-500">Analyzing & gathering data...</p>
                         ) : (
-                            emptyAgents.map((agent, i) => {
-                                const pos = emptyPositions[i];
-                                const color = AGENT_COLORS[agent.initials] || '#6b7280';
-                                return (
-                                    <div key={agent.initials} className="absolute flex flex-col items-center"
-                                        style={{ left: pos.x - E_HALF, top: pos.y - E_HALF, width: E_AV }}>
-                                        <div className="rounded-full flex items-center justify-center text-white/50 shadow-sm"
-                                            style={{ backgroundColor: color, width: E_AV, height: E_AV, opacity: 0.45 }}>
-                                            {AGENT_ICON(agent.initials)}
-                                        </div>
-                                        <span className="text-[8px] text-gray-400 mt-1 whitespace-nowrap font-medium leading-none text-center">
-                                            {agent.name}
-                                        </span>
-                                    </div>
-                                );
-                            })
+                            <p className="text-[12px] text-gray-400 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
                         )}
                     </div>
-                    {isWaiting ? (
-                        <p className="text-[12px] font-medium text-blue-500 mt-4">Analyzing & gathering data...</p>
-                    ) : (
-                        <p className="text-[12px] text-gray-400 mt-4 text-center leading-relaxed">Waiting for a <span className="font-medium text-gray-500">Roundtable</span> discussion</p>
-                    )}
-                </div>
+                )}
             </div>
         );
     }
@@ -733,7 +850,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
     return (
         <div className="flex flex-col h-full bg-white">
             <div className="px-5 py-4 border-b border-gray-100">
-                <h2 className="text-[14px] font-bold text-gray-900">Roundtable Consensus</h2>
+                <h2 className="text-[14px] font-bold text-gray-900">Roundtable Graph</h2>
                 <p className="text-[11px] text-gray-400 mt-0.5">{data.rounds.length} round{data.rounds.length > 1 ? 's' : ''} of discussion</p>
             </div>
 
@@ -804,9 +921,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                                                                     const color = AGENT_COLORS[a.initials] || '#6b7280';
                                                                     return (
                                                                         <div key={a.initials} className="flex items-center gap-1 bg-gray-50 rounded-full pl-0.5 pr-2 py-0.5">
-                                                                            <div className="w-5 h-5 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: color }}>
-                                                                                <span className="[&>svg]:w-2.5 [&>svg]:h-2.5">{AGENT_ICON(a.initials)}</span>
-                                                                            </div>
+                                                                            <AgentAvatarImg nameOrId={a.name} size={20} />
                                                                             <span className="text-[10px] font-medium text-gray-600">{a.name}</span>
                                                                             <span className="text-[9px] text-gray-400">{a.confidence}%</span>
                                                                         </div>
@@ -818,9 +933,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
                                                     ) : (
                                                         <div className="flex items-center justify-between mb-2">
                                                             <div className="flex items-center gap-2">
-                                                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: AGENT_COLORS[group.agents[0].initials] || '#6b7280' }}>
-                                                                    <span className="[&>svg]:w-3 [&>svg]:h-3">{AGENT_ICON(group.agents[0].initials)}</span>
-                                                                </div>
+                                                                <AgentAvatarImg nameOrId={group.agents[0].name} size={24} />
                                                                 <span className="text-[12px] font-semibold text-gray-800">{group.agents[0].name}</span>
                                                             </div>
                                                             <span className="text-[11px] font-bold text-gray-500">{group.agents[0].confidence}%</span>
@@ -898,7 +1011,130 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
     );
 };
 
-// ─── ThinkingInlineTrigger (one-liner that opens right side panel) ───
+// ─── Tool → real data-source domain mapping ─────────────────────────
+const TOOL_SOURCE_DOMAINS: Record<string, string[]> = {
+    get_realtime_quote:         ['eastmoney.com', 'sina.com.cn'],
+    get_daily_history:          ['eastmoney.com', 'tushare.pro'],
+    get_chip_distribution:      ['eastmoney.com'],
+    get_stock_info:             ['eastmoney.com', 'finance.sina.com.cn'],
+    search_stock_news:          ['google.com', 'bocha.cn', 'tavily.com'],
+    search_comprehensive_intel: ['google.com', 'brave.com', 'bocha.cn'],
+    get_market_indices:         ['eastmoney.com'],
+    get_sector_rankings:        ['eastmoney.com'],
+    analyze_trend:              ['eastmoney.com'],
+    calculate_ma:               ['eastmoney.com'],
+    get_volume_analysis:        ['eastmoney.com'],
+    analyze_pattern:            ['eastmoney.com'],
+    get_analysis_context:       ['loka-db'],
+    get_skill_backtest_summary: ['loka-db'],
+    get_strategy_backtest_summary: ['loka-db'],
+    get_stock_backtest_summary: ['loka-db'],
+};
+
+// ─── SummonCharactersView — bubble selection for roundtable participants ───
+const SummonCharactersView: React.FC<{
+    phase: 'loading' | 'selecting';
+    selectedIds: Set<string>;
+    onToggle: (id: string) => void;
+    onConfirm: () => void;
+}> = ({ phase, selectedIds, onToggle, onConfirm }) => {
+    if (phase === 'loading') {
+        return (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 py-16">
+                <div className="relative w-16 h-16">
+                    <div className="absolute inset-0 rounded-full border-[3px] border-blue-100" />
+                    <div className="absolute inset-0 rounded-full border-[3px] border-blue-400 border-t-transparent animate-spin" />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                        <svg className="w-6 h-6 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="9" cy="7" r="3" /><circle cx="15" cy="7" r="3" />
+                            <path d="M3 21v-1a4 4 0 014-4h2M13 16h4a4 4 0 014 4v1" />
+                        </svg>
+                    </div>
+                </div>
+                <div className="text-center space-y-1">
+                    <p className="text-[13px] text-gray-700 font-medium">Summoning analysts for your question…</p>
+                    <p className="text-[11px] text-gray-400">Summoning analysts for this discussion</p>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex-1 flex flex-col min-h-0">
+            <div className="px-5 py-3 shrink-0">
+                <p className="text-[12px] text-gray-500">Select analysts for this discussion, or continue directly</p>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4">
+                {/* ── All agents in one grid: system (locked) + toggleable ── */}
+                <div className="flex flex-wrap justify-center gap-5 content-center">
+                    {SUMMON_POOL.map((agent, i) => {
+                        const isSystem = agent.group === 'system';
+                        const selected = selectedIds.has(agent.id);
+                        if (isSystem) {
+                            return (
+                                <div key={agent.id}
+                                    className="flex flex-col items-center gap-1.5 relative group"
+                                    style={{ animation: `summon-pop 0.4s ease-out ${i * 0.05}s both` }}
+                                >
+                                    <div className="relative w-[56px] h-[56px] rounded-full overflow-hidden opacity-50 grayscale-[30%] cursor-default">
+                                        <AgentAvatarImg nameOrId={agent.id} size={56} />
+                                        <div className="absolute bottom-0 right-0 w-[16px] h-[16px] bg-gray-400 rounded-full flex items-center justify-center">
+                                            <svg className="w-[8px] h-[8px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                            </svg>
+                                        </div>
+                                    </div>
+                                    <span className="text-[10px] font-semibold text-gray-400 text-center leading-tight max-w-[68px]">{agent.name}</span>
+                                    <span className="text-[9px] text-gray-400 text-center leading-tight max-w-[68px]">{agent.role}</span>
+                                    {/* Tooltip */}
+                                    <div className="absolute -top-9 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-[9px] rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-30 shadow-lg">
+                                        Auto-Assigned
+                                        <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[3px] border-r-[3px] border-t-[3px] border-l-transparent border-r-transparent border-t-gray-800" />
+                                    </div>
+                                </div>
+                            );
+                        }
+                        return (
+                            <button key={agent.id}
+                                onClick={() => onToggle(agent.id)}
+                                className="flex flex-col items-center gap-1.5 group transition-all"
+                                style={{ animation: `summon-pop 0.4s ease-out ${i * 0.05}s both` }}
+                            >
+                                <div className={`relative w-[56px] h-[56px] rounded-full overflow-hidden
+                                    transition-all duration-200 cursor-pointer ${selected
+                                        ? 'ring-[2.5px] ring-offset-2 ring-blue-400 scale-105 shadow-lg'
+                                        : 'opacity-45 grayscale hover:opacity-75 hover:grayscale-0'
+                                    }`}
+                                >
+                                    <AgentAvatarImg nameOrId={agent.id} size={56} />
+                                    {selected && (
+                                        <div className="absolute -top-0.5 -right-0.5 w-[18px] h-[18px] bg-blue-500 rounded-full flex items-center justify-center shadow-sm">
+                                            <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                            </svg>
+                                        </div>
+                                    )}
+                                </div>
+                                <span className={`text-[10px] font-semibold text-center leading-tight max-w-[68px] transition-colors ${selected ? 'text-gray-800' : 'text-gray-400'}`}>{agent.name}</span>
+                                <span className="text-[9px] text-gray-400 text-center leading-tight max-w-[68px]">{agent.role}</span>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+            <div className="px-5 py-4 border-t border-gray-100 shrink-0">
+                <button onClick={onConfirm}
+                    disabled={selectedIds.size === 0}
+                    className="w-full py-2.5 bg-gray-900 text-white text-[13px] font-semibold rounded-xl hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                    Continue · {selectedIds.size} analyst{selectedIds.size > 1 ? 's' : ''}
+                </button>
+            </div>
+        </div>
+    );
+};
+
+// ─── ThinkingInlineTrigger (Grok-style with staged progress rows) ──────
 const ThinkingInlineTrigger: React.FC<{
     thinking: ThinkingFlow;
     onOpen: () => void;
@@ -908,37 +1144,47 @@ const ThinkingInlineTrigger: React.FC<{
     const durLabel =
         typeof dur === 'number' && !Number.isNaN(dur) ? String(dur) : '?';
     const activeModule = thinking.modules.find(m => m.status === 'active');
+    const trace = thinking.toolTrace || [];
 
-    // ── Single cycling label that changes every 3s ──
-    const phaseMsgs: Record<string, string[]> = useMemo(() => ({
-        search: ['Searching the web...', 'Scanning market feeds...', 'Checking social signals...', 'Reading financial data...', 'Crawling news sources...'],
-        analysis: ['Analyzing data...', 'Cross-referencing sources...', 'Evaluating fundamentals...', 'Identifying key patterns...'],
-        simulation: ['Running simulations...', 'Modeling scenarios...', 'Stress-testing thesis...', 'Simulating guru perspectives...'],
-        consensus: ['Reaching consensus...', 'Weighing expert views...', 'Forming final opinion...', 'Calculating conviction...'],
-    }), []);
-    const [msgIdx, setMsgIdx] = useState(0);
-    useEffect(() => {
-        if (!thinking.isActive) return;
-        setMsgIdx(0);
-        const iv = setInterval(() => setMsgIdx(i => i + 1), 3000);
-        return () => clearInterval(iv);
-    }, [thinking.isActive, activeModule?.type]);
-
-    const label = useMemo(() => {
+    // ── Line 1: summary title ──
+    const phaseLabel = useMemo(() => {
         if (!thinking.isActive) return `Loka completed in ${durLabel}s`;
-        const trace = thinking.toolTrace;
-        const running = trace?.filter(t => t.status === 'running');
-        // If something is actively fetching, show that specifically
-        if (activeModule?.type === 'search' && running && running.length > 0) {
-            return `Fetching ${running[0].displayName}...`;
-        }
         const type = activeModule?.type || 'search';
-        const msgs = phaseMsgs[type] || phaseMsgs.search;
-        return msgs[msgIdx % msgs.length];
-    }, [thinking.isActive, thinking.toolTrace, activeModule, msgIdx, durLabel, phaseMsgs]);
+        const labels: Record<string, string> = {
+            search: 'Searching the web',
+            analysis: 'Analyzing data',
+            simulation: 'Running simulations',
+            consensus: 'Reaching consensus',
+        };
+        return labels[type] || 'Thinking';
+    }, [thinking.isActive, activeModule, durLabel]);
+
+    // ── Capsule items: only show items for currently-running tools ──
+    const visibleCapsules = useMemo(() => {
+        if (!thinking.isActive || trace.length === 0) return [];
+        // Only show items from tools that are still running
+        const runningTools = trace.filter(t => t.status === 'running');
+        if (runningTools.length === 0) return [];
+        const seen = new Set<string>();
+        const items: { label: string; isDomain: boolean }[] = [];
+        for (const t of runningTools) {
+            if (t.displayName && !seen.has('a:' + t.displayName)) {
+                seen.add('a:' + t.displayName);
+                items.push({ label: t.displayName, isDomain: false });
+            }
+            const domains = (t.tool && TOOL_SOURCE_DOMAINS[t.tool]) || [];
+            for (const d of domains) {
+                if (d === 'loka-db' || seen.has('d:' + d)) continue;
+                seen.add('d:' + d);
+                items.push({ label: d, isDomain: true });
+            }
+        }
+        return items.slice(-5);
+    }, [trace, thinking.isActive]);
 
     const isSimple = thinking.routedMode === 'fast';
 
+    // Simple mode: single line, no panel open
     if (isSimple) {
         return (
             <div className="flex items-center gap-2 py-1.5 mb-2">
@@ -947,20 +1193,35 @@ const ThinkingInlineTrigger: React.FC<{
                 ) : (
                     <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
                 )}
-                <span className="text-[13px] font-medium text-gray-400">{label}</span>
+                <span className="text-[13px] font-medium text-gray-400">{phaseLabel}</span>
             </div>
         );
     }
 
+    // Full mode — arrow stays aligned to line 1 (items-center on the top row)
     return (
-        <button onClick={onOpen} className="group flex items-center gap-2 py-1.5 mb-2 hover:opacity-80 transition-opacity">
-            {thinking.isActive ? (
-                <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-            ) : (
-                <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+        <button onClick={onOpen} className="group py-1.5 mb-2 hover:opacity-80 transition-opacity text-left">
+            {/* Top row: spinner/check + title + arrow — fixed alignment */}
+            <div className="inline-flex items-center gap-2">
+                {thinking.isActive ? (
+                    <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                ) : (
+                    <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                )}
+                <span className="text-[13px] font-medium text-gray-500">{phaseLabel}</span>
+                <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+            </div>
+            {/* Capsule row below */}
+            {thinking.isActive && visibleCapsules.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 mt-1.5 pl-6 animate-fade-hint">
+                    {visibleCapsules.map((item, i) => (
+                        <span key={i} className={`inline-flex items-center px-1.5 py-[1px] rounded-full text-[10px] font-medium ${item.isDomain ? 'bg-gray-100 text-gray-500' : 'bg-blue-50 text-blue-500'}`}>
+                            {item.isDomain && <span className="w-1 h-1 rounded-full bg-blue-400 mr-1 opacity-60" />}
+                            {item.label}
+                        </span>
+                    ))}
+                </div>
             )}
-            <span key={label} className="text-[13px] font-medium text-gray-500 animate-fade-hint">{label}</span>
-            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
         </button>
     );
 };
@@ -990,10 +1251,30 @@ const PlatformLogo: React.FC<{ platform: string }> = ({ platform }) => {
     }
 };
 
+/** Prefer real site favicon from domain, fallback to platform icon. */
+const SourceFavicon: React.FC<{ source: SearchSource }> = ({ source }) => {
+    const [imgFailed, setImgFailed] = useState(false);
+    const hasDomain = !!source.domain && source.domain.trim().length > 0;
+    const shouldUseImage = hasDomain && !imgFailed;
+
+    if (shouldUseImage) {
+        return (
+            <img
+                src={`https://www.google.com/s2/favicons?domain=${source.domain}&sz=32`}
+                alt=""
+                className="w-4 h-4 rounded-sm shrink-0"
+                onError={() => setImgFailed(true)}
+            />
+        );
+    }
+
+    return <PlatformLogo platform={source.favicon} />;
+};
+
 const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
     const content = (
         <>
-            <div className="shrink-0 w-5 h-5 flex items-center justify-center"><PlatformLogo platform={source.favicon} /></div>
+            <div className="shrink-0 w-5 h-5 flex items-center justify-center"><SourceFavicon source={source} /></div>
             <span className="text-[12px] text-gray-600 truncate flex-1 leading-snug">{source.title}</span>
             <span className="text-[10px] text-gray-400 shrink-0 ml-2">{source.domain}</span>
         </>
@@ -1019,7 +1300,11 @@ const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
 const ThinkingProcessSidePanel: React.FC<{
     thinking: ThinkingFlow;
     onClose: () => void;
-}> = ({ thinking, onClose }) => {
+    hideHeader?: boolean;
+    chatMode?: string;
+}> = ({ thinking, onClose, hideHeader, chatMode }) => {
+
+    const isRoundtable = thinking.routedMode === 'roundtable' || chatMode === 'roundtable';
 
     // ── Sub-section renderers for Search Module ──
     const SocialSubSection: React.FC<{ section: SearchSubSection }> = ({ section }) => (
@@ -1215,16 +1500,13 @@ const ThinkingProcessSidePanel: React.FC<{
         const ungrouped = hasGroups ? [] : d.panelists;
 
         const renderPanelist = (p: SimPanelist, i: number) => {
-            const colors = ['bg-blue-100 text-blue-700', 'bg-purple-100 text-purple-700', 'bg-emerald-100 text-emerald-700', 'bg-amber-100 text-amber-700', 'bg-rose-100 text-rose-700', 'bg-cyan-100 text-cyan-700'];
-            const initials = p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2);
+            const displayName = prettyAgentName(p.name);
             return (
                 <div key={i} className="flex items-center gap-2.5">
-                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${colors[i % colors.length]}`}>
-                        {initials}
-                    </div>
+                    <AgentAvatarImg nameOrId={p.name} size={24} />
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                            <span className="text-[12px] font-medium text-gray-700">{p.name}</span>
+                            <span className="text-[12px] font-medium text-gray-700">{displayName}</span>
                             {p.status === 'active' && <span className="text-[10px] text-blue-500 animate-pulse">analyzing...</span>}
                         </div>
                         {p.status === 'done' && p.verdict && (
@@ -1312,12 +1594,15 @@ const ThinkingProcessSidePanel: React.FC<{
     const DoneModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const dur = (mod.data as any)?.duration;
         const showDur = typeof dur === 'number' && !Number.isNaN(dur) && dur > 0;
+        // For roundtable, also compute elapsed from startTime
+        const elapsed = thinking.startTime ? ((Date.now() - thinking.startTime) / 1000).toFixed(1) : null;
+        const displayDur = showDur ? `${dur}s` : (elapsed && !thinking.isActive ? `${elapsed}s` : null);
         return (
             <div className="pt-3 border-t border-gray-100">
                 <div className="flex items-center gap-2.5">
                     <StatusIcon status="done" />
                     <span className="text-[14px] font-bold text-gray-900">Done</span>
-                    {showDur && <span className="text-[11px] text-gray-400 ml-auto">{dur}s</span>}
+                    {displayDur && <span className="text-[11px] text-gray-400 ml-auto">{displayDur}</span>}
                 </div>
             </div>
         );
@@ -1347,42 +1632,68 @@ const ThinkingProcessSidePanel: React.FC<{
         );
     };
 
+    // ── Compute ordered modules list ──
+    const orderedModules = (() => {
+        const mods: { key: string; element: React.ReactNode }[] = [];
+
+        // Search module
+        const searchMod = thinking.modules.find(m => m.type === 'search');
+        const hasToolTrace = thinking.toolTrace && thinking.toolTrace.length > 0;
+        const hasPlanning = !!thinking.planningMessage;
+        const hasSearch = !!searchMod;
+        if (hasToolTrace || hasPlanning || hasSearch) {
+            mods.push({
+                key: 'search',
+                element: <SearchModule
+                    mod={searchMod || { type: 'search', status: 'active' }}
+                    toolTrace={thinking.toolTrace}
+                    planningMessage={thinking.planningMessage}
+                />,
+            });
+        }
+
+        // Remaining modules
+        for (const mod of thinking.modules) {
+            if (mod.type === 'search') continue;
+            if (mod.type === 'done' && mod.status !== 'completed') continue;
+            switch (mod.type) {
+                case 'analysis':
+                    mods.push({ key: 'analysis', element: <AnalysisModule mod={mod} /> });
+                    break;
+                case 'simulation':
+                    mods.push({ key: 'simulation', element: <SimulationModule mod={mod} /> });
+                    break;
+                case 'consensus':
+                    mods.push({ key: 'consensus', element: <ConsensusModule mod={mod} /> });
+                    break;
+                case 'web3':
+                    mods.push({ key: 'web3', element: <Web3Module mod={mod} /> });
+                    break;
+                case 'done':
+                    mods.push({ key: 'done', element: <DoneModule mod={mod} /> });
+                    break;
+            }
+        }
+        return mods;
+    })();
+
     return (
         <div className="flex flex-col h-full bg-white">
+            {!hideHeader && (
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <div>
                     <h2 className="text-[14px] font-bold text-gray-900">Thinking Process</h2>
+                    {isRoundtable && <p className="text-[10px] text-indigo-500 font-medium mt-0.5">Roundtable Mode</p>}
                 </div>
                 <button onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
             </div>
+            )}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {/* Searching module: combines Basic Data (toolTrace) + Market Data (search module) */}
-                {(() => {
-                    const searchMod = thinking.modules.find(m => m.type === 'search');
-                    const hasToolTrace = thinking.toolTrace && thinking.toolTrace.length > 0;
-                    const hasPlanning = !!thinking.planningMessage;
-                    const hasSearch = !!searchMod;
-                    if (hasToolTrace || hasPlanning || hasSearch) {
-                        return <SearchModule
-                            mod={searchMod || { type: 'search', status: 'active' }}
-                            toolTrace={thinking.toolTrace}
-                            planningMessage={thinking.planningMessage}
-                        />;
-                    }
-                    return null;
-                })()}
-                {thinking.modules.filter(m => (m.type !== 'done' && m.type !== 'search') || (m.type === 'done' && m.status === 'completed')).map((mod) => {
-                    switch (mod.type) {
-                        case 'analysis': return <AnalysisModule key="analysis" mod={mod} />;
-                        case 'simulation': return <SimulationModule key="simulation" mod={mod} />;
-                        case 'consensus': return <ConsensusModule key="consensus" mod={mod} />;
-                        case 'web3': return <Web3Module key="web3" mod={mod} />;
-                        case 'done': return <DoneModule key="done" mod={mod} />;
-                        default: return null;
-                    }
-                })}
+                {orderedModules.map((item) => (
+                    <div key={item.key}>{item.element}</div>
+                ))}
             </div>
         </div>
     );
@@ -1444,26 +1755,111 @@ interface SuperAgentChatProps {
     initialChatMode?: 'auto' | 'fast' | 'roundtable';
 }
 
-/** Replace bare [Source Name] citations with [Source Name](url) using the sources list */
+/** Replace bare citations with linked tags and remove malformed URL fragments. */
 function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     if (!sources || sources.length === 0) return text;
-    // Build lookup: lowercase title/domain → url
-    const lookup = new Map<string, string>();
+
+    const lookup = new Map<string, { url: string; label: string }>();
     for (const s of sources) {
-        if (s.url) {
-            lookup.set(s.title.toLowerCase(), s.url);
-            lookup.set(s.domain.toLowerCase(), s.url);
-            // Also match without trailing domain suffixes like ".com"
-            const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
-            if (short.length > 2) lookup.set(short, s.url);
+        if (!s.url) continue;
+        const entry = { url: s.url, label: s.domain };
+        lookup.set(s.title.toLowerCase(), entry);
+        lookup.set(s.domain.toLowerCase(), entry);
+
+        const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
+        if (short.length > 2) lookup.set(short, entry);
+
+        const parts = short.split('.');
+        if (parts.length >= 2) {
+            const reversed = parts.reverse().join(' ');
+            if (!lookup.has(reversed)) lookup.set(reversed, entry);
         }
+
+        const base = s.domain.replace(/\..*$/, '').toLowerCase();
+        if (base.length > 3 && !lookup.has(base)) lookup.set(base, entry);
     }
-    // Match [text] NOT followed by ( — bare bracket citations
-    return text.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
-        const url = lookup.get(label.toLowerCase().trim());
-        if (url) return `[${label}](${url})`;
-        return match; // no match — leave as-is
+
+    let result = text.replace(/\r\n/g, '\n');
+
+    // Remove standalone leaked URL path fragments: /stocks/articles/xxx.html)
+    result = result.replace(
+        /(^|[\s（(])\/[a-z0-9._%+-]+(?:\/[a-z0-9._%+-]+){2,}(?:\.[a-z0-9]{2,8})?\)?(?=\s|$|[，。；,.;!?])/gim,
+        '$1',
+    );
+
+    // Remove path garbage attached right after a valid citation/link.
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\/[^\s)）]+/g, '$1');
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\.[a-z]{2,8}\/[^\s)）]+/gi, '$1');
+
+    // Remove malformed punycode/url shards that often leak from broken markdown parsing.
+    result = result.replace(/\[\s*xn--[^\]]+\]/gi, '');
+    result = result.replace(/\bxn--[a-z0-9-]{6,}(?:\.[a-z0-9-]+)*\b/gi, '');
+
+    // Remove duplicate consecutive markdown links: [A](url)[A](url) → [A](url)
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\1/g, '$1');
+
+    // Strip stray closing parens/brackets after a valid markdown link
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*[)\]]+/g, '$1');
+
+    // Fix bare bracket citations [text] NOT followed by (
+    result = result.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
+        const hit = lookup.get(label.toLowerCase().trim());
+        if (hit) return `[${label}](${hit.url})`;
+        return match;
     });
+
+    const phrases: { pattern: string; url: string }[] = [];
+    const seenPatterns = new Set<string>();
+    for (const s of sources) {
+        if (!s.url) continue;
+
+        const addPattern = (pattern: string) => {
+            const key = pattern.toLowerCase();
+            if (key.length <= 3 || seenPatterns.has(key)) return;
+            seenPatterns.add(key);
+            phrases.push({ pattern, url: s.url! });
+        };
+
+        addPattern(s.domain);
+        const short = s.domain.replace(/\.\w+$/, '');
+        addPattern(short);
+
+        const parts = short.toLowerCase().split('.');
+        if (parts.length >= 2) {
+            const reversed = parts
+                .reverse()
+                .map(p => p.charAt(0).toUpperCase() + p.slice(1))
+                .join(' ');
+            addPattern(reversed);
+        }
+
+        addPattern(s.domain.replace(/\..*$/, ''));
+    }
+    phrases.sort((a, b) => b.pattern.length - a.pattern.length);
+
+    for (const { pattern, url } of phrases) {
+        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`\\b(${escaped})\\b`, 'gi');
+        let replaced = false;
+        result = result.replace(re, (m, captured, offset: number, whole: string) => {
+            if (replaced) return m;
+            const prev = whole[offset - 1] || '';
+            const next2 = whole.slice(offset + captured.length, offset + captured.length + 2);
+            // Skip if already part of markdown link syntax [label](url)
+            if (prev === '[' || next2 === '](') return m;
+            // Skip if this token is likely in a raw URL fragment
+            if (/[/:@.-]/.test(prev)) return m;
+            replaced = true;
+            return `[${captured}](${url})`;
+        });
+    }
+
+    // Remove parenthesised citation wrappers like （[Link](url) 数据）
+    result = result.replace(/[（(]\s*(\[[^\]]+\]\([^)]+\))\s*(?:数据|data|来源|source)?\s*[)）]/gi, ' $1');
+
+    // Clean repeated blank lines left by cleanup.
+    result = result.replace(/\n{3,}/g, '\n\n').trim();
+    return result;
 }
 
 const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
@@ -1548,9 +1944,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         })(),
     );
     // ─── Right Side Panel ─────────────────────────────────────
-    const [showGraphPanel, setShowGraphPanel] = useState(() => (initialChatMode ?? 'auto') === 'roundtable');
+    const [showGraphPanel, setShowGraphPanel] = useState(false);
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
+    const [panelTab, setPanelTab] = useState<'process' | 'graph'>('process');
+    const [summonPhase, setSummonPhase] = useState<'idle' | 'loading' | 'narrating' | 'selecting'>('idle');
+    const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
+    const [pendingRtText, setPendingRtText] = useState<string | null>(null);
+    const summonBypassRef = useRef(false);
     const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
@@ -1765,10 +2166,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
 
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
-        // Match a bold/heading title containing question/watch/关注/问题 keywords,
-        // then a bullet list. Allow optional trailing tags/text after the bullet list.
-        // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
-        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑|思考)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)/i;
+        // Only match explicit "follow-up question" blocks near the tail to avoid truncating main report sections.
+        // Examples: **Questions to watch**, ## Follow-up Questions, **你可能还会问**
+        const pattern =
+            /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:questions?\s+to\s+watch|follow[\s-]*up\s+questions?|next\s+questions?|key\s+questions?|你可能还会问|后续问题|追问建议|延伸问题|相关问题|值得(?:继续)?关注(?:的)?问题)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)])\s+.+\n?)+)\s*$/i;
         const match = content.match(pattern);
         if (match) {
             const questions = match[1].split('\n')
@@ -1776,8 +2177,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
                 .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').replace(/\*\*/g, '').trim())
                 .filter(Boolean);
-            if (questions.length > 0) {
-                // Strip everything from the questions heading onwards
+            // Guardrail: only strip when the follow-up block is at the end and contains multiple items.
+            const isTailBlock = typeof match.index === 'number' && match.index > content.length * 0.6;
+            if (questions.length >= 2 && isTailBlock) {
                 return { body: content.slice(0, match.index).trimEnd(), questions };
             }
         }
@@ -1820,6 +2222,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
     // Stock quote cards keyed by message index
     const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
+    /** X/Twitter account snapshot from research (followers / joined) */
+    const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string }>>({});
     const currentConsensus = (() => {
         // First try the active message's consensus
         if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
@@ -1929,14 +2333,29 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
         requestAnimationFrame(() => {
-            const el = lastUserMsgRef.current;
-            const container = scrollContainerRef.current;
-            if (el && container) {
-                const elTop = el.offsetTop - container.offsetTop;
-                container.scrollTo({ top: elTop - 24, behavior: 'smooth' });
-            }
+            requestAnimationFrame(() => {
+                const el = lastUserMsgRef.current;
+                const container = scrollContainerRef.current;
+                if (el && container) {
+                    const containerRect = container.getBoundingClientRect();
+                    const elRect = el.getBoundingClientRect();
+                    const scrollTarget = elRect.top - containerRect.top + container.scrollTop - 24;
+                    container.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+                }
+            });
         });
     }, []);
+
+    // Auto-scroll when a new user message is added (catches all paths: handleSend, follow-up, suggestions)
+    const prevMsgCountRef = useRef(0);
+    useEffect(() => {
+        const lastMsg = messages[messages.length - 1];
+        if (messages.length > prevMsgCountRef.current && lastMsg?.role === 'user') {
+            // Double rAF ensures React has committed the DOM
+            requestAnimationFrame(() => requestAnimationFrame(() => scrollUserMsgToTop()));
+        }
+        prevMsgCountRef.current = messages.length;
+    }, [messages.length, scrollUserMsgToTop]);
 
     // ─── Real Socket.IO Integration ────────────────────────────
     const activeMsgIdxRef = useRef<number>(-1);
@@ -1970,9 +2389,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         const onStarted = (data: { sessionId: string; mode: string; route: string }) => {
             saLog('← agent:chat:started', { expect: sessionId, got: data?.sessionId, route: data?.route, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
-            setThinkingProcesses(prev => ({
-                ...prev, [activeMsgIdxRef.current]: { modules: [], isActive: true, route: data.route }
-            }));
+            setThinkingProcesses(prev => {
+                const existing = prev[activeMsgIdxRef.current];
+                return {
+                    ...prev, [activeMsgIdxRef.current]: {
+                        modules: existing?.modules ?? [],
+                        isActive: true,
+                        route: data.route,
+                        selectedAgentIds: existing?.selectedAgentIds,
+                        startTime: existing?.startTime ?? Date.now(),
+                        routedMode: existing?.routedMode,
+                    }
+                };
+            });
         };
 
         const onModule = (data: { sessionId: string; moduleType: string; status: string; data?: any }) => {
@@ -1993,7 +2422,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     const incoming = data.status as string;
                     const isDowngradeToActive =
                         (incoming === 'active' || incoming === 'analyzing') &&
-                        (prevStatus === 'completed' || prevStatus === 'done' || prevStatus === 'concluded');
+                        prevStatus === 'completed';
                     const nextStatus = isDowngradeToActive ? prevStatus : incoming;
                     mods[modIdx] = { ...prev, status: nextStatus as any };
                     if (data.data) {
@@ -2061,7 +2490,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             setThinkingProcesses(prev => {
                 const msgIdx = activeMsgIdxRef.current;
                 if (!prev[msgIdx]) return prev;
-                return { ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } };
+                const flow = prev[msgIdx];
+                const finalizedModules = (flow.modules || []).map((m) => {
+                    const nextStatus = m.status === 'active' ? 'completed' : m.status;
+                    if (m.type === 'consensus' && m.data) {
+                        const c = m.data as ConsensusModuleData;
+                        const finalizedConsensus: ConsensusModuleData = {
+                            ...c,
+                            status: 'concluded',
+                            round: typeof c.round === 'number' ? c.round : 1,
+                            maxRounds: typeof c.maxRounds === 'number' ? c.maxRounds : (typeof c.round === 'number' ? c.round : 1),
+                        };
+                        return { ...m, status: nextStatus, data: finalizedConsensus };
+                    }
+                    return { ...m, status: nextStatus };
+                });
+                return { ...prev, [msgIdx]: { ...flow, modules: finalizedModules, isActive: false } };
             });
         };
 
@@ -2197,6 +2641,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
         };
 
+        const onXProfile = (data: { sessionId: string; profile: { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string } }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setXProfileCards(prev => ({ ...prev, [msgIdx]: data.profile }));
+        };
+
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
             setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; delete n[-1]; return n; });
@@ -2234,6 +2685,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
         socket.on('agent:chat:quote', onQuote);
+        socket.on('agent:chat:x_profile', onXProfile);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
         socket.on('agent:chat:html_failed', onHtmlFailed);
@@ -2251,6 +2703,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
             socket.off('agent:chat:quote', onQuote);
+            socket.off('agent:chat:x_profile', onXProfile);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
             socket.off('agent:chat:html_failed', onHtmlFailed);
@@ -2378,7 +2831,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                             images: pending!.userImages || [],
                             mode: chatMode,
                             sessionId,
-                            agentId: chatSelectedAgent,
+                            agentId: msgIdx <= 1 ? chatSelectedAgent : undefined,
                         });
                         return;
                     }
@@ -2454,12 +2907,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
 
         setActiveGraphMsgIdx(msgIdx);
-        // Keep graph panel open in roundtable mode so user sees the waiting state
-        if (chatMode !== 'roundtable') setShowGraphPanel(false);
+        // In roundtable mode, show the unified panel with process tab
+        if (chatMode === 'roundtable') {
+            setShowThinkingPanel(true);
+            setPanelTab('process');
+        }
+        setShowGraphPanel(false);
 
-        setThinkingProcesses(prev => ({
-            ...prev, [msgIdx]: { modules: [], isActive: true, route: 'Routing...' }
-        }));
+        setThinkingProcesses(prev => {
+            const existing = prev[msgIdx];
+            return {
+                ...prev,
+                [msgIdx]: {
+                    modules: existing?.modules ?? [],
+                    isActive: true,
+                    route: 'Routing...',
+                    selectedAgentIds: existing?.selectedAgentIds,
+                    startTime: existing?.startTime,
+                    routedMode: existing?.routedMode,
+                },
+            };
+        });
 
         try {
             sessionStorage.setItem(
@@ -2481,7 +2949,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             images: images || [],
             mode: chatMode,
             sessionId,
-            agentId: chatSelectedAgent,
+            // Only send agentId on the first message (the one that started this session).
+            // Subsequent messages let the router decide based on content — prevents
+            // sticky guru-council mode when user switches topics.
+            agentId: currentMessages.length === 0 ? chatSelectedAgent : undefined,
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -2513,13 +2984,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
+                    const restoredXProfiles: Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string }> = {};
                     const restoredHtml: Record<number, string> = {};
                     const restoredViewModes: Record<number, 'docs' | 'web'> = {};
                     history.forEach(
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; xProfileCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     restoredThinking[idx] = {
                                         ...meta.thinkingFlow,
@@ -2531,6 +3003,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                 }
                                 if (meta.quoteCard) {
                                     restoredQuotes[idx] = meta.quoteCard;
+                                }
+                                if (meta.xProfileCard) {
+                                    restoredXProfiles[idx] = meta.xProfileCard;
                                 }
                                 if (meta.htmlReport) {
                                     restoredHtml[idx] = meta.htmlReport;
@@ -2547,6 +3022,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     }
                     if (Object.keys(restoredQuotes).length > 0) {
                         setQuoteCards(prev => ({ ...prev, ...restoredQuotes }));
+                    }
+                    if (Object.keys(restoredXProfiles).length > 0) {
+                        setXProfileCards(prev => ({ ...prev, ...restoredXProfiles }));
                     }
                     if (Object.keys(restoredHtml).length > 0) {
                         setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
@@ -2595,11 +3073,55 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         const userMsg: Message = { role: 'user', content: initialMessage, images: initialImages, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
+
+        // Roundtable mode: show inline summon panel instead of sending immediately
+        if (chatMode === 'roundtable') {
+            saLog('initial: roundtable → show summon flow', { initialPreview: initialMessage.slice(0, 80) });
+            setPendingRtText(initialMessage);
+            setSummonPhase('loading');
+            setSelectedSummonIds(new Set(DEFAULT_SUMMON_IDS));
+            // Narrative sequence: loading → narrating → selecting
+            setTimeout(() => { setSummonPhase('narrating'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 1400);
+            setTimeout(() => { setSummonPhase('selecting'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 3200);
+            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 300);
+            return;
+        }
+
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages, initialImages); setTimeout(scrollUserMsgToTop, 80); }, 50);
-    }, [initialMessage, initialImages, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages, initialImages); setTimeout(scrollUserMsgToTop, 150); }, 50);
+    }, [initialMessage, initialImages, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode]);
 
     // ─── Handle send ────────────────────────────────────────
+    const handleSummonConfirm = useCallback(() => {
+        const text = pendingRtText;
+        if (!text) return;
+        setSummonPhase('idle');
+        setPendingRtText(null);
+        summonBypassRef.current = true;
+        // Open side panel on Roundtable Graph tab
+        setShowThinkingPanel(true);
+        setShowGraphPanel(false);
+        setSourcePanelData(null);
+        setPanelTab('graph');
+        // Store roundtable context in thinking process
+        const agentIds = [...selectedSummonIds];
+        const nextMsgIdx = messages.length; // assistant message will be at this index
+        setThinkingProcesses(prev => {
+            const flow = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
+            return {
+                ...prev,
+                [nextMsgIdx]: {
+                    ...flow,
+                    selectedAgentIds: agentIds,
+                    startTime: Date.now(),
+                    routedMode: 'roundtable',
+                },
+            };
+        });
+        sendToAI(text, messages);
+        setTimeout(scrollUserMsgToTop, 150);
+    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop]);
+
     const handleSend = () => {
         if (isStreaming) return;
         const hasUploadingImages = chatImageAttachments.some(img => img.status === 'uploading');
@@ -2610,6 +3132,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         if (!inputText.trim() && uploadedImages.length === 0) return;
         const text = inputText.trim();
         saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
+        // Roundtable mode: intercept to show summon character selection inline
+        if (chatMode === 'roundtable' && !summonBypassRef.current) {
+            const userMsg: Message = { role: 'user', content: text, images: uploadedImages, timestamp: new Date().toLocaleTimeString() };
+            setMessages(prev => [...prev, userMsg]);
+            setInputText('');
+            setPendingRtText(text);
+            setSummonPhase('loading');
+            setSelectedSummonIds(new Set(DEFAULT_SUMMON_IDS));
+            // Narrative sequence: loading → narrating → selecting
+            setTimeout(() => { setSummonPhase('narrating'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 1400);
+            setTimeout(() => { setSummonPhase('selecting'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 3200);
+            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 300);
+            return;
+        }
+
+        summonBypassRef.current = false;
         const userMsg: Message = { role: 'user', content: text, images: uploadedImages, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
@@ -2617,7 +3155,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         sendToAI(text, newMessages, uploadedImages);
         clearChatImages();
         // Scroll so the user’s question appears at the top
-        setTimeout(scrollUserMsgToTop, 80);
+        setTimeout(scrollUserMsgToTop, 150);
     };
 
     const handleStop = () => {
@@ -2652,33 +3190,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             <style>{`
                 @keyframes voice-bar { 0%,100%{height:3px} 50%{height:10px} }
                 .voice-bar { min-height: 3px; display:inline-block; border-radius:9999px; background:#9ca3af; }
+                @keyframes summon-float { 0% { opacity: 0; transform: translateY(30px) scale(0.6); } 50% { opacity: 0.7; transform: translateY(-6px) scale(1.04); } 70% { transform: translateY(3px) scale(0.98); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+                @keyframes summon-hover { 0%,100% { transform: translate(-50%,-50%) translateY(0); } 50% { transform: translate(-50%,-50%) translateY(-6px); } }
+                @keyframes summon-text { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+                @keyframes summon-dot { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
+                @keyframes summon-glow { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } 50% { box-shadow: 0 0 12px 2px rgba(34,197,94,0.25); } }
             `}</style>
-            {/* ══ Header: chat title + graph toggle ══ */}
+            {/* ══ Header: chat title ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <div className="flex items-center gap-1.5">
-                    <button
-                    onClick={() => {
-                        setShowGraphPanel(p => {
-                            if (!p && activeGraphMsgIdx === null) {
-                                // Find latest msg with a thinking process
-                                for (let j = messages.length - 1; j >= 0; j--) {
-                                    if (thinkingProcesses[j]) { setActiveGraphMsgIdx(j); break; }
-                                }
-                            }
-                            return !p;
-                        });
-                    }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${showGraphPanel ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
-                        }`}
-                >
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                        <circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="5" r="2.5" /><circle cx="19" cy="19" r="2.5" />
-                        <path d="M7.5 11L16.5 6M7.5 13L16.5 18" />
-                    </svg>
-                    Roundtable Graph
-                </button>
-                </div>
             </div>
 
             {/* ══ Content Row ══ */}
@@ -2792,6 +3312,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                             setActiveGraphMsgIdx(i);
                                                             setShowThinkingPanel(true);
                                                             setShowGraphPanel(false);
+                                                            setSourcePanelData(null);
+                                                            if (chatMode === 'roundtable') setPanelTab('process');
                                                         }}
                                                     />
                                                 )}
@@ -2826,7 +3348,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                         </div>
                                                         {consensusResults[i] && (
                                                             <button
-                                                                onClick={() => { setActiveGraphMsgIdx(i); setShowGraphPanel(true); setShowThinkingPanel(false); }}
+                                                                onClick={() => {
+                                                                    setActiveGraphMsgIdx(i);
+                                                                    setSourcePanelData(null);
+                                                                    if (chatMode === 'roundtable') {
+                                                                        setShowThinkingPanel(true);
+                                                                        setShowGraphPanel(false);
+                                                                        setPanelTab('graph');
+                                                                    } else {
+                                                                        setShowThinkingPanel(false);
+                                                                        setShowGraphPanel(true);
+                                                                    }
+                                                                }}
                                                                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
                                                             >
                                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
@@ -2840,6 +3373,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                     const isChinese = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
                                                     return <p className="text-[13px] text-gray-400 italic">{isChinese ? '回复已取消' : 'Response cancelled'}</p>;
                                                 })() : msg.content ? (() => {
+                                                    const liveSources = mergeSearchSources(
+                                                        msg.sources,
+                                                        collectThinkingSearchSources(thinkingProcesses[i]),
+                                                    );
                                                     const cleaned = msg.role === 'assistant' ? stripInternalResearchCitations(msg.content) : msg.content;
                                                     const { body: bodyNoQuestions } = msg.role === 'assistant' && !msg.isStreaming
                                                         ? extractFollowUpQuestions(cleaned)
@@ -2848,6 +3385,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                         ? extractQuoteSnapshot(bodyNoQuestions)
                                                         : { quote: null, body: bodyNoQuestions };
                                                     const liveQuote = quoteCards[i];
+                                                    const liveXProfile = xProfileCards[i];
                                                     const showWebView = msgViewMode[i] === 'web' && htmlReports[i];
                                                     const showWebSkeleton = msgViewMode[i] === 'web' && htmlGenerating[i] && !htmlReports[i];
                                                     return (
@@ -2934,6 +3472,48 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                             })()}
                                                             {/* Fallback: markdown-parsed quote card */}
                                                             {!liveQuote && quote && <QuoteCard quote={quote} />}
+                                                            {liveXProfile && (() => {
+                                                                const fmtN = (n?: number) => {
+                                                                    if (n == null || Number.isNaN(n)) return '—';
+                                                                    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+                                                                    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+                                                                    return String(n);
+                                                                };
+                                                                const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
+                                                                const isZh = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
+                                                                return (
+                                                                    <a
+                                                                        href={liveXProfile.profileUrl}
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                        className="mb-4 block rounded-2xl overflow-hidden ring-1 ring-black/[0.06] bg-gradient-to-br from-slate-50/90 via-white to-white shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] hover:ring-slate-300/80 transition-all"
+                                                                    >
+                                                                        <div className="px-5 py-4 flex flex-col gap-3">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-black text-white text-[11px] font-black">𝕏</span>
+                                                                                <div className="min-w-0">
+                                                                                    <p className="text-[15px] font-bold text-gray-900 leading-tight">@{liveXProfile.handle}</p>
+                                                                                    <p className="text-[11px] text-gray-400 mt-0.5">{isZh ? '账号快照（来自检索数据）' : 'Account snapshot (from search)'}</p>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="grid grid-cols-3 gap-3">
+                                                                                <div>
+                                                                                    <p className="text-[9px] uppercase tracking-wider text-gray-400 font-semibold">{isZh ? '粉丝' : 'Followers'}</p>
+                                                                                    <p className="text-[16px] font-bold text-gray-900 tabular-nums">{fmtN(liveXProfile.followers)}</p>
+                                                                                </div>
+                                                                                <div>
+                                                                                    <p className="text-[9px] uppercase tracking-wider text-gray-400 font-semibold">{isZh ? '关注' : 'Following'}</p>
+                                                                                    <p className="text-[16px] font-bold text-gray-900 tabular-nums">{fmtN(liveXProfile.following)}</p>
+                                                                                </div>
+                                                                                <div className="min-w-0">
+                                                                                    <p className="text-[9px] uppercase tracking-wider text-gray-400 font-semibold">{isZh ? '加入' : 'Joined'}</p>
+                                                                                    <p className="text-[13px] font-semibold text-gray-800 truncate">{liveXProfile.joinedDisplay || '—'}</p>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    </a>
+                                                                );
+                                                            })()}
                                                             {showWebView ? (
                                                                 <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
                                                             ) : showWebSkeleton ? (
@@ -2950,41 +3530,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                 </div>
                                                             ) : (
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                                <SourcesProvider sources={msg.sources || []}>
-                                                                    {renderMarkdownContent(injectSourceUrls(body, msg.sources), i)}
+                                                                <SourcesProvider sources={liveSources}>
+                                                                    {renderMarkdownContent(injectSourceUrls(body, liveSources), i)}
                                                                 </SourcesProvider>
                                                             </div>
                                                             )}
+
                                                         </>
                                                     );
                                                 })() : null}
                                                 {/* Sources bar — click to open side panel */}
-                                                {!msg.isStreaming && msg.sources && msg.sources.length > 0 && (
-                                                    <div className="mt-4 pt-3 border-t border-gray-100">
-                                                        <button
-                                                            onClick={() => setSourcePanelData(msg.sources!)}
-                                                            className="flex items-center gap-2 group cursor-pointer hover:bg-gray-50 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
-                                                        >
-                                                            <div className="flex items-center gap-1.5">
-                                                                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
-                                                                <span className="text-[12px] font-medium text-gray-500 group-hover:text-gray-700">{msg.sources.length} sources</span>
-                                                            </div>
-                                                            <div className="flex -space-x-1">
-                                                                {msg.sources.slice(0, 5).map((s, si) => (
-                                                                    <div key={si} className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center" title={s.title}>
-                                                                        <span className="text-[8px] text-gray-500 font-bold uppercase">{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
-                                                                    </div>
-                                                                ))}
-                                                                {msg.sources.length > 5 && (
-                                                                    <div className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center">
-                                                                        <span className="text-[8px] text-gray-400 font-medium">+{msg.sources.length - 5}</span>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                            <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-                                                        </button>
-                                                    </div>
-                                                )}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
                                                         {/* Copy — hide for cancelled */}
@@ -3015,7 +3570,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                 const prev = messages.slice(0, i);
                                                                 setMessages(prev);
                                                                 sendToAI(userText, prev);
-                                                                setTimeout(scrollUserMsgToTop, 80);
+                                                                setTimeout(scrollUserMsgToTop, 150);
                                                             }}
                                                             title="Retry"
                                                             className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-all"
@@ -3040,6 +3595,48 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                         >
                                                             <svg className="w-3.5 h-3.5" fill={reactions[i] === 'disliked' ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z" /><path d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17" /></svg>
                                                         </button>
+                                                        {/* Sources — inline after reactions */}
+                                                        {msg.sources && msg.sources.length > 0 && (
+                                                            <>
+                                                                <div className="w-px h-4 bg-gray-200 mx-1" />
+                                                                <button
+                                                                    onClick={() => { setSourcePanelData(msg.sources!); setShowThinkingPanel(false); setShowGraphPanel(false); }}
+                                                                    className="group inline-flex items-center gap-2 h-7 rounded-lg px-2 text-gray-300 hover:text-gray-500 hover:bg-gray-50 transition-all"
+                                                                >
+                                                                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                                                    <span className="text-[12px] font-medium text-gray-500 group-hover:text-gray-700">{msg.sources.length} sources</span>
+                                                                    <div className="flex -space-x-1">
+                                                                        {(() => {
+                                                                            const seen = new Set<string>();
+                                                                            return msg.sources!.filter(s => {
+                                                                                const key = s.domain?.toLowerCase() || s.favicon;
+                                                                                if (seen.has(key)) return false;
+                                                                                seen.add(key);
+                                                                                return true;
+                                                                            }).slice(0, 5).map((s, si) => (
+                                                                                <div key={si} className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center overflow-hidden" title={s.title}>
+                                                                                    {s.domain ? (
+                                                                                        <img
+                                                                                            src={`https://www.google.com/s2/favicons?domain=${s.domain}&sz=32`}
+                                                                                            alt=""
+                                                                                            className="w-3.5 h-3.5"
+                                                                                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden'); }}
+                                                                                        />
+                                                                                    ) : null}
+                                                                                    <span className={`text-[8px] text-gray-500 font-bold uppercase ${s.domain ? 'hidden' : ''}`}>{(s.favicon === 'web' ? s.domain : s.favicon).slice(0, 2)}</span>
+                                                                                </div>
+                                                                            ));
+                                                                        })()}
+                                                                        {msg.sources.length > 5 && (
+                                                                            <div className="w-5 h-5 rounded-full bg-gray-100 border border-white flex items-center justify-center">
+                                                                                <span className="text-[8px] text-gray-400 font-medium">+{msg.sources.length - 5}</span>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                                                                </button>
+                                                            </>
+                                                        )}
                                                     </div>
                                                 )}
                                                 {/* Follow-up questions */}
@@ -3062,7 +3659,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                             setMessages(newMsgs);
                                                                             setInputText('');
                                                                             sendToAI(q, newMsgs);
-                                                                            setTimeout(scrollUserMsgToTop, 80);
+                                                                            setTimeout(scrollUserMsgToTop, 150);
                                                                         }}
                                                                         className="group flex items-start gap-1.5 text-left text-[12px] text-gray-400 hover:text-gray-600 py-1 transition-colors cursor-pointer leading-snug"
                                                                     >
@@ -3079,6 +3676,211 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                     )}
                                 </div>
                             ))}
+
+                            {/* ── Inline Summon Panel (appears in message area during roundtable) ── */}
+                            {summonPhase !== 'idle' && (() => {
+                                const isCN = /[\u4e00-\u9fff]/.test(pendingRtText || '');
+                                const t = {
+                                    sensing:   isCN ? '正在感知你的问题…'              : 'Sensing your question…',
+                                    attracting: isCN ? '有把握的角色正在被吸引过来 ✨'  : 'Confident analysts are being drawn in ✨',
+                                    ready:     isCN ? '选择参与圆桌讨论的分析师'        : 'Pick analysts for this roundtable',
+                                    selectTip: isCN ? '点击下方头像添加更多分析师' : 'Tap avatars below to add more analysts',
+                                    btn:       isCN
+                                        ? `开始圆桌讨论 · ${selectedSummonIds.size + SUMMON_POOL.filter(a => a.group === 'system').length} 位分析师`
+                                        : `Start roundtable · ${selectedSummonIds.size + SUMMON_POOL.filter(a => a.group === 'system').length} analysts`,
+                                    cancel:    isCN ? '取消' : 'Cancel',
+                                    systemTip: isCN ? '自动分配' : 'Auto-Assigned',
+                                };
+                                return (
+                                <div className="flex items-start gap-3">
+                                    <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden" style={{ maxWidth: 680 }}>
+                                            {summonPhase === 'loading' || summonPhase === 'narrating' ? (
+                                                /* ── Phase 1+2: Narrative loading ── */
+                                                <div className="px-6 py-7">
+                                                    {/* Pulsing dots */}
+                                                    <div className="flex items-center gap-1.5 mb-5">
+                                                        {[0, 1, 2].map(i => (
+                                                            <div key={i} className="w-2 h-2 rounded-full bg-emerald-400"
+                                                                style={{ animation: `summon-dot 1.4s ease-in-out ${i * 0.2}s infinite` }} />
+                                                        ))}
+                                                    </div>
+                                                    {/* Narrative text lines */}
+                                                    <div className="space-y-3">
+                                                        <p className="text-[13px] text-gray-700 leading-relaxed"
+                                                            style={{ animation: 'summon-text 0.6s ease-out both' }}
+                                                        >
+                                                            {t.sensing}
+                                                        </p>
+                                                        {summonPhase === 'narrating' && (
+                                                            <p className="text-[13px] text-gray-700 leading-relaxed"
+                                                                style={{ animation: 'summon-text 0.6s ease-out 0.15s both' }}
+                                                            >
+                                                                {t.attracting}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                /* ── Phase 3: selected row + scatter pool (system locked inline) ── */
+                                                <div>
+                                                    <div className="px-5 pt-4 pb-2">
+                                                        <p className="text-[13px] font-semibold text-gray-800"
+                                                            style={{ animation: 'summon-text 0.4s ease-out both' }}
+                                                        >{t.ready}</p>
+                                                        <p className="text-[11px] text-gray-400 mt-0.5"
+                                                            style={{ animation: 'summon-text 0.4s ease-out 0.1s both' }}
+                                                        >{t.selectTip}</p>
+                                                    </div>
+
+                                                    {/* ── Selected row: system (locked) + user-chosen, all in one row ── */}
+                                                    <div className="px-4 pt-1 pb-1">
+                                                        <div className="flex flex-wrap items-center gap-3 min-h-[68px] px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-200 border-dashed"
+                                                            style={{ animation: 'summon-text 0.3s ease-out both' }}
+                                                        >
+                                                            {/* System agents — locked, non-interactive */}
+                                                            {SUMMON_POOL.filter(a => a.group === 'system').map((agent, i) => (
+                                                                <div key={agent.id}
+                                                                    className="flex flex-col items-center gap-0.5 relative group"
+                                                                    style={{ animation: `summon-float 0.5s cubic-bezier(0.22,1,0.36,1) ${i * 0.04}s both` }}
+                                                                >
+                                                                    <div className="relative w-[46px] h-[46px] rounded-full overflow-hidden opacity-50 grayscale-[30%] cursor-default">
+                                                                        <AgentAvatarImg nameOrId={agent.id} size={46} />
+                                                                        <div className="absolute bottom-0 right-0 w-[13px] h-[13px] bg-gray-400 rounded-full flex items-center justify-center">
+                                                                            <svg className="w-[7px] h-[7px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                                                            </svg>
+                                                                        </div>
+                                                                    </div>
+                                                                    <span className="text-[11px] font-medium text-gray-400 text-center leading-tight whitespace-nowrap max-w-[60px] truncate">{isCN ? agent.nameCN : agent.name}</span>
+                                                                    {/* Tooltip */}
+                                                                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-[9px] rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-30 shadow-lg">
+                                                                        {t.systemTip}
+                                                                        <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-[3px] border-r-[3px] border-t-[3px] border-l-transparent border-r-transparent border-t-gray-800" />
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                            {/* User-selected agents — click to deselect */}
+                                                            {SUMMON_POOL.filter(a => a.group !== 'system' && selectedSummonIds.has(a.id)).map(agent => (
+                                                                <button key={agent.id}
+                                                                    onClick={() => setSelectedSummonIds(prev => { const n = new Set(prev); n.delete(agent.id); return n; })}
+                                                                    className="flex flex-col items-center gap-0.5 group transition-all duration-300"
+                                                                    title={isCN ? '点击取消选中' : 'Click to deselect'}
+                                                                >
+                                                                    <div className="relative w-[46px] h-[46px] rounded-full overflow-hidden ring-2 ring-offset-1 ring-emerald-500 shadow-md group-hover:ring-red-400 group-hover:shadow-red-100 transition-all duration-200">
+                                                                        <AgentAvatarImg nameOrId={agent.id} size={46} />
+                                                                        <div className="absolute inset-0 bg-red-500/0 group-hover:bg-red-500/20 transition-colors flex items-center justify-center">
+                                                                            <svg className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                                                                            </svg>
+                                                                        </div>
+                                                                    </div>
+                                                                    <span className="text-[11px] font-medium text-emerald-700 text-center leading-tight whitespace-nowrap max-w-[60px] truncate group-hover:max-w-none group-hover:overflow-visible">{isCN ? agent.nameCN : agent.name}</span>
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* ── Scatter pool — unselected user-toggleable agents ── */}
+                                                    <div className="px-3 py-2">
+                                                        <div className="relative" style={{ height: 320 }}>
+                                                            {(() => {
+                                                                const unselected = SUMMON_POOL.filter(a => a.group !== 'system' && !selectedSummonIds.has(a.id));
+                                                                if (unselected.length === 0) return (
+                                                                    <div className="flex items-center justify-center h-full">
+                                                                        <p className="text-[12px] text-gray-300">
+                                                                            {isCN ? '全部已选中' : 'All selected'}
+                                                                        </p>
+                                                                    </div>
+                                                                );
+                                                                const cx = 50, cy = 50;
+                                                                // Seeded random
+                                                                let seed = 0;
+                                                                for (let i = 0; i < (sessionId || 'x').length; i++) seed = ((seed << 5) - seed + (sessionId || 'x').charCodeAt(i)) | 0;
+                                                                const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return (seed & 0x7fffffff) / 2147483647; };
+
+                                                                // Place with random angle + radius
+                                                                type Pt = { x: number; y: number };
+                                                                const pts: Pt[] = unselected.map(() => {
+                                                                    const angle = rand() * Math.PI * 2;
+                                                                    const r = 14 + rand() * 28;
+                                                                    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) * 0.75 };
+                                                                });
+                                                                // Push apart
+                                                                const minDist = 22;
+                                                                for (let iter = 0; iter < 8; iter++) {
+                                                                    for (let i = 0; i < pts.length; i++) {
+                                                                        for (let j = i + 1; j < pts.length; j++) {
+                                                                            const dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y;
+                                                                            const d = Math.sqrt(dx * dx + dy * dy) || 0.1;
+                                                                            if (d < minDist) {
+                                                                                const push = (minDist - d) / 2 + 0.5;
+                                                                                const nx = dx / d, ny = dy / d;
+                                                                                pts[i].x -= nx * push; pts[i].y -= ny * push;
+                                                                                pts[j].x += nx * push; pts[j].y += ny * push;
+                                                                            }
+                                                                        }
+                                                                        pts[i].x = Math.max(10, Math.min(90, pts[i].x));
+                                                                        pts[i].y = Math.max(10, Math.min(90, pts[i].y));
+                                                                    }
+                                                                }
+
+                                                                return unselected.map((agent, ui) => {
+                                                                    const { x: px, y: py } = pts[ui];
+                                                                    const dist = Math.sqrt((px - cx) ** 2 + (py - cy) ** 2);
+                                                                    const distRatio = Math.min(dist / 42, 1);
+                                                                    const avatarSize = Math.round(50 - distRatio * 8);
+                                                                    return (
+                                                                        <button key={agent.id}
+                                                                            onClick={() => setSelectedSummonIds(prev => new Set([...prev, agent.id]))}
+                                                                            className="absolute flex flex-col items-center transition-all duration-400 ease-out group"
+                                                                            style={{
+                                                                                left: `${px}%`, top: `${py}%`,
+                                                                                transform: 'translate(-50%, -50%)',
+                                                                                animation: `summon-float 0.6s cubic-bezier(0.22,1,0.36,1) ${ui * 0.05}s both, summon-hover ${3 + (ui % 4) * 0.8}s ease-in-out ${ui * 0.3}s infinite`,
+                                                                                zIndex: Math.round(5 - distRatio * 4),
+                                                                            }}
+                                                                        >
+                                                                            <div className="relative rounded-full overflow-hidden transition-all duration-300 group-hover:scale-110 group-hover:shadow-md"
+                                                                                style={{
+                                                                                    width: avatarSize, height: avatarSize,
+                                                                                    opacity: 0.55 + (1 - distRatio) * 0.3,
+                                                                                    filter: `grayscale(${Math.round(distRatio * 60)}%)`,
+                                                                                }}
+                                                                            >
+                                                                                <AgentAvatarImg nameOrId={agent.id} size={avatarSize} />
+                                                                            </div>
+                                                                            <span className="mt-0.5 font-medium text-center leading-tight whitespace-nowrap transition-colors"
+                                                                                style={{ fontSize: 11, color: '#6b7280', opacity: 0.7 + (1 - distRatio) * 0.3 }}
+                                                                            >{isCN ? agent.nameCN : agent.name}</span>
+                                                                        </button>
+                                                                    );
+                                                                });
+                                                            })()}
+                                                        </div>
+                                                    </div>
+                                                    <div className="px-4 pb-4 pt-1 flex gap-2"
+                                                        style={{ animation: 'summon-text 0.4s ease-out 0.8s both' }}
+                                                    >
+                                                        <button onClick={() => { setSummonPhase('idle'); setPendingRtText(null); setMessages(prev => prev.slice(0, -1)); }}
+                                                            className="px-4 py-2.5 border border-gray-200 text-gray-500 text-[12px] font-medium rounded-xl hover:bg-gray-50 transition-colors"
+                                                        >{t.cancel}</button>
+                                                        <button onClick={handleSummonConfirm}
+                                                            disabled={selectedSummonIds.size === 0}
+                                                            className="flex-1 py-2.5 bg-emerald-500 text-white text-[12px] font-semibold rounded-xl hover:bg-emerald-600 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm shadow-emerald-200"
+                                                        >
+                                                            <span>{t.btn}</span>
+                                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            );})()}
+
                             <div ref={messagesEndRef} />
                         </div>
                     </div>
@@ -3190,11 +3992,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                 onClick={() => {
                                                                     setChatMode(m.id);
                                                                     setChatModeOpen(false);
-                                                                    // Auto-open Roundtable Graph when selecting roundtable mode
-                                                                    if (m.id === 'roundtable') {
-                                                                        setShowGraphPanel(true);
-                                                                        setShowThinkingPanel(false);
-                                                                    }
                                                                 }}
                                                                 className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
                                                             >
@@ -3262,18 +4059,69 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
 
                 </div>
 
-                {/* Thinking Process Side Panel */}
-                {showThinkingPanel && currentThinking && (
+                {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
+                {showThinkingPanel && chatMode === 'roundtable' && (
+                    <div className="w-[480px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
+                        {/* Tab bar */}
+                        <div className="flex items-center px-4 py-2.5 border-b border-gray-100 gap-1 shrink-0">
+                            <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                                <button onClick={() => setPanelTab('process')}
+                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
+                                        panelTab === 'process' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                                    }`}>Process</button>
+                                <button onClick={() => setPanelTab('graph')}
+                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
+                                        panelTab === 'graph' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                                    }`}>Roundtable Graph</button>
+                            </div>
+                            <div className="flex-1" />
+                            <button onClick={() => setShowThinkingPanel(false)}
+                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        {/* Content */}
+                        {panelTab === 'process' ? (
+                            currentThinking ? (
+                                <div className="flex-1 overflow-hidden">
+                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
+                                </div>
+                            ) : (
+                                <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
+                            )
+                        ) : (
+                            <div className="flex-1 overflow-hidden">
+                                <RoundtableView data={currentRoundtableData}
+                                    isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
+                                    isLive={isStreaming}
+                                    hideHeader
+                                    summonPhase={summonPhase}
+                                    selectedSummonIds={selectedSummonIds}
+                                    onSummonToggle={(id) => setSelectedSummonIds(prev => {
+                                        const next = new Set(prev);
+                                        next.has(id) ? next.delete(id) : next.add(id);
+                                        return next;
+                                    })}
+                                    onSummonConfirm={handleSummonConfirm}
+                                />
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Non-roundtable: original Thinking Process Side Panel */}
+                {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && (
                     <div className="w-[360px] shrink-0 border-l border-gray-100 overflow-hidden">
                         <ThinkingProcessSidePanel
                             thinking={currentThinking}
                             onClose={() => setShowThinkingPanel(false)}
+                            chatMode={chatMode}
                         />
                     </div>
                 )}
 
-                {/* Roundtable Consensus Panel */}
-                {showGraphPanel && !showThinkingPanel && (
+                {/* Standalone Roundtable Panel — only for non-roundtable mode fallback */}
+                {showGraphPanel && !showThinkingPanel && !sourcePanelData && chatMode !== 'roundtable' && (
                     <div className="w-[520px] shrink-0 border-l border-gray-100 overflow-hidden relative">
                         <button
                             onClick={() => setShowGraphPanel(false)}
@@ -3281,12 +4129,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
-                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && chatMode === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && chatMode === 'roundtable'} />
+                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && currentRoundtableData.rounds.length === 0} isLive={isStreaming} />
                     </div>
                 )}
 
                 {/* Sources Side Panel */}
-                {sourcePanelData && (
+                {sourcePanelData && !showThinkingPanel && (
                     <div className="w-[380px] shrink-0 border-l border-gray-100 flex flex-col bg-white overflow-hidden">
                         {/* Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">

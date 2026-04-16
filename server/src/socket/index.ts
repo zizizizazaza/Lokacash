@@ -3,7 +3,7 @@ import { Server } from 'socket.io';
 import { config } from '../config.js';
 import { verifyToken } from '../middleware/auth.js';
 import prisma from '../db.js';
-import { researchService } from '../services/research.service.js';
+import { researchService, type XProfileSnapshot } from '../services/research.service.js';
 import { web3ResearchService } from '../services/web3Research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
@@ -41,6 +41,23 @@ interface AgentChatImage {
   url: string;
   mime?: string;
   name?: string;
+}
+
+/** Fallback when the router omits `search.showXAccountProfile` (language-agnostic hints only). */
+function wantsTwitterProjectProfileHint(q: string): boolean {
+  return /推特|Twitter|推文|X平台|[\s，、]X[\s，、]|x\.com|社交平台.*(项目|账号)|调研.*(推特|Twitter|推文)|分析.*(推特|Twitter|推文)|twitter.*project/i.test(
+    q,
+  );
+}
+
+function pickXProfileForUser(profiles: XProfileSnapshot[], userContent: string): XProfileSnapshot | null {
+  if (!profiles.length) return null;
+  const q = userContent.toLowerCase();
+  for (const p of profiles) {
+    const h = p.handle.toLowerCase();
+    if (q.includes(h) || q.includes(`@${h}`)) return p;
+  }
+  return profiles[0];
 }
 
 function normalizeIncomingImages(images: unknown): AgentChatImage[] {
@@ -777,11 +794,16 @@ Text: "${query}"`;
         }
       }
 
-      // Guru Council mode: always trigger simulation
-      if (!hasImages && data.agentId === 'guru-council') {
+      // Guru Council mode: always trigger simulation + search (including with images)
+      if (data.agentId === 'guru-council') {
         plan.isSimpleChat = false;
         plan.queryType = 'guru-council';
         plan.capabilities.simulate.needed = true;
+        // Always search so gurus have real-world context and sources to cite
+        if (!plan.capabilities.search.needed) {
+          plan.capabilities.search.needed = true;
+          plan.capabilities.search.query = plan.capabilities.search.query || data.content;
+        }
         // Use tickers from routing if available, otherwise default to broad market
         if (!plan.capabilities.simulate.tickers?.length) {
           plan.capabilities.simulate.tickers = plan.capabilities.analysis?.tickers?.length
@@ -816,6 +838,12 @@ Text: "${query}"`;
         if (mentionedSet.size > 0) {
           plan.specificGurus = Array.from(mentionedSet);
         }
+      }
+
+      // Ensure search is always enabled for non-simple queries so sources are available for citations
+      if (!plan.isSimpleChat && !plan.capabilities.search.needed) {
+        plan.capabilities.search.needed = true;
+        plan.capabilities.search.query = plan.capabilities.search.query || data.content;
       }
       
       socket.emit('agent:chat:routed', { 
@@ -914,6 +942,7 @@ Text: "${query}"`;
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
+      let savedXProfileCard: Record<string, unknown> | null = null;
 
       if (plan.capabilities.search.needed) {
         emitter.emitModule('search', 'active', {
@@ -988,6 +1017,26 @@ Text: "${query}"`;
                 { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
               ]
             });
+            const xProfiles = res.xProfiles || [];
+            const routerXProfileFlag = plan?.capabilities?.search?.showXAccountProfile;
+            const shouldShowXProfileCard =
+              xProfiles.length &&
+              (routerXProfileFlag === true ||
+                (routerXProfileFlag !== false && wantsTwitterProjectProfileHint(userContent)));
+            if (shouldShowXProfileCard) {
+              const picked = pickXProfileForUser(xProfiles, userContent);
+              if (picked && (picked.followers != null || picked.following != null || picked.joinedDisplay || picked.joinedRaw)) {
+                const payload = {
+                  handle: picked.handle,
+                  profileUrl: `https://x.com/${encodeURIComponent(picked.handle)}`,
+                  followers: picked.followers,
+                  following: picked.following,
+                  joinedDisplay: picked.joinedDisplay || picked.joinedRaw || '',
+                };
+                savedXProfileCard = payload;
+                emitToUser(userId, 'agent:chat:x_profile', { sessionId, profile: payload });
+              }
+            }
             return { type: 'SEARCH', data: res.summary, sources: socialSources };
           }).catch(e => {
             emitter.emitModule('search', 'completed', {});
@@ -1131,14 +1180,31 @@ Text: "${query}"`;
                         }
                         return String(v);
                       };
-                      // Detect market from symbol code
+                      // Detect market from symbol code, router tickers, and user query
                       const detectMarket = (sym: string) => {
                         if (!sym) return undefined;
-                        if (/^\d{6}\.(SH|SS)$/.test(sym) || /^(sh|sz)\d{6}$/i.test(sym) || /^[036]\d{5}$/.test(sym))
+                        // Check the symbol itself
+                        if (/^\d{6}\.(SH|SZ|SS)$/i.test(sym) || /^(sh|sz)\d{6}$/i.test(sym) || /^[0-368]\d{5}$/.test(sym))
                           return isZh ? 'A股' : 'A-Share';
-                        if (/\.HK$/i.test(sym) || /^0[0-9]{4}\.?$/i.test(sym))
+                        if (/\.HK$/i.test(sym) || /^\d{4,5}\.HK$/i.test(sym))
                           return isZh ? '港股' : 'HK';
-                        if (/^[A-Z]{1,5}$/.test(sym) || /\.(US|NASDAQ|NYSE)$/i.test(sym))
+                        if (/\.(US|NASDAQ|NYSE)$/i.test(sym))
+                          return isZh ? '美股' : 'US';
+                        // Check router tickers for market suffix (more reliable than agent's raw code)
+                        const routerTickers = plan.capabilities.analysis.tickers || [];
+                        for (const t of routerTickers) {
+                          if (/\.(SH|SZ|SS)$/i.test(t)) return isZh ? 'A股' : 'A-Share';
+                          if (/\.HK$/i.test(t)) return isZh ? '港股' : 'HK';
+                          if (/\.(US|NASDAQ|NYSE)$/i.test(t)) return isZh ? '美股' : 'US';
+                        }
+                        // Check user query for market hints
+                        const query = data.content.toLowerCase();
+                        if (/港股|hk\b|恒生|腾讯|美团|小米|阿里巴巴|京东|网易|百度/.test(query))
+                          return isZh ? '港股' : 'HK';
+                        if (/a\s*股|沪深|上证|深证|创业板|科创板|茅台|平安|招商/.test(query))
+                          return isZh ? 'A股' : 'A-Share';
+                        // Default: 1-5 uppercase letters = US
+                        if (/^[A-Z]{1,5}$/.test(sym))
                           return isZh ? '美股' : 'US';
                         return undefined;
                       };
@@ -1163,10 +1229,20 @@ Text: "${query}"`;
                           turnover: q.turnover != null ? Number(q.turnover).toFixed(2) + '%' : undefined,
                       };
                       savedQuoteCard = quotePayload;
-                      emitToUser(userId, 'agent:chat:quote', {
-                        sessionId,
-                        quote: quotePayload,
-                      });
+                      // Validate: only emit the quote card if the stock name or symbol
+                      // reasonably matches the user's query (prevent wrong-stock cards)
+                      const queryLower = data.content.toLowerCase();
+                      const nameMatch = q.name && queryLower.includes(q.name.toLowerCase());
+                      const symMatch = q.symbol && queryLower.includes(q.symbol.toLowerCase());
+                      const tickerMatch = (plan.capabilities.analysis.tickers || []).some(
+                        (t: string) => t.toLowerCase().replace(/\.\w+$/, '') === (q.symbol || '').toLowerCase()
+                      );
+                      if (nameMatch || symMatch || tickerMatch) {
+                        emitToUser(userId, 'agent:chat:quote', {
+                          sessionId,
+                          quote: quotePayload,
+                        });
+                      }
                       } // end !isNaN(numPrice)
                     }
                   } catch (e) { }
@@ -1271,6 +1347,19 @@ Text: "${query}"`;
           contextString += `【${r.value.type} REPORT】\n${r.value.data}\n\n`;
         }
       });
+
+      // Append structured source URLs so the report LLM can produce inline citations
+      if (finalSocialSources.length > 0) {
+        contextString += "【VERIFIED SOURCE URLs — CITE THESE INLINE】\n";
+        contextString += "Copy-paste the markdown link after relevant claims. Each source MUST appear at least once in your report.\n";
+        finalSocialSources.forEach((s, i) => {
+          // Give the LLM ready-to-paste markdown links
+          const displayName = s.domain.replace(/^www\./, '').replace(/\.\w+$/, '');
+          const capitalName = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+          contextString += `  ${i + 1}. Ready-to-paste: [${capitalName}](${s.url}) — "${s.title}"\n`;
+        });
+        contextString += "\n";
+      }
 
       const isDeepResearch = data.mode === 'roundtable';
 
@@ -1442,7 +1531,7 @@ Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
 2. Section titles MUST be specific and analytical — not generic. Create proper research section titles (e.g. "收入放缓与利润弹性的博弈", "估值锚定：DCF vs 可比公司的分歧").
 3. Synthesize evidence across ALL data sources. Highlight where different data dimensions agree (conviction) and where they conflict (uncertainty).
 4. Never fabricate data. If exact numbers aren't available, state the directional finding and name the missing metric.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end.
+5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text, metrics. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 3000-6000 words. This is a deep research product — completeness and depth are expected. But every sentence must add analytical value. No filler.
 8. End with "Key Monitoring Dashboard" — this MUST be the absolute last section. Nothing after it.
@@ -1576,7 +1665,7 @@ Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Fundamental Analysis", "Valuation", "Financial Health", "Signal vs Noise", "Positioning", "Stress Test" etc. — these are internal labels, not output headings. Create engaging, specific headings (e.g. "广告引擎点火，但游戏拖了后腿", "23倍PE：贵还是便宜？", "多空交锋：谁在买？谁在跑？").
 3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
 4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end.
+5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 1500-3500 words. Depth over brevity, but no padding. Every sentence must earn its place. Cover ALL analysis dimensions — fundamental, valuation, financial, technical, and actionable trade setup.
 8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
@@ -1760,7 +1849,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 3. LANGUAGE: Match user's language entirely. Chinese query = all Chinese.
 4. Use actual data from context. Integrate search results + simulation signals + any financial data.
 5. Gurus can and should DISAGREE. Don't force consensus where data doesn't support it.
-6. Cite sources with inline links when available.
+6. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
 7. Length: 2000-4000 words. Each guru section should be substantial (150-300 words).
 8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
 `;
@@ -1799,7 +1888,8 @@ The HTML must:
   .guru-grid { display: flex; flex-direction: column; gap: 16px; margin-bottom: 2rem; }
   .guru-card { position: relative; border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 20px; }
   .guru-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding-right: 80px; }
-  .guru-avatar { width: 44px; height: 44px; border-radius: 50%; background: var(--color-background-secondary, #f5f5f5); display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 600; color: var(--color-text-secondary, #666); }
+  .guru-avatar { width: 48px; height: 48px; border-radius: 50%; background: #1a1a1a; border: 2px solid #1a1a1a; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: #fff; letter-spacing: -0.02em; flex-shrink: 0; overflow: hidden; }
+  .guru-avatar img { width: 100%; height: 100%; object-fit: cover; }
   .guru-name { font-size: 15px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); }
   .guru-framework { font-size: 12px; color: var(--color-text-tertiary, #999); }
   .guru-signal { position: absolute; top: 16px; right: 16px; display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
@@ -1895,7 +1985,7 @@ The HTML must:
 </div>
 
    CALC_OFFSET formula: offset = 289 * (1 - conviction_pct / 100). Example: 70% conviction → offset = 289 * 0.3 = 86.7. Choose stroke color by majority signal: #10b981 (bullish), #f43f5e (bearish), #f59e0b (neutral).
-3. Guru Cards: one card per guru (.guru-card) with avatar initial, name, framework, analysis paragraph, conviction bar. The signal badge (.guru-signal) is positioned at the TOP-RIGHT corner of the card via CSS absolute positioning — just add it as a direct child of .guru-card.
+3. Guru Cards: one card per guru (.guru-card) with photo avatar, name, framework, analysis paragraph, conviction bar. The signal badge (.guru-signal) is positioned at the TOP-RIGHT corner of the card via CSS absolute positioning — just add it as a direct child of .guru-card. For the avatar, use: <div class="guru-avatar"><img src="/avatars/GURU_KEY.jpg" alt="Name"></div> where GURU_KEY is one of: warren_buffett, ben_graham, peter_lynch, charlie_munger, aswath_damodaran, cathie_wood, michael_burry, stanley_druckenmiller, nassim_taleb, bill_ackman, phil_fisher, mohnish_pabrai, rakesh_jhunjhunwala. If the guru is not in the list, use <div class="guru-avatar">XX</div> with initials instead.
 4. Comparison Matrix: table showing all gurus × key dimensions (Signal, Conviction, Key Argument) — use .cmp-table
 5. Debate Points: key disagreements between gurus (.debate-item)
 6. Consensus Panel: weighted consensus, recommended action (.consensus-panel)
@@ -2342,8 +2432,6 @@ The HTML must:
           return;
         }
 
-        const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
-
         const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
         if (plan.capabilities.search.needed) flowModules.push({ type: 'search', status: 'completed', data: { variant: 'social', sources: finalSocialSources } });
         if (plan.capabilities.analysis.needed) flowModules.push({ type: 'analysis', status: 'completed', data: { stages: finalAnalysisStages } });
@@ -2525,6 +2613,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         if (consensusFlowData) {
           flowModules.push({ type: 'consensus', status: 'completed', data: consensusFlowData as unknown as Record<string, unknown> });
         }
+        const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
         flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
 
         await prisma.chatMessage.create({
@@ -2542,6 +2631,7 @@ Research context:\n${synFullContent}${langInstruction}`;
               },
               consensusResult: savedConsensusResult ?? undefined,
               quoteCard: savedQuoteCard ?? undefined,
+              xProfileCard: savedXProfileCard ?? undefined,
               sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
             })
           }
@@ -2622,6 +2712,7 @@ Research context:\n${synFullContent}${langInstruction}`;
                 route: 'Super Agent Orchestrator',
               },
               quoteCard: savedQuoteCard ?? undefined,
+              xProfileCard: savedXProfileCard ?? undefined,
               degraded: true,
               degradedReason: errMsg,
             }),

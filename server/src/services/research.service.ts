@@ -5,6 +5,32 @@ import { sourcesFromLast30DaysCompact, type SignalSearchSource } from './signalR
 import { stripInternalResearchCitations } from '../utils/researchCitations.js';
 
 const __filename = fileURLToPath(import.meta.url);
+
+/** Parsed from last30days compact output [INTERNAL_X_PROFILES] JSON (X/Twitter author stats). */
+export type XProfileSnapshot = {
+  handle: string;
+  followers?: number;
+  following?: number;
+  joinedRaw?: string;
+  joinedDisplay?: string;
+};
+
+const INTERNAL_X_PROFILE_RE = /\[INTERNAL_X_PROFILES\]\s*([\s\S]*?)\s*\[\/INTERNAL_X_PROFILES\]/i;
+
+export function extractXProfilesFromResearchStdout(raw: string): XProfileSnapshot[] {
+  const m = raw.match(INTERNAL_X_PROFILE_RE);
+  if (!m?.[1]) return [];
+  try {
+    const parsed = JSON.parse(m[1].trim()) as { profiles?: XProfileSnapshot[] };
+    return Array.isArray(parsed.profiles) ? parsed.profiles : [];
+  } catch {
+    return [];
+  }
+}
+
+function stripInternalXProfileBlock(raw: string): string {
+  return raw.replace(INTERNAL_X_PROFILE_RE, '\n').trim();
+}
 const __dirname = path.dirname(__filename);
 
 const LAST30DAYS_PATH = path.join(__dirname, '../../tools/last30days-skill');
@@ -162,6 +188,7 @@ export const researchService = {
       timestamp: string;
       extractedSources: SignalSearchSource[];
       rawStdout: string;
+      xProfiles: XProfileSnapshot[];
     }>((resolve, reject) => {
       const runStartedAt = Date.now();
       const spawnStartedAt = Date.now();
@@ -307,7 +334,8 @@ export const researchService = {
         }
 
         const parseStartedAt = Date.now();
-        let finalSummary = stdoutData.trim();
+        const xProfiles = extractXProfilesFromResearchStdout(stdoutData);
+        let finalSummary = stripInternalXProfileBlock(stdoutData.trim());
         const extractedSources = sourcesFromLast30DaysCompact(stdoutData);
         const extractedPreview = extractedSources
           .slice(0, 3)
@@ -493,6 +521,7 @@ ${finalSummary}`,
           timestamp: new Date().toISOString(),
           extractedSources,
           rawStdout: stdoutData,
+          xProfiles,
         });
       });
       
