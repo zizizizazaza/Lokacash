@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { verifyToken } from '../middleware/auth.js';
 import prisma from '../db.js';
 import { researchService, type XProfileSnapshot } from '../services/research.service.js';
-import { web3ResearchService } from '../services/web3Research.service.js';
+import { web3ResearchService, type Web3ResearchResult } from '../services/web3Research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
@@ -122,6 +122,202 @@ function pickXProfileForUser(profiles: XProfileSnapshot[], userContent: string):
   if (!softMatches.length) return null;
   softMatches.sort((a, b) => b.followers - a.followers);
   return softMatches[0].profile;
+}
+
+const MARKET_HEAVY_WEB3_INTENTS = new Set([
+  'token_quote',
+  'multi_asset_compare',
+  'market_scan',
+  'category_scan',
+]);
+
+function isMarketHeavyWeb3Intent(intent?: string): boolean {
+  return typeof intent === 'string' && MARKET_HEAVY_WEB3_INTENTS.has(intent);
+}
+
+function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): SignalSearchSource[] {
+  if (!raw) return [];
+  const assets = (raw.assets || []).filter((a) => a && (a.name || a.id));
+  const assetLabel = assets
+    .slice(0, 4)
+    .map((a) => a.symbol ? `${a.name || a.id} (${String(a.symbol).toUpperCase()})` : (a.name || a.id || ''))
+    .filter(Boolean)
+    .join(', ');
+  const intent = raw.intent || 'web3';
+  const intentLabelMap: Record<string, string> = {
+    token_quote: 'CoinGecko Market Data',
+    multi_asset_compare: 'CoinGecko Compare Data',
+    market_scan: 'CoinGecko Market Scanner',
+    category_scan: 'CoinGecko Category Data',
+    token_deep_dive: 'CoinGecko Asset Data',
+    onchain_scan: 'CoinGecko / GeckoTerminal',
+    nft_scan: 'CoinGecko NFT Data',
+  };
+  const snippetBase = assetLabel
+    ? `Structured ${intent.replace(/_/g, ' ')} data for ${assetLabel}.`
+    : `Structured ${intent.replace(/_/g, ' ')} data returned by CoinGecko.`;
+  const out: SignalSearchSource[] = [
+    {
+      favicon: 'web',
+      title: intentLabelMap[intent] || 'CoinGecko Data',
+      domain: 'coingecko.com',
+      url: 'https://www.coingecko.com/en/api/documentation',
+      snippet: snippetBase,
+    },
+  ];
+  if (raw.via === 'rest') {
+    out.push({
+      favicon: 'web',
+      title: 'CoinGecko REST API',
+      domain: 'api.coingecko.com',
+      url: 'https://www.coingecko.com/en/api/documentation',
+      snippet: 'REST market snapshot used by the Web3 pipeline for deterministic filtering and comparison.',
+    });
+  }
+  return out;
+}
+
+function web3FocusTokens(raw: Web3ResearchResult['raw'] | undefined): string[] {
+  const tokens = new Set<string>();
+  for (const asset of raw?.assets || []) {
+    const id = String(asset.id || '').trim().toLowerCase();
+    const symbol = String(asset.symbol || '').trim().toLowerCase();
+    const name = String(asset.name || '').trim().toLowerCase();
+    if (id) tokens.add(id);
+    if (symbol) tokens.add(symbol);
+    if (name) {
+      name.split(/\s+/).filter(Boolean).forEach((part) => tokens.add(part.toLowerCase()));
+      tokens.add(name);
+    }
+  }
+  return Array.from(tokens).filter((t) => /^[a-z0-9][a-z0-9\s_-]{1,30}$/.test(t));
+}
+
+function xAuthorFromSource(source: SignalSearchSource): string {
+  const url = (source.url || '').trim();
+  const m = url.match(/^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]{1,15})\//i);
+  return m?.[1]?.toLowerCase() || '';
+}
+
+function tokenizeSourceText(source: SignalSearchSource): string[] {
+  return `${source.title || ''} ${source.snippet || ''}`
+    .toLowerCase()
+    .match(/\b[a-z][a-z0-9_]{1,20}\b/g) || [];
+}
+
+function xSourceTemplateFamily(source: SignalSearchSource): string {
+  if ((source.domain || '').toLowerCase() !== 'x.com') return '';
+  const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+  if (/crypto prices? update|current cryptocurrency prices?|crypto prices?\s+\|/.test(text)) return 'price_update';
+  if (/fear\s*&\s*greed|btc dom|market movements|market snapshot/.test(text)) return 'market_snapshot';
+  if (/trending:|top gainers|top losers|most volatile/.test(text)) return 'trending_board';
+  if (/etf|netflow|net flow/.test(text)) return 'etf_flow';
+  return '';
+}
+
+function sourceMentionsCount(source: SignalSearchSource, focusTokens: string[]): number {
+  if (!focusTokens.length) return 0;
+  const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+  return focusTokens.filter((token) => token && new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)).length;
+}
+
+function looksLikeLowValuePriceBotSource(source: SignalSearchSource): boolean {
+  if ((source.domain || '').toLowerCase() !== 'x.com') return false;
+  const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+  const boilerplatePatterns = [
+    /crypto prices? update/,
+    /current cryptocurrency prices?/,
+    /fear\s*&\s*greed/,
+    /trending:/,
+    /\b\d{1,2}:\d{2}\s*(am|pm)\b/,
+    /% Δ/,
+  ];
+  const distinctTickers = new Set(
+    (text.match(/\b(btc|eth|sol|xrp|bnb|dot|mog|pepe|doge|ada|trx|link|usdc|usdt|ordi|based|rave)\b/g) || [])
+      .map((m) => m.toLowerCase()),
+  ).size;
+  return boilerplatePatterns.some((pattern) => pattern.test(text)) || distinctTickers >= 4;
+}
+
+function rankAndLimitSources(
+  sources: SignalSearchSource[],
+  options: { web3Intent?: string; max?: number; focusTokens?: string[] } = {},
+): SignalSearchSource[] {
+  const max = options.max || 20;
+  const marketHeavy = isMarketHeavyWeb3Intent(options.web3Intent);
+  const seen = new Set<string>();
+  const domainCounts = new Map<string, number>();
+  const authorCounts = new Map<string, number>();
+  const templateCounts = new Map<string, number>();
+  const focusTokens = Array.from(new Set((options.focusTokens || []).map((t) => t.toLowerCase()).filter(Boolean)));
+  const ranked = [...sources]
+    .map((source, idx) => {
+      const domain = (source.domain || '').toLowerCase();
+      const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+      const author = xAuthorFromSource(source);
+      const templateFamily = xSourceTemplateFamily(source);
+      const tokenList = tokenizeSourceText(source);
+      const distinctTickers = new Set(
+        tokenList.filter((m) => /^(btc|bitcoin|eth|ethereum|sol|solana|xrp|bnb|dot|mog|pepe|doge|ada|trx|link|usdc|usdt|ordi|based|rave|siren)$/i.test(m)),
+      ).size;
+      const focusHits = sourceMentionsCount(source, focusTokens);
+      let score = 0;
+      if (domain === 'coingecko.com' || domain === 'api.coingecko.com') score += 120;
+      if (/coinmarketcap|kraken|okx|binance|coindesk|theblock|cointelegraph|decrypt|blockworks/.test(domain)) score += 60;
+      if (domain === 'exa.ai') score -= 10;
+      if (marketHeavy && domain === 'x.com') score -= 35;
+      if (marketHeavy && looksLikeLowValuePriceBotSource(source)) score -= 35;
+      if (marketHeavy && templateFamily) score -= 20;
+      if (marketHeavy && distinctTickers >= 5) score -= 20;
+      if (marketHeavy && focusTokens.length > 0) {
+        if (focusHits === 0) score -= 30;
+        else score += Math.min(18, focusHits * 6);
+        if (distinctTickers > Math.max(3, focusHits + 1)) score -= 15;
+      }
+      if (marketHeavy && /price|market cap|24h|compare|comparison|scanner|structured/i.test(text)) score += 12;
+      if (!marketHeavy && domain === 'x.com') score += 15;
+      return { source, idx, score, author, templateFamily };
+    })
+    .sort((a, b) => b.score - a.score || a.idx - b.idx);
+
+  const out: SignalSearchSource[] = [];
+  for (const entry of ranked) {
+    const source = entry.source;
+    const key = `${source.domain}|${source.url || source.title}`;
+    if (seen.has(key)) continue;
+    const domain = (source.domain || '').toLowerCase();
+    const count = domainCounts.get(domain) || 0;
+    const domainLimit = marketHeavy
+      ? (domain === 'x.com' ? 2 : domain === 'exa.ai' ? 1 : 4)
+      : (domain === 'x.com' ? 6 : 4);
+    if (count >= domainLimit) continue;
+    if (marketHeavy && domain === 'x.com') {
+      if (entry.author) {
+        const authorCount = authorCounts.get(entry.author) || 0;
+        if (authorCount >= 1) continue;
+        authorCounts.set(entry.author, authorCount + 1);
+      }
+      if (entry.templateFamily) {
+        const templateCount = templateCounts.get(entry.templateFamily) || 0;
+        if (templateCount >= 1) continue;
+        templateCounts.set(entry.templateFamily, templateCount + 1);
+      }
+    }
+    seen.add(key);
+    domainCounts.set(domain, count + 1);
+    out.push(source);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function combinePreferredSources(
+  searchSources: SignalSearchSource[],
+  web3Sources: SignalSearchSource[],
+  options: { web3Intent?: string; max?: number; focusTokens?: string[] } = {},
+): SignalSearchSource[] {
+  const merged = mergeSignalSources(web3Sources, searchSources, Math.max(options.max || 20, 30));
+  return rankAndLimitSources(merged, options);
 }
 
 function normalizeIncomingImages(images: unknown): AgentChatImage[] {
@@ -1002,7 +1198,10 @@ Text: "${query}"`;
       const startTime = Date.now();
       const toolDispatchStartedAt = Date.now();
 
-      let finalSocialSources: any[] = [];
+      let finalSocialSources: SignalSearchSource[] = [];
+      let finalSearchSourcesRaw: SignalSearchSource[] = [];
+      let finalWeb3Sources: SignalSearchSource[] = [];
+      let finalWeb3Intent: string | undefined;
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
@@ -1074,22 +1273,27 @@ Text: "${query}"`;
             }
             // Fallback: log-based platform hints
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
-            const sourceDomains = Array.from(new Set((socialSources || []).map((s) => s.domain).filter(Boolean)));
-            const sourcePreview = (socialSources || [])
+            finalSearchSourcesRaw = socialSources;
+            const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
+              web3Intent: finalWeb3Intent,
+              max: PANEL_MAX,
+            });
+            const sourceDomains = Array.from(new Set((preferredSources || []).map((s) => s.domain).filter(Boolean)));
+            const sourcePreview = (preferredSources || [])
               .slice(0, 3)
               .map((s) => `${s.domain || 'unknown'}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
               .join(' || ');
             console.log(
-              `[sources] final extraction: count=${socialSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
+              `[sources] final extraction: raw_count=${socialSources.length} preferred_count=${preferredSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
             );
             if (sourcePreview) {
               console.log(`[sources] final extraction preview: ${sourcePreview}`);
             }
 
-            finalSocialSources = socialSources;
+            finalSocialSources = preferredSources;
             emitter.emitModule('search', 'completed', {
               variant: 'social',
-              sources: socialSources,
+              sources: preferredSources,
               providers: [
                 { name: 'Yahoo Finance' }, { name: 'Bloomberg API' }, { name: 'Alpha Vantage' },
                 { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
@@ -1123,7 +1327,7 @@ Text: "${query}"`;
                 );
               }
             }
-            return { type: 'SEARCH', data: res.summary, sources: socialSources };
+              return { type: 'SEARCH', data: res.summary, sources: preferredSources };
           }).catch(e => {
             emitter.emitModule('search', 'completed', {});
             return { type: 'SEARCH', data: 'Error: ' + e.message };
@@ -1145,9 +1349,44 @@ Text: "${query}"`;
         promises.push(
           web3ResearchService
             .runQuery(web3Q)
-            .then((report) => {
-              emitter.emitModule('web3', 'completed', { variant: 'coingecko_mcp' });
-              return { type: 'WEB3', data: report };
+            .then((result) => {
+              finalWeb3Intent = result.raw.intent || undefined;
+              finalWeb3Sources = buildWeb3ProviderSources(result.raw);
+              const focusTokens = web3FocusTokens(result.raw);
+              if (plan.capabilities.search.needed) {
+                const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
+                  web3Intent: finalWeb3Intent,
+                  max: 20,
+                  focusTokens,
+                });
+                if (preferredSources.length > 0) {
+                  finalSocialSources = preferredSources;
+                  emitter.emitModule('search', 'completed', {
+                    variant: 'social',
+                    sources: preferredSources,
+                    providers: [
+                      { name: 'Yahoo Finance' }, { name: 'Bloomberg API' }, { name: 'Alpha Vantage' },
+                      { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
+                    ]
+                  });
+                }
+              } else if (finalWeb3Sources.length > 0) {
+                finalSocialSources = combinePreferredSources([], finalWeb3Sources, {
+                  web3Intent: finalWeb3Intent,
+                  max: 20,
+                  focusTokens,
+                });
+              }
+              console.log(
+                `[web3Sources] injected=${finalWeb3Sources.length} intent=${finalWeb3Intent || 'n/a'} final_sources=${finalSocialSources.length}`,
+              );
+              emitter.emitModule('web3', 'completed', {
+                variant: 'coingecko_mcp',
+                intent: result.raw.intent || 'unknown',
+                assets: result.raw.assets?.length || 0,
+                via: result.raw.via || 'n/a',
+              });
+              return { type: 'WEB3', data: result.report };
             })
             .catch((e) => {
               emitter.emitModule('web3', 'completed', {});
@@ -1617,7 +1856,7 @@ Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
 2. Section titles MUST be specific and analytical — not generic. Create proper research section titles (e.g. "收入放缓与利润弹性的博弈", "估值锚定：DCF vs 可比公司的分歧").
 3. Synthesize evidence across ALL data sources. Highlight where different data dimensions agree (conviction) and where they conflict (uncertainty).
 4. Never fabricate data. If exact numbers aren't available, state the directional finding and name the missing metric.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
+5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs in a separate references section. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text, metrics. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 3000-6000 words. This is a deep research product — completeness and depth are expected. But every sentence must add analytical value. No filler.
 8. End with "Key Monitoring Dashboard" — this MUST be the absolute last section. Nothing after it.
@@ -1751,7 +1990,7 @@ Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Fundamental Analysis", "Valuation", "Financial Health", "Signal vs Noise", "Positioning", "Stress Test" etc. — these are internal labels, not output headings. Create engaging, specific headings (e.g. "广告引擎点火，但游戏拖了后腿", "23倍PE：贵还是便宜？", "多空交锋：谁在买？谁在跑？").
 3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
 4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
+5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs in a separate references section. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 1500-3500 words. Depth over brevity, but no padding. Every sentence must earn its place. Cover ALL analysis dimensions — fundamental, valuation, financial, technical, and actionable trade setup.
 8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
@@ -1829,7 +2068,7 @@ Questions to Watch (LAST SECTION)
 2. Section titles MUST be specific and engaging, not generic labels.
 3. Synthesize across sources. Surface contradictions and emergent patterns.
 4. Never fabricate data. Use qualitative discussion when numbers are unavailable.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...)). Place inline after the relevant sentence or paragraph.
+5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end.
 6. LANGUAGE: Match user's language entirely. Chinese query = all Chinese. English = all English.
 7. Length: 1500-3000 words. Depth over breadth.
 8. Tables for comparisons, bullet lists for key points, narrative for analysis.
@@ -1935,7 +2174,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 3. LANGUAGE: Match user's language entirely. Chinese query = all Chinese.
 4. Use actual data from context. Integrate search results + simulation signals + any financial data.
 5. Gurus can and should DISAGREE. Don't force consensus where data doesn't support it.
-6. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
+6. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 7. Length: 2000-4000 words. Each guru section should be substantial (150-300 words).
 8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
 `;

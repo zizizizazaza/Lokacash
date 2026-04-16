@@ -11,17 +11,42 @@ const WEB3_ROOT = path.join(__dirname, '../../tools/web3');
 const CLI_JS = path.join(WEB3_ROOT, 'dist', 'cli.js');
 const CLI_TS = path.join(WEB3_ROOT, 'src', 'cli.ts');
 
+export type Web3ResearchResult = {
+  report: string;
+  raw: {
+    intent?: string;
+    via?: 'mcp' | 'rest' | 'hybrid';
+    resolvedId?: string;
+    spotPriceUsd?: number;
+    resolver?: string;
+    assets?: Array<{ id?: string; symbol?: string; name?: string }>;
+    market?: Record<string, unknown>;
+    discovery?: Record<string, unknown>;
+    onchain?: Record<string, unknown>;
+    nft?: Record<string, unknown>;
+    logs?: string[];
+    missingData?: string[];
+  };
+};
+
 function serverRootFromHere(): string {
   return path.join(__dirname, '../..');
 }
 
 /**
- * Runs the CoinGecko MCP CLI (`tools/web3`) and returns markdown-ish report text for Super Agent synthesis.
+ * Runs the CoinGecko web3 CLI (`tools/web3`) and returns report + structured payload.
  */
-export async function runWeb3ResearchQuery(userQuery: string): Promise<string> {
+export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3ResearchResult> {
   const q = (userQuery || '').trim();
   if (!q) {
-    return '## Web3\n(空查询)';
+    return {
+      report: '## Web3\n(空查询)',
+      raw: {
+        intent: 'empty',
+        via: 'rest',
+        logs: ['empty_query'],
+      },
+    };
   }
 
   const serverRoot = serverRootFromHere();
@@ -37,9 +62,14 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<string> {
       : [];
 
   if (args.length === 0) {
-    return (
-      `## Web3\n未找到 \`tools/web3/dist/cli.js\`（且无法回退到 tsx）。请在 \`server\` 目录执行：\`npm run build:web3\`。`
-    );
+    return {
+      report: `## Web3\n未找到 \`tools/web3/dist/cli.js\`（且无法回退到 tsx）。请在 \`server\` 目录执行：\`npm run build:web3\`。`,
+      raw: {
+        intent: 'build_missing',
+        via: 'rest',
+        logs: ['missing_cli_build'],
+      },
+    };
   }
 
   return new Promise((resolve, reject) => {
@@ -80,19 +110,56 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<string> {
           ok?: boolean;
           report?: string;
           error?: string;
+          intent?: string;
           resolvedId?: string;
           spotPriceUsd?: number;
-          via?: 'mcp' | 'rest';
+          via?: 'mcp' | 'rest' | 'hybrid';
           resolver?: string;
+          assets?: Array<{ id?: string; symbol?: string; name?: string }>;
+          market?: Record<string, unknown>;
+          discovery?: Record<string, unknown>;
+          onchain?: Record<string, unknown>;
+          nft?: Record<string, unknown>;
+          logs?: string[];
+          missingData?: string[];
         };
         if (!parsed.ok) {
           reject(new Error(parsed.error || 'web3 tool returned ok:false'));
           return;
         }
         console.log(
-          `[web3Research] query="${q}" resolved_id=${parsed.resolvedId || 'n/a'} spot_usd=${parsed.spotPriceUsd ?? 'n/a'} via=${parsed.via || 'n/a'} resolver=${parsed.resolver || 'n/a'}`,
+          `[web3Research] query="${q}" intent=${parsed.intent || 'n/a'} asset_count=${parsed.assets?.length || 0} resolved_id=${parsed.resolvedId || 'n/a'} spot_usd=${parsed.spotPriceUsd ?? 'n/a'} via=${parsed.via || 'n/a'} resolver=${parsed.resolver || 'n/a'}`,
         );
-        resolve(parsed.report || '');
+        if (parsed.logs?.length) {
+          console.log(`[web3Research:logs] ${parsed.logs.join(' | ')}`);
+        }
+        if (parsed.assets?.length) {
+          const assetPreview = parsed.assets
+            .slice(0, 5)
+            .map((asset) => `${asset.name || asset.id || 'unknown'}(${asset.symbol || '-'})`)
+            .join(', ');
+          console.log(`[web3Research:assets] ${assetPreview}`);
+        }
+        if (parsed.missingData?.length) {
+          console.log(`[web3Research:missing] ${parsed.missingData.join(',')}`);
+        }
+        resolve({
+          report: parsed.report || '',
+          raw: {
+            intent: parsed.intent,
+            via: parsed.via,
+            resolvedId: parsed.resolvedId,
+            spotPriceUsd: parsed.spotPriceUsd,
+            resolver: parsed.resolver,
+            assets: parsed.assets || [],
+            market: parsed.market || {},
+            discovery: parsed.discovery || {},
+            onchain: parsed.onchain || {},
+            nft: parsed.nft || {},
+            logs: parsed.logs || [],
+            missingData: parsed.missingData || [],
+          },
+        });
       } catch (e) {
         reject(new Error(`Invalid web3 CLI JSON: ${(e as Error).message} | stderr=${stderr.slice(0, 500)}`));
       }

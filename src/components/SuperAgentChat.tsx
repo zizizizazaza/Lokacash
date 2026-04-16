@@ -1857,6 +1857,27 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     // Remove parenthesised citation wrappers like （[Link](url) 数据）
     result = result.replace(/[（(]\s*(\[[^\]]+\]\([^)]+\))\s*(?:数据|data|来源|source)?\s*[)）]/gi, ' $1');
 
+    // Move markdown citations to the end of normal prose lines so badges do not
+    // interrupt reading in the middle of a sentence.
+    result = result
+        .split('\n')
+        .map((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return line;
+            if (/^\s*[#>|-]/.test(line)) return line;
+            if (/^\s*\d+\.\s+/.test(line)) return line;
+            if (/\|/.test(line)) return line;
+            const citationRe = /\s*(\[[^\]]+\]\((https?:\/\/[^)]+)\))/g;
+            const citations = Array.from(line.matchAll(citationRe)).map((m) => m[1]);
+            if (citations.length === 0) return line;
+            const uniqueCitations = Array.from(new Set(citations));
+            let body = line.replace(citationRe, ' ').replace(/\s{2,}/g, ' ').trim();
+            body = body.replace(/\s+([，。；！？,.!?])/g, '$1');
+            const tail = uniqueCitations.join(' ');
+            return body ? `${body} ${tail}` : tail;
+        })
+        .join('\n');
+
     // Clean repeated blank lines left by cleanup.
     result = result.replace(/\n{3,}/g, '\n\n').trim();
     return result;
