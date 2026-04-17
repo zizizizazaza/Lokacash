@@ -41,6 +41,29 @@ let cachedPrices: Record<string, number> = { ...FALLBACK_PRICES };
 let lastFetchAt: Date | null = null;
 let fetchInterval: ReturnType<typeof setInterval> | null = null;
 
+function parseEnvBool(value: string | undefined, defaultValue: boolean): boolean {
+  if (value == null || value === '') return defaultValue;
+  const v = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(v)) return true;
+  if (['0', 'false', 'no', 'off'].includes(v)) return false;
+  return defaultValue;
+}
+
+function priceServicePollIntervalMs(): number | null {
+  const raw = (process.env.PRICE_SERVICE_POLL_INTERVAL_MS || '').trim();
+  if (!raw) return 60_000;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return 60_000;
+  if (n <= 0) return null;
+  if (n < 10_000) return 10_000;
+  if (n > 3_600_000) return 3_600_000;
+  return n;
+}
+
+function priceServiceBootFetch(): boolean {
+  return parseEnvBool(process.env.PRICE_SERVICE_BOOT_FETCH, true);
+}
+
 /** Node 自带 fetch 不会读 macOS「系统代理」，需与 curl 一致时请设 HTTPS_PROXY / HTTP_PROXY */
 let coingeckoProxyAgent: ProxyAgent | null = null;
 
@@ -172,10 +195,32 @@ export function getPriceMeta() {
 
 /** Start auto-refresh (call on server startup) */
 export function startPriceService() {
+  const enabled = parseEnvBool(process.env.PRICE_SERVICE_ENABLED, true);
+  if (!enabled) {
+    console.log('[PriceService] Disabled via PRICE_SERVICE_ENABLED=false — using static fallback prices only');
+    return;
+  }
+  const intervalMs = priceServicePollIntervalMs();
   console.log('[PriceService] Starting price feed...');
-  // Fetch immediately then every 60s (CoinGecko free = 10-30 calls/min)
+  if (intervalMs == null) {
+    if (priceServiceBootFetch()) {
+      console.log(
+        '[PriceService] Polling disabled (PRICE_SERVICE_POLL_INTERVAL_MS<=0); one boot fetch only (set PRICE_SERVICE_BOOT_FETCH=false to skip)',
+      );
+      refreshPrices();
+    } else {
+      console.log(
+        '[PriceService] Polling disabled (PRICE_SERVICE_POLL_INTERVAL_MS<=0) and boot fetch off — no CoinGecko requests',
+      );
+    }
+    return;
+  }
+  // First fetch after boot, then on interval (CoinGecko free tier is easy to 429 if too aggressive)
   refreshPrices();
-  fetchInterval = setInterval(refreshPrices, 60_000);
+  fetchInterval = setInterval(refreshPrices, intervalMs);
+  console.log(
+    `[PriceService] Poll interval: ${Math.round(intervalMs / 1000)}s (PRICE_SERVICE_POLL_INTERVAL_MS; use 0 to disable polling)`,
+  );
 }
 
 /** Stop auto-refresh */
