@@ -11,6 +11,8 @@ const PRO_MCP = 'https://mcp.pro-api.coingecko.com/mcp';
 const PUBLIC_REST = 'https://api.coingecko.com/api/v3';
 const PRO_REST = 'https://pro-api.coingecko.com/api/v3';
 const TOOL_CACHE_TTL_MS = Number(process.env.COINGECKO_TOOL_CACHE_TTL_MS || '300000');
+const REST_RETRY_ATTEMPTS = Math.max(1, Number(process.env.COINGECKO_REST_RETRY_ATTEMPTS || '3'));
+const REST_RETRY_BASE_DELAY_MS = Math.max(50, Number(process.env.COINGECKO_REST_RETRY_BASE_DELAY_MS || '350'));
 
 type Web3Intent =
   | 'token_quote'
@@ -224,12 +226,39 @@ async function fetchRestJson(pathOrUrl: string): Promise<unknown> {
   const url = /^https?:\/\//i.test(pathOrUrl)
     ? pathOrUrl
     : `${getRestBaseUrl()}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`;
-  const res = await fetch(url, {
-    headers: getRestHeaders(),
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!res.ok) throw new Error(`REST ${res.status} ${url}`);
-  return res.json();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= REST_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(url, {
+        headers: getRestHeaders(),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) {
+        const err = new Error(`REST ${res.status} ${url}`) as Error & { status?: number };
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
+    } catch (err) {
+      lastError = err;
+      const status = (err as { status?: number })?.status;
+      const message = (err as Error)?.message || '';
+      const isTransientHttp = status != null && [408, 425, 429, 500, 502, 503, 504].includes(status);
+      const isTransientNetwork =
+        /fetch failed|network|timed out|timeout|socket|econnreset|econnrefused|etimedout|enotfound/i.test(message);
+      const shouldRetry = attempt < REST_RETRY_ATTEMPTS && (isTransientHttp || isTransientNetwork);
+      if (!shouldRetry) break;
+      const delayMs = REST_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      console.error(
+        `[web3-cli] rest retry attempt=${attempt}/${REST_RETRY_ATTEMPTS} delay_ms=${delayMs} reason="${truncate(
+          message,
+          180,
+        )}" url="${truncate(url, 160)}"`,
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`REST request failed: ${String(lastError)}`);
 }
 
 function fmtUsd(value?: number | null): string {
@@ -1106,6 +1135,7 @@ async function main() {
     const result = await runWeb3Pipeline(query);
     console.log(JSON.stringify(result));
   } catch (e) {
+    console.error(`[web3-cli] fatal error: ${(e as Error).message}`);
     console.log(
       JSON.stringify({
         ok: false,
