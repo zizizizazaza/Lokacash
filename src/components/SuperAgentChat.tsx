@@ -3,6 +3,7 @@
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
@@ -2503,6 +2504,7 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
 }
 
 const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
+    const navigate = useNavigate();
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
         try {
@@ -3734,6 +3736,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Header: chat title ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
+                <button
+                    onClick={() => navigate('/settings')}
+                    className="flex items-center gap-1.5 text-[11px] font-semibold text-green-600 hover:text-green-700 transition-colors"
+                >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
+                    Upgrade
+                </button>
             </div>
 
             {/* ══ Content Row ══ */}

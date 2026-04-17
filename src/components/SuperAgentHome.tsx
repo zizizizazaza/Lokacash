@@ -5,6 +5,9 @@ import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENT
 import SuperAgentChat from './SuperAgentChat';
 import GuruCarousel from './GuruCarousel';
 import { IFlytekStreamer } from '../services/iflytek';
+import ModeSelector from './chat/ModeSelector';
+import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
+import { api } from '../services/api';
 const SuperAgentHome: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -12,8 +15,6 @@ const SuperAgentHome: React.FC = () => {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [mode, setMode] = useState<'auto' | 'fast' | 'roundtable'>('auto');
-  const [modeOpen, setModeOpen] = useState(false);
-  const modeRef = useRef<HTMLDivElement>(null);
   const [chatMessage, setChatMessage] = useState<string | null>(null);
   const [phIdx, setPhIdx] = useState(0);
   const [pastedImages, setPastedImages] = useState<string[]>([]);
@@ -22,6 +23,21 @@ const SuperAgentHome: React.FC = () => {
   const homeVoiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevNewChatRef = useRef<number | null>(null);
   const iflytekRef = useRef<IFlytekStreamer | null>(null);
+
+  // Roundtable quota
+  const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
+  const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
+  useEffect(() => {
+    api.getQuota()
+      .then(q => {
+        setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+        if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+      })
+      .catch(() => {
+        setRoundtableQuota({ used: 2, limit: 3 });
+        setFastQuota({ used: 6, limit: 10 });
+      });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -152,22 +168,8 @@ const SuperAgentHome: React.FC = () => {
     return () => clearInterval(id);
   }, [input]);
 
-  const MODES = [
-    { id: 'auto' as const, label: 'Auto', desc: 'Smart auto-routing to the optimal pipeline', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
-    { id: 'fast' as const, label: 'Fast', desc: 'Direct response, minimal orchestration', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-    { id: 'roundtable' as const, label: 'Roundtable', desc: 'Multi-agent debate with iterative consensus', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
-  ];
-  const currentMode = MODES.find(m => m.id === mode)!;
-
   const [searchParams] = useSearchParams();
   const sessionParam = searchParams.get('session');
-
-  useEffect(() => {
-    if (!modeOpen) return;
-    const h = (e: MouseEvent) => { if (modeRef.current && !modeRef.current.contains(e.target as Node)) setModeOpen(false); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, [modeOpen]);
 
   // Derive effective chat message: during the render where New Chat was just
   // clicked, treat chatMessage as null so SuperAgentChat doesn't mount with
@@ -277,42 +279,7 @@ const SuperAgentHome: React.FC = () => {
             {/* Input toolbar */}
             <div className="flex items-center justify-between px-3 pb-3">
               <div className="flex items-center gap-1">
-                <div className="relative" ref={modeRef}>
-                  <button
-                    onClick={() => setModeOpen(v => !v)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-gray-500 hover:bg-gray-100 transition-all"
-                  >
-                    {React.createElement(currentMode.icon)}
-                    {currentMode.label}
-                    <InputIcons.Chevron />
-                  </button>
-                  {modeOpen && (
-                    <div className="absolute bottom-full left-0 mb-1.5 w-64 bg-white border border-gray-100 rounded-xl shadow-lg overflow-hidden z-30" style={{ animation: 'menu-pop 0.15s ease-out' }}>
-                      {MODES.map(m => {
-                        const MIcon = m.icon;
-                        const isActive = mode === m.id;
-                        return (
-                          <button
-                            key={m.id}
-                            onClick={() => { setMode(m.id); setModeOpen(false); }}
-                            className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
-                          >
-                            <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400'}`}>
-                              <MIcon />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <p className={`text-[12px] font-semibold ${isActive ? 'text-gray-900' : 'text-gray-700'}`}>{m.label}</p>
-                              <p className="text-[10px] text-gray-400 leading-tight">{m.desc}</p>
-                            </div>
-                            {isActive && (
-                              <svg className="w-3.5 h-3.5 text-gray-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+                <ModeSelector mode={mode} onModeChange={setMode} roundtableQuota={roundtableQuota} fastQuota={fastQuota} />
                 {/* Selected Agent tag — sits right next to mode selector */}
                 {selectedAgent && (() => {
                   const ag = QUICK_ACTIONS.find(a => a.id === selectedAgent);

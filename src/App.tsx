@@ -10,6 +10,7 @@ import Portfolio from './components/Portfolio';
 import RealChatsPage from './components/ChatsPage';
 import RealContactsPage from './components/ContactsPage';
 import DiscoverPage from './components/DiscoverPage';
+import Settings from './components/Settings';
 import ApiLanding from './components/ApiLanding';
 import AuthModal from './components/AuthModal';
 import TxModal from './components/TxModal';
@@ -203,7 +204,7 @@ const App: React.FC = () => {
             <Route path="/contacts" element={<RealContactsPage />} />
             <Route path="/market/*" element={<Market />} />
             <Route path="/discover" element={<DiscoverPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings" element={<Settings />} />
             <Route path="/api" element={<ApiLanding />} />
             <Route path="/signal-radar" element={<SignalRadarToSuperAgentRedirect />} />
             <Route path="/portfolio" element={<Portfolio isWalletConnected={isLoggedIn} onConnect={() => setShowAuthModal(true)} onLogout={logout} defaultTab="personal" />} />

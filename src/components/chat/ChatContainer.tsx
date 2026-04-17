@@ -12,7 +12,9 @@
  *  - Contain duplicated socket handlers
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { socket } from '../../services/socket';
+import { api } from '../../services/api';
 import { renderMarkdownContent } from '../../utils/markdown';
 import { stripInternalResearchCitations } from '../../utils/researchCitations';
 
@@ -21,6 +23,7 @@ import { MODES, AGENT_COUNCIL, buildKnowledgeGraph, AGENT_APPS } from '../../con
 import { getApp } from '../apps';
 
 import ModeSelector from './ModeSelector';
+import type { RoundtableQuota, FastQuota } from './ModeSelector';
 import ThinkingPanel from './ThinkingPanel';
 import KnowledgeGraph from './KnowledgeGraph';
 import AppProgressLogs from './AppProgressLogs';
@@ -76,6 +79,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
   const { sessionId } = useSessionManager({ restoreSessionId });
 
   // ─── State ────────────────────────────────────────────────
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -91,6 +95,21 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
   const [workflowPhase, setWorkflowPhase] = useState<'idle' | 'research' | 'app' | 'consensus'>('idle');
   const [researchLogs, setResearchLogs] = useState<string[]>([]);
   const [researchSummary, setResearchSummary] = useState<string | null>(null);
+
+  // Roundtable & Fast quota
+  const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
+  const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
+  useEffect(() => {
+    api.getQuota()
+      .then(q => {
+        setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+        if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+      })
+      .catch(() => {
+        setRoundtableQuota({ used: 2, limit: 3 });
+        setFastQuota({ used: 6, limit: 10 });
+      });
+  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasSentInitial = useRef(false);
@@ -493,6 +512,13 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
           <span className="text-[10px] text-gray-400 font-medium">
             {isAppMode ? 'Agent Online' : '2 Agents Online'}
           </span>
+          <button
+            onClick={() => navigate('/settings')}
+            className="ml-2 pl-3 border-l border-gray-200 flex items-center gap-1.5 text-[11px] font-semibold text-green-600 hover:text-green-700 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
+            Upgrade
+          </button>
           {currentKgData && (
             <div className="ml-2 pl-3 border-l border-gray-200 flex items-center gap-2 cursor-pointer" onClick={() => setShowGraphPanel(g => !g)}>
               <svg className={`w-3.5 h-3.5 transition-colors ${showGraphPanel ? 'text-blue-500' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -645,7 +671,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
             <div className="max-w-3xl mx-auto">
               <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-2xl shadow-sm pl-2 pr-4 py-2 focus-within:border-gray-300 focus-within:shadow-md transition-all">
                 {showModeSelector && (
-                  <ModeSelector mode={currentMode} onModeChange={setCurrentMode} compact />
+                  <ModeSelector mode={currentMode} onModeChange={setCurrentMode} roundtableQuota={roundtableQuota} fastQuota={fastQuota} compact />
                 )}
                 <input
                   type="text"
