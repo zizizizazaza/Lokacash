@@ -1142,7 +1142,7 @@ Text: "${query}"`;
           if (!plan.capabilities.web3?.needed) {
             plan.capabilities.web3 = {
               needed: true,
-              query: cryptoHits.map(t => t.toUpperCase()).join(' ') + ' ' + (plan.capabilities.search.query || userContent),
+              query: cryptoHits.map((t: string) => t.toUpperCase()).join(' ') + ' ' + (plan.capabilities.search.query || userContent),
             };
             console.log(`[routing:layer1] Auto-enabled web3 for stripped crypto tickers: ${cryptoHits.join(', ')}`);
           }
