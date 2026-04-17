@@ -111,10 +111,21 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) {
+        const stdoutLine = stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? '';
+        let parsedCliError = '';
+        try {
+          const parsed = JSON.parse(stdoutLine) as { error?: string };
+          parsedCliError = String(parsed?.error || '').trim();
+        } catch {
+          /* ignore parse failures; keep fallback paths */
+        }
         console.warn(
-          `[web3Research] cli non-zero exit code=${code} query="${clip(q, 120)}" stderr="${clip(stderr, 400)}"`,
+          `[web3Research] cli non-zero exit code=${code} query="${clip(q, 120)}" parsed_error="${clip(
+            parsedCliError,
+            200,
+          )}" stderr="${clip(stderr, 400)}" stdout_tail="${clip(stdout, 400)}"`,
         );
-        reject(new Error(stderr.trim() || `web3 cli exited ${code}`));
+        reject(new Error(parsedCliError || stderr.trim() || stdoutLine || `web3 cli exited ${code}`));
         return;
       }
       let line = '';
