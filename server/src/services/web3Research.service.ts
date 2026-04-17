@@ -73,6 +73,12 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
   }
 
   return new Promise((resolve, reject) => {
+    const clip = (s: string, max: number) => {
+      const t = s.replace(/\s+/g, ' ').trim();
+      if (t.length <= max) return t;
+      return `${t.slice(0, max)}…`;
+    };
+
     const child = spawn(execPath, args, {
       cwd: WEB3_ROOT,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
@@ -82,6 +88,9 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
+      console.warn(
+        `[web3Research] timeout after 45s query="${clip(q, 120)}" cli=${useCompiled ? 'dist' : useTsx ? 'tsx' : 'none'}`,
+      );
       child.kill('SIGTERM');
       reject(new Error('Web3 MCP tool timeout (45s)'));
     }, 45_000);
@@ -95,17 +104,22 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      console.warn(`[web3Research] spawn error query="${clip(q, 120)}" err=${(err as Error).message}`);
       reject(err);
     });
 
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) {
+        console.warn(
+          `[web3Research] cli non-zero exit code=${code} query="${clip(q, 120)}" stderr="${clip(stderr, 400)}"`,
+        );
         reject(new Error(stderr.trim() || `web3 cli exited ${code}`));
         return;
       }
+      let line = '';
       try {
-        const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? stdout.trim();
+        line = stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? stdout.trim();
         const parsed = JSON.parse(line) as {
           ok?: boolean;
           report?: string;
@@ -124,6 +138,9 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
           missingData?: string[];
         };
         if (!parsed.ok) {
+          console.warn(
+            `[web3Research] cli ok:false query="${clip(q, 120)}" error="${clip(String(parsed.error || ''), 200)}"`,
+          );
           reject(new Error(parsed.error || 'web3 tool returned ok:false'));
           return;
         }
@@ -161,6 +178,9 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
           },
         });
       } catch (e) {
+        console.warn(
+          `[web3Research] invalid JSON from cli query="${clip(q, 120)}" lastLine="${clip(line, 200)}" stdoutTail="${clip(stdout, 400)}" stderr="${clip(stderr, 400)}"`,
+        );
         reject(new Error(`Invalid web3 CLI JSON: ${(e as Error).message} | stderr=${stderr.slice(0, 500)}`));
       }
     });

@@ -1389,6 +1389,9 @@ Text: "${query}"`;
               return { type: 'WEB3', data: result.report };
             })
             .catch((e) => {
+              console.warn(
+                `[web3Research] failed sessionId=${sessionId} err=${(e as Error).message}`,
+              );
               emitter.emitModule('web3', 'completed', {});
               return { type: 'WEB3', data: 'Error: ' + (e as Error).message };
             }),
