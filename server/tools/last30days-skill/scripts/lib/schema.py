@@ -143,6 +143,11 @@ class XItem:
     why_relevant: str = ""
     subs: SubScores = field(default_factory=SubScores)
     score: int = 0
+    # X/Twitter author profile (from API when present; not all backends fill these)
+    author_followers: Optional[int] = None
+    author_following: Optional[int] = None
+    author_joined_raw: Optional[str] = None
+    author_avatar_url: Optional[str] = None
     cross_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -159,6 +164,14 @@ class XItem:
             'subs': self.subs.to_dict(),
             'score': self.score,
         }
+        if self.author_followers is not None:
+            d['author_followers'] = self.author_followers
+        if self.author_following is not None:
+            d['author_following'] = self.author_following
+        if self.author_joined_raw:
+            d['author_joined_raw'] = self.author_joined_raw
+        if self.author_avatar_url:
+            d['author_avatar_url'] = self.author_avatar_url
         if self.cross_refs:
             d['cross_refs'] = self.cross_refs
         return d
@@ -619,6 +632,9 @@ class Report:
                 why_relevant=x.get('why_relevant', ''),
                 subs=subs,
                 score=x.get('score', 0),
+                author_followers=x.get('author_followers'),
+                author_following=x.get('author_following'),
+                author_joined_raw=x.get('author_joined_raw'),
                 cross_refs=x.get('cross_refs', []),
             ))
 

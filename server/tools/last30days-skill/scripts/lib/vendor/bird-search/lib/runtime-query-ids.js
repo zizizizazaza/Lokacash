@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { fetchWithProxy } from './fetch-proxy.js';
 const DEFAULT_CACHE_FILENAME = 'query-ids-cache.json';
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_PAGES = [
@@ -172,7 +173,7 @@ async function fetchAndExtract(fetchImpl, bundleUrls, targets) {
     return discovered;
 }
 export function createRuntimeQueryIdStore(options = {}) {
-    const fetchImpl = options.fetchImpl ?? fetch;
+    const fetchImpl = options.fetchImpl ?? fetchWithProxy;
     const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     const cachePath = options.cachePath ? path.resolve(options.cachePath) : resolveDefaultCachePath();
     let memorySnapshot = null;

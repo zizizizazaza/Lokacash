@@ -35,6 +35,10 @@ export const config = {
     apiKey: process.env.LOKA_AI_API_KEY?.trim() || '',
     baseUrl: process.env.LOKA_AI_BASE_URL?.trim() || '',
     model: process.env.LOKA_AI_MODEL?.trim() || 'deepseek-v3',
+    // 最终总结（Synthesis）专用模型：不设置则回退到 LOKA_AI_MODEL
+    synthesisModel: process.env.LOKA_AI_SYNTHESIS_MODEL?.trim() || '',
+    // 图片路由摘要专用模型：不设置则回退到 LOKA_AI_MODEL
+    imageDigestModel: process.env.LOKA_AI_IMAGE_DIGEST_MODEL?.trim() || '',
   },
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
   rateLimit: {
@@ -43,6 +47,10 @@ export const config = {
     authMax: isProduction ? 20 : 200, // stricter for auth endpoints
   },
   trustmrr: {
+    /** false / 0 / no / off：不启动 Boot Sync 与定时列表刷新（仍保留 /api/trustmrr 路由，缓存为空） */
+    enabled: !/^false|0|no|off$/i.test(
+      (process.env.TRUSTMRR_ENABLED ?? 'true').trim(),
+    ),
     apiKey: process.env.TRUSTMRR_API_KEY || '',
     baseUrl: 'https://trustmrr.com/api/v1',
     refreshIntervalMs: 5 * 60 * 1000,   // 5 min list refresh
@@ -56,4 +64,14 @@ export const config = {
   consensus: {
     baseUrl: process.env.CONSENSUS_API_BASE || 'http://173.249.5.203:8000/api/v1',
   },
+  /** 设为1/true/yes 时跳过 SuperAgent 的 HTML 报告生成（并行与 roundtable 顺序生成均不跑），用于排查耗时 */
+  superAgentDisableHtmlReport: /^1|true|yes$/i.test(
+    (process.env.SUPERAGENT_DISABLE_HTML_REPORT || '').trim(),
+  ),
+  /**
+   * 开发用：任意非空邀请码均通过校验。生产环境强制为 false，避免误配上线。
+   */
+  invitationGateDisabled:
+    !isProduction &&
+    /^1|true|yes$/i.test((process.env.INVITATION_GATE_DISABLED || '').trim()),
 } as const;

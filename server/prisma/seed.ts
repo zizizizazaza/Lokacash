@@ -23,6 +23,20 @@ async function seed() {
 
   console.log(`  ✅ User: ${user.email}`);
 
+  // Dev / 内测邀请码（登录后第二步校验用）；maxUses=0 表示不限制次数（见 invitation 路由逻辑）
+  await prisma.invitationCode.upsert({
+    where: { code: 'LOKA88' },
+    update: { isActive: true, maxUses: 0 },
+    create: {
+      code: 'LOKA88',
+      createdById: user.id,
+      maxUses: 0,
+      useCount: 0,
+      isActive: true,
+    },
+  });
+  console.log('  ✅ Invitation code: LOKA88 (attach to demo user, unlimited uses)');
+
   // Create projects based on TrustMRR verified startups
   const projects = [
     {

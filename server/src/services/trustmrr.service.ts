@@ -282,6 +282,11 @@ export function getCacheStats() {
 
 /** Start the service: fetch list immediately + set periodic refresh. */
 export async function startTrustMRRService(): Promise<void> {
+  if (!TMRR.enabled) {
+    console.log('[TrustMRR] Disabled (TRUSTMRR_ENABLED=false) — skipping boot sync and background refresh');
+    return;
+  }
+
   if (!TMRR.apiKey) {
     console.warn('[TrustMRR] ⚠️  No API key configured — service disabled');
     return;

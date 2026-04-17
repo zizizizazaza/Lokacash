@@ -35,6 +35,32 @@ class StockAnalysisService extends EventEmitter {
   // Buffer TTL: 5 minutes after completion
   private static BUFFER_TTL_MS = 5 * 60 * 1000;
 
+  private parseEnvBool(value: string | undefined, defaultValue = false): boolean {
+    if (typeof value !== 'string' || !value.trim()) return defaultValue;
+    return /^(1|true|yes|on)$/i.test(value.trim());
+  }
+
+  private extractTickersFromMessage(message: string): string[] {
+    const cleaned = String(message || '')
+      .replace(/^analyze\s*:\s*/i, '')
+      .replace(/\s+using\s+stock\s+analysis\s+agent.*$/i, '')
+      .trim();
+
+    if (!cleaned) return [];
+
+    const rawParts = cleaned
+      .split(/[\s,，;；、]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const candidates = rawParts.filter((part) => {
+      if (part.length < 2 || part.length > 20) return false;
+      return /[A-Za-z0-9]/.test(part);
+    });
+
+    return Array.from(new Set(candidates));
+  }
+
   private getPythonPath(): string {
     const isWindows = process.platform === 'win32';
     const venvPath = path.join(process.cwd(), 'tools', 'stock-analysis', '.venv');
@@ -66,6 +92,7 @@ class StockAnalysisService extends EventEmitter {
     onError: (error: string) => void,
   ): void {
     console.log(`[StockAnalysis] Starting stream analysis for: "${message.slice(0, 50)}..."`);
+    const startedAt = Date.now();
 
     // Initialize event buffer
     const buffer: SessionEventBuffer = {
@@ -93,6 +120,16 @@ class StockAnalysisService extends EventEmitter {
       PYTHONIOENCODING: 'utf-8',
     };
 
+    const disableSearxng = this.parseEnvBool(env.STOCK_ANALYSIS_DISABLE_SEARXNG, false);
+    const disableSerpapi = this.parseEnvBool(env.STOCK_ANALYSIS_DISABLE_SERPAPI, false);
+    if (disableSearxng) {
+      env.SEARXNG_PUBLIC_INSTANCES_ENABLED = 'false';
+      env.SEARXNG_BASE_URLS = '';
+    }
+    if (disableSerpapi) {
+      env.SERPAPI_API_KEYS = '';
+    }
+
     if (env.LOKA_AI_API_KEY) {
       env.AIHUBMIX_KEY = env.LOKA_AI_API_KEY;
       env.OPENAI_API_KEY = env.LOKA_AI_API_KEY;
@@ -105,6 +142,100 @@ class StockAnalysisService extends EventEmitter {
       const baseUrl = env.LOKA_AI_BASE_URL.replace('/chat/completions', '');
       env.OPENAI_API_BASE = baseUrl;
       env.OPENAI_BASE_URL = baseUrl;
+    }
+
+    const forceHeadless = this.parseEnvBool(env.STOCK_ANALYSIS_FORCE_HEADLESS, false);
+
+    const searxBaseUrls = (env.SEARXNG_BASE_URLS || '')
+      .split(',')
+      .map((url) => url.trim())
+      .filter(Boolean);
+    const searxPublicEnabled = this.parseEnvBool(env.SEARXNG_PUBLIC_INSTANCES_ENABLED, true);
+    console.log(
+      `[StockAnalysis] Search config: tavily=${Boolean(env.TAVILY_API_KEYS)} bocha=${Boolean(env.BOCHA_API_KEYS)} serpapi=${Boolean(env.SERPAPI_API_KEYS)} searxPublic=${searxPublicEnabled} searxSelfHosted=${searxBaseUrls.length} disableSearxng=${disableSearxng} disableSerpapi=${disableSerpapi} forceHeadless=${forceHeadless}`,
+    );
+
+    if (forceHeadless) {
+      const tickers = this.extractTickersFromMessage(message);
+      if (tickers.length === 0) {
+        const errMsg = 'Headless mode requires at least one resolvable ticker in message.';
+        console.warn(`[StockAnalysis] ${errMsg} message="${message.slice(0, 120)}"`);
+        buffer.steps.push({
+          type: 'error',
+          step: 1,
+          message: errMsg,
+          error: errMsg,
+          ts: Date.now(),
+        });
+        buffer.status = 'error';
+        onError(errMsg);
+        this.scheduleCleanup(sessionId);
+        return;
+      }
+
+      const startStep: StepEvent = {
+        type: 'tool_start',
+        step: 1,
+        tool: 'headless_pipeline',
+        displayName: 'Running headless stock analysis',
+        ts: Date.now(),
+      };
+      buffer.steps.push(startStep);
+      onStep(startStep);
+      console.log(`[StockAnalysis] Headless mode enabled. tickers=${tickers.join(', ')}`);
+
+      let headlessReport = '';
+      this.runAnalysis(
+        { tickers },
+        sessionId,
+        undefined,
+        (report) => {
+          headlessReport = report || '';
+        },
+      ).then(() => {
+        const doneStep: StepEvent = {
+          type: 'tool_done',
+          step: 1,
+          tool: 'headless_pipeline',
+          displayName: 'Running headless stock analysis',
+          success: true,
+          duration: Math.max(0, (Date.now() - startedAt) / 1000),
+          ts: Date.now(),
+        };
+        buffer.steps.push(doneStep);
+        onStep(doneStep);
+
+        const doneEvent: StepEvent = {
+          type: 'done',
+          step: 1,
+          totalSteps: 1,
+          content: headlessReport || 'Headless analysis completed (empty report).',
+          ts: Date.now(),
+        };
+        buffer.steps.push(doneEvent);
+        buffer.status = 'done';
+        buffer.finalReport = doneEvent.content;
+        onDone(doneEvent.content || '');
+        this.scheduleCleanup(sessionId);
+      }).catch((err: any) => {
+        const errorMsg = err?.message || 'Headless analysis failed';
+        const failStep: StepEvent = {
+          type: 'tool_done',
+          step: 1,
+          tool: 'headless_pipeline',
+          displayName: 'Running headless stock analysis',
+          success: false,
+          duration: Math.max(0, (Date.now() - startedAt) / 1000),
+          ts: Date.now(),
+        };
+        buffer.steps.push(failStep);
+        onStep(failStep);
+        buffer.steps.push({ type: 'error', step: 1, message: errorMsg, error: errorMsg, ts: Date.now() });
+        buffer.status = 'error';
+        onError(errorMsg);
+        this.scheduleCleanup(sessionId);
+      });
+      return;
     }
 
     // Use a unique session ID per analysis to prevent conversation history pollution.
@@ -123,9 +254,24 @@ class StockAnalysisService extends EventEmitter {
     });
 
     let stdoutBuffer = '';
+    let stdoutChunks = 0;
+    let stdoutBytes = 0;
+    let stderrChunks = 0;
+    let stderrBytes = 0;
+    let firstStdoutAt: number | null = null;
+    let firstStderrAt: number | null = null;
+    let providerListLogCount = 0;
+    let providerListSuppressedCount = 0;
+    let agentMaxStepSeen = 0;
+    let agentTotalStepsFromDone: number | null = null;
+    const toolDurationSeconds = new Map<string, number>();
+    const toolCallCount = new Map<string, number>();
 
     // stdout: JSONL structured events (one JSON per line)
     pythonProcess.stdout.on('data', (data: Buffer) => {
+      stdoutChunks += 1;
+      stdoutBytes += data.length;
+      if (firstStdoutAt === null) firstStdoutAt = Date.now();
       stdoutBuffer += data.toString('utf-8');
       const lines = stdoutBuffer.split('\n');
       // Keep the last (potentially incomplete) line in the buffer
@@ -137,6 +283,20 @@ class StockAnalysisService extends EventEmitter {
 
         try {
           const event: StepEvent = JSON.parse(trimmed);
+          if (typeof event.step === 'number' && Number.isFinite(event.step)) {
+            agentMaxStepSeen = Math.max(agentMaxStepSeen, event.step);
+          }
+          if (event.type === 'done' && typeof event.totalSteps === 'number' && Number.isFinite(event.totalSteps)) {
+            agentTotalStepsFromDone = event.totalSteps;
+          }
+          if (event.type === 'tool_done') {
+            const name = (event.tool || event.displayName || 'unknown_tool').trim();
+            const durationSec = Number(event.duration);
+            if (Number.isFinite(durationSec) && durationSec >= 0) {
+              toolDurationSeconds.set(name, (toolDurationSeconds.get(name) || 0) + durationSec);
+            }
+            toolCallCount.set(name, (toolCallCount.get(name) || 0) + 1);
+          }
 
           const isUiMetadata = (e: StepEvent) =>
             e.type === 'generating' && e.message === '[UI_METADATA]';
@@ -181,6 +341,9 @@ class StockAnalysisService extends EventEmitter {
 
     // stderr: Python logs (for debugging, not forwarded to frontend)
     pythonProcess.stderr.on('data', (data: Buffer) => {
+      stderrChunks += 1;
+      stderrBytes += data.length;
+      if (firstStderrAt === null) firstStderrAt = Date.now();
       const logs = data.toString('utf-8').split('\n');
       for (const logLine of logs) {
         const clean = logLine.trim();
@@ -195,6 +358,13 @@ class StockAnalysisService extends EventEmitter {
              continue;
           }
           if (!clean.includes('Tushare Token') && !clean.includes('通知渠道')) {
+            if (clean.startsWith('Provider List: https://docs.litellm.ai/docs/providers')) {
+              providerListLogCount += 1;
+              if (providerListLogCount > 1) {
+                providerListSuppressedCount += 1;
+                continue;
+              }
+            }
             console.log(`[StockAnalysis Log] ${clean}`);
           }
         }
@@ -222,6 +392,30 @@ class StockAnalysisService extends EventEmitter {
         buffer.status = 'error';
         const errorMsg = `Process exited with code ${code}`;
         onError(errorMsg);
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      const firstStdoutMs = firstStdoutAt ? firstStdoutAt - startedAt : -1;
+      const firstStderrMs = firstStderrAt ? firstStderrAt - startedAt : -1;
+      const agentRounds = forceHeadless
+        ? 0
+        : (agentTotalStepsFromDone ?? agentMaxStepSeen);
+      console.log(
+        `[StockAnalysis Timing] total_s=${(elapsedMs / 1000).toFixed(3)} first_stdout_s=${firstStdoutMs >= 0 ? (firstStdoutMs / 1000).toFixed(3) : 'n/a'} first_stderr_s=${firstStderrMs >= 0 ? (firstStderrMs / 1000).toFixed(3) : 'n/a'} stdout_chunks=${stdoutChunks} stdout_bytes=${stdoutBytes} stderr_chunks=${stderrChunks} stderr_bytes=${stderrBytes} provider_list_logs=${providerListLogCount} provider_list_suppressed=${providerListSuppressedCount} agent_rounds=${agentRounds} agent_rounds_source=${agentTotalStepsFromDone != null ? 'done.totalSteps' : 'max(step)'} exit_code=${code}`,
+      );
+      const toolBreakdown = Array.from(toolCallCount.entries())
+        .map(([name, calls]) => ({
+          name,
+          calls,
+          total: Number((toolDurationSeconds.get(name) || 0).toFixed(3)),
+        }))
+        .sort((a, b) => b.total - a.total);
+      if (toolBreakdown.length > 0) {
+        const top = toolBreakdown
+          .slice(0, 8)
+          .map((item) => `${item.name}:total=${item.total}s,calls=${item.calls}`)
+          .join(' | ');
+        console.log(`[StockAnalysis Timing] tool_breakdown_top=${top}`);
       }
 
       this.scheduleCleanup(sessionId);

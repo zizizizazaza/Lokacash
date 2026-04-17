@@ -6,6 +6,7 @@ via Twitter's GraphQL API. No external `bird` CLI binary needed - just Node.js 2
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -16,6 +17,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .relevance import token_overlap_relevance as _compute_relevance
 
+# One @handle in the topic → prefer account timeline (from:), not global @mention search.
+_TOPIC_HANDLE_RE = re.compile(r"@([A-Za-z0-9_]{1,15})\b", re.I)
+
 # Path to the vendored bird-search wrapper
 _BIRD_SEARCH_MJS = Path(__file__).parent / "vendor" / "bird-search" / "bird-search.mjs"
 
@@ -25,6 +29,27 @@ DEPTH_CONFIG = {
     "default": 30,
     "deep": 60,
 }
+
+# Per-depth subprocess timeouts (seconds). Override via env from Loka server .env (passed through to Python).
+_BIRD_TIMEOUT_DEFAULTS = {"quick": 45, "default": 60, "deep": 90}
+_BIRD_TIMEOUT_ENV = {
+    "quick": "BIRD_SEARCH_TIMEOUT_QUICK",
+    "default": "BIRD_SEARCH_TIMEOUT_DEFAULT",
+    "deep": "BIRD_SEARCH_TIMEOUT_DEEP",
+}
+
+
+def _bird_subprocess_timeout_sec(depth: str) -> int:
+    """Wall-clock timeout for each Node bird-search invocation (includes TLS + X API)."""
+    d = depth if depth in _BIRD_TIMEOUT_DEFAULTS else "default"
+    default = _BIRD_TIMEOUT_DEFAULTS[d]
+    env_name = _BIRD_TIMEOUT_ENV[d]
+    raw = os.environ.get(env_name, str(default))
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        n = default
+    return max(15, min(180, n))
 
 # Module-level credentials injected from .env config
 _credentials: Dict[str, str] = {}
@@ -237,7 +262,19 @@ def search_x(
         Raw Bird JSON response or error dict.
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
-    timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
+    timeout = _bird_subprocess_timeout_sec(depth)
+
+    # Single @handle → X "from:" timeline (author's posts). Avoids mostly-@replies from others.
+    handles = _TOPIC_HANDLE_RE.findall(topic or "")
+    if len(handles) == 1:
+        handle = handles[0]
+        query = f"from:{handle} since:{from_date}"
+        _log(f"Single-handle topic: timeline query {query}")
+        response = _run_bird_search(query, count, timeout)
+        items = parse_bird_response(response, query=topic)
+        if items:
+            return response
+        _log(f"0 results for {query}, falling back to keyword search")
 
     # Extract core subject - X search is literal, not semantic
     core_topic = _extract_core_subject(topic)
@@ -367,6 +404,15 @@ def search_handles(
     return all_items
 
 
+def _safe_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_bird_response(response: Dict[str, Any], query: str = "") -> List[Dict[str, Any]]:
     """Parse Bird response to match xai_x output format.
 
@@ -452,6 +498,31 @@ def parse_bird_response(response: Dict[str, Any], query: str = "") -> List[Dict[
             "why_relevant": "",  # Bird doesn't provide relevance explanations
             "relevance": _compute_relevance(query, str(tweet.get("text", ""))) if query else 0.7,
         }
+
+        # Author profile (from GraphQL user legacy — search timeline includes these when available)
+        af = _safe_int(
+            author.get("followersCount")
+            or author.get("followers_count")
+        )
+        aw = _safe_int(
+            author.get("followingCount")
+            or author.get("friends_count")
+            or author.get("following_count")
+        )
+        acct_created = author.get("accountCreatedAt") or author.get("created_at")
+        avatar_url = (
+            author.get("profileImageUrl")
+            or author.get("profile_image_url_https")
+            or author.get("profile_image_url")
+        )
+        if isinstance(acct_created, str) and acct_created.strip():
+            item["author_joined_raw"] = acct_created.strip()
+        if af is not None:
+            item["author_followers"] = af
+        if aw is not None:
+            item["author_following"] = aw
+        if isinstance(avatar_url, str) and avatar_url.strip():
+            item["author_avatar_url"] = avatar_url.strip()
 
         items.append(item)
 

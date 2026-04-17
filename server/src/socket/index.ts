@@ -3,7 +3,8 @@ import { Server } from 'socket.io';
 import { config } from '../config.js';
 import { verifyToken } from '../middleware/auth.js';
 import prisma from '../db.js';
-import { researchService } from '../services/research.service.js';
+import { researchService, type XProfileSnapshot } from '../services/research.service.js';
+import { web3ResearchService } from '../services/web3Research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
@@ -35,6 +36,252 @@ const activeChatSessions = new Map<string, string>();
 const chatAbortControllers = new Map<string, AbortController>();
 /** Dedup map keyed by sessionId::content — prevents duplicate messages from queue flush + direct emit race */
 const chatDedupMap = new Map<string, number>();
+
+interface AgentChatImage {
+  url: string;
+  mime?: string;
+  name?: string;
+}
+
+/** Fallback when the router omits `search.showXAccountProfile` (language-agnostic hints only). */
+function wantsTwitterProjectProfileHint(q: string): boolean {
+  return /推特|Twitter|推文|X平台|[\s，、]X[\s，、]|x\.com|社交平台.*(项目|账号)|调研.*(推特|Twitter|推文)|分析.*(推特|Twitter|推文)|twitter.*project/i.test(
+    q,
+  );
+}
+
+const SOCIAL_HANDLE_STOPWORDS = new Set([
+  'twitter',
+  'x',
+  'com',
+  'project',
+  'account',
+  'profile',
+  'analysis',
+  'research',
+  'about',
+  'the',
+  'and',
+  'for',
+  'with',
+  'what',
+  'how',
+]);
+
+function toSafeNumber(n: unknown): number {
+  return typeof n === 'number' && Number.isFinite(n) ? n : 0;
+}
+
+function candidateTokensFromQuery(userContent: string): string[] {
+  const q = (userContent || '').toLowerCase();
+  const explicit = Array.from(new Set((q.match(/@([a-z0-9_]{1,15})\b/gi) || [])
+    .map((x) => x.replace(/^@/, '').toLowerCase())));
+  if (explicit.length) return explicit;
+
+  const words = Array.from(new Set((q.match(/\b[a-z][a-z0-9_]{2,30}\b/g) || [])
+    .map((w) => w.toLowerCase())
+    .filter((w) => !SOCIAL_HANDLE_STOPWORDS.has(w))));
+  return words.slice(0, 8);
+}
+
+function explicitHandlesFromText(text: string): string[] {
+  const q = (text || '').toLowerCase();
+  return Array.from(
+    new Set(
+      (q.match(/@([a-z0-9_]{1,15})\b/gi) || [])
+        .map((x) => x.replace(/^@/, '').toLowerCase()),
+    ),
+  );
+}
+
+function pickXProfileForUser(profiles: XProfileSnapshot[], userContent: string): XProfileSnapshot | null {
+  if (!profiles.length) return null;
+  const q = (userContent || '').toLowerCase();
+  const explicitHandles = Array.from(new Set((q.match(/@([a-z0-9_]{1,15})\b/gi) || [])
+    .map((x) => x.replace(/^@/, '').toLowerCase())));
+  const normalizedProfiles = profiles.map((p) => ({
+    profile: p,
+    handle: (p.handle || '').trim().toLowerCase(),
+    followers: toSafeNumber(p.followers),
+  })).filter((x) => x.handle.length > 0);
+
+  // High-confidence path: explicit @handle must match exactly, otherwise do not show card.
+  if (explicitHandles.length > 0) {
+    const exactMatches = normalizedProfiles.filter((p) => explicitHandles.includes(p.handle));
+    if (!exactMatches.length) return null;
+    exactMatches.sort((a, b) => b.followers - a.followers);
+    return exactMatches[0].profile;
+  }
+
+  // Soft path (e.g. "twitter 的 Erebor"): try token containment, pick highest-followers candidate.
+  const tokens = candidateTokensFromQuery(userContent);
+  if (!tokens.length) return null;
+  const softMatches = normalizedProfiles.filter((p) =>
+    tokens.some((t) => p.handle.includes(t) || t.includes(p.handle)),
+  );
+  if (!softMatches.length) return null;
+  softMatches.sort((a, b) => b.followers - a.followers);
+  return softMatches[0].profile;
+}
+
+function normalizeIncomingImages(images: unknown): AgentChatImage[] {
+  if (!Array.isArray(images)) return [];
+  const normalized: AgentChatImage[] = [];
+  for (const img of images) {
+    if (!img || typeof img !== 'object') continue;
+    const candidate = img as { url?: unknown; mime?: unknown; name?: unknown };
+    const url = typeof candidate.url === 'string' ? candidate.url.trim() : '';
+    if (!url) continue;
+    normalized.push({
+      url,
+      mime: typeof candidate.mime === 'string' ? candidate.mime : undefined,
+      name: typeof candidate.name === 'string' ? candidate.name : undefined,
+    });
+    if (normalized.length >= 4) break;
+  }
+  return normalized;
+}
+
+type ChatMeta = {
+  images?: AgentChatImage[];
+  /** Text-only image understanding for the current user turn, produced before routing. */
+  routeImageDigest?: string;
+  /** ISO timestamp when routeImageDigest was generated */
+  routeImageDigestAt?: string;
+  /** Textual memory of prior user image turns (vision stripped from model context). */
+  imageSummary?: string;
+  /** ISO timestamp when imageSummary was generated */
+  imageSummaryAt?: string;
+  /** Original images archived when converting a user image turn to summary-only */
+  archivedImages?: AgentChatImage[];
+  [key: string]: unknown;
+};
+
+function safeParseChatMeta(raw: string | null | undefined): ChatMeta | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ChatMeta;
+  } catch {
+    return null;
+  }
+}
+
+function stringifyChatMeta(meta: ChatMeta): string {
+  return JSON.stringify(meta);
+}
+
+function appendImageArchiveToUserText(userText: string, urls: string[]): string {
+  const unique = Array.from(new Set(urls.map((u) => u.trim()).filter(Boolean)));
+  if (unique.length === 0) return userText;
+  const isZh = /[\u4e00-\u9fff]/.test(userText);
+  const header = isZh ? '【历史图片链接】' : '[Earlier image links]';
+  const lines = unique.map((u, i) => (isZh ? `${i + 1}. ${u}` : `${i + 1}. ${u}`)).join('\n');
+  const block = `${header}\n${lines}`;
+  if (!userText.trim()) return block;
+  return `${userText.trim()}\n\n${block}`;
+}
+
+function buildModelUserContent(originalText: string, meta: ChatMeta | null): string {
+  const urls = (meta?.archivedImages || []).map((i) => i.url).filter(Boolean);
+  const summary = typeof meta?.imageSummary === 'string' ? meta.imageSummary.trim() : '';
+  const routeImageDigest = typeof meta?.routeImageDigest === 'string' ? meta.routeImageDigest.trim() : '';
+  let text = originalText || '';
+  if (routeImageDigest) {
+    const isZh = /[\u4e00-\u9fff]/.test(originalText) || /[\u4e00-\u9fff]/.test(routeImageDigest);
+    const header = isZh ? '【图片理解】' : '[Image understanding]';
+    text = text.trim() ? `${text.trim()}\n\n${header}\n${routeImageDigest}` : `${header}\n${routeImageDigest}`;
+  }
+  if (summary) {
+    const isZh = /[\u4e00-\u9fff]/.test(originalText) || /[\u4e00-\u9fff]/.test(summary);
+    const header = isZh ? '【历史图片摘要】' : '[Earlier image summary]';
+    text = text.trim() ? `${text.trim()}\n\n${header}\n${summary}` : `${header}\n${summary}`;
+  }
+  if (urls.length) {
+    text = appendImageArchiveToUserText(text, urls);
+  }
+  return text;
+}
+
+async function summarizeImagesForUserTurn(args: {
+  ai: LokaAIService;
+  userText: string;
+  images: AgentChatImage[];
+}): Promise<string> {
+  const { ai, userText, images } = args;
+  if (!images.length) return '';
+  if (!ai.isConfigured) return '';
+
+  const isZh = /[\u4e00-\u9fff]/.test(userText);
+
+  const prompt = `You are extracting durable chat memory from images for a multi-turn assistant.
+Return JSON ONLY (no markdown) with this schema:
+{"summary":"..."}
+
+Rules:
+- Write the summary in ${isZh ? 'Chinese' : 'English'}.
+- Be faithful; if unreadable, say so briefly.
+- Focus on text, numbers, charts, UI labels, logos, and any task implied by the image(s).
+- Keep it compact: <= 900 characters.
+- Do not include chain-of-thought.
+
+User message text (may be empty):
+${userText || '(empty)'}`;
+
+  const res = await ai.chat([{ role: 'user', content: prompt, images }], 'system', undefined);
+  const raw = (res.content || '').trim();
+  try {
+    const parsed = JSON.parse(raw) as { summary?: string };
+    return typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
+  } catch {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return '';
+    try {
+      const parsed = JSON.parse(m[0]) as { summary?: string };
+      return typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
+    } catch {
+      return '';
+    }
+  }
+}
+
+async function archivePriorUserImageTurns(args: {
+  ai: LokaAIService;
+  userId: string;
+  sessionId: string;
+  currentMessageId: string;
+}) {
+  const { ai, userId, sessionId, currentMessageId } = args;
+  try {
+    const prior = await prisma.chatMessage.findMany({
+      where: { userId, sessionId, role: 'user' },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+      select: { id: true, content: true, metadata: true, createdAt: true },
+    });
+
+    for (const row of prior) {
+      if (row.id === currentMessageId) continue;
+      const meta = safeParseChatMeta(row.metadata);
+      const imgs = normalizeIncomingImages(meta?.images);
+      if (!imgs.length) continue;
+      if (meta?.imageSummary && String(meta.imageSummary).trim()) continue;
+
+      const summary = await summarizeImagesForUserTurn({ ai, userText: row.content || '', images: imgs });
+      const nextMeta: ChatMeta = { ...(meta || {}) };
+      nextMeta.archivedImages = imgs;
+      delete nextMeta.images;
+      nextMeta.imageSummary = summary || (imgs.length ? '（图片内容摘要生成失败：已保留链接）' : '');
+      nextMeta.imageSummaryAt = new Date().toISOString();
+
+      await prisma.chatMessage.update({
+        where: { id: row.id },
+        data: { metadata: stringifyChatMeta(nextMeta) },
+      });
+    }
+  } catch (e: any) {
+    console.warn('[agent:chat] archivePriorUserImageTurns failed:', e?.message || e);
+  }
+}
 
 export function setupSocket(server: HttpServer) {
   io = new Server(server, {
@@ -410,13 +657,17 @@ Text: "${query}"`;
       }
     });
 
-    socket.on('agent:chat', async (data: { content: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean }) => {
-      if (!data?.content) return;
+    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[] }) => {
+      const userContent = typeof data?.content === 'string' ? data.content : '';
+      const images = normalizeIncomingImages(data?.images);
+      const hasImages = images.length > 0;
+      if (!userContent.trim() && !hasImages) return;
 
       const sessionId = data.sessionId || crypto.randomUUID();
+      const dedupImageKey = images.map((img) => img.url).join('|');
 
       // ── Dedup guard: skip identical content for the same session within 3s ──
-      const dedupKey = `${sessionId}::${data.content}`;
+      const dedupKey = `${sessionId}::${userContent}::${dedupImageKey}`;
       const now = Date.now();
       const lastSeen = chatDedupMap.get(dedupKey);
       if (lastSeen && now - lastSeen < 3000) {
@@ -443,17 +694,33 @@ Text: "${query}"`;
 
       console.log('[agent:chat]', {
         sessionId,
-        contentPreview: data.content.slice(0, 80),
+        contentPreview: userContent.slice(0, 80),
+        images: images.length,
       });
 
       const emitter = createModuleEmitter(userId, sessionId);
 
+      let latestUserMessageId: string | null = null;
       if (!data.hidden) {
         try {
-          await prisma.chatMessage.create({
-            data: { userId, sessionId, role: 'user', content: data.content, agentId: 'superagent' }
+          const userMeta = hasImages ? JSON.stringify({ images }) : null;
+          const createdUser = await prisma.chatMessage.create({
+            data: { userId, sessionId, role: 'user', content: userContent, agentId: 'superagent', metadata: userMeta },
+            select: { id: true },
           });
+          latestUserMessageId = createdUser.id;
         } catch (dbErr) { }
+      }
+
+      // When a new user image turn arrives, archive prior user image turns into summary+links
+      // so subsequent model calls only keep the latest round as true vision input.
+      if (latestUserMessageId) {
+        await archivePriorUserImageTurns({
+          ai: aiService,
+          userId,
+          sessionId,
+          currentMessageId: latestUserMessageId,
+        });
       }
 
       // ── Query session history for multi-turn context ──
@@ -465,17 +732,19 @@ Text: "${query}"`;
         where: { userId, sessionId },
         orderBy: { createdAt: 'asc' },
         take: MAX_HISTORY_FOR_SYNTHESIS,
-        select: { role: true, content: true },
+        select: { role: true, content: true, metadata: true },
       });
 
-      const formatHistory = (messages: { role: string; content: string }[], limit: number): string => {
+      const formatHistory = (messages: { role: string; content: string; metadata: string | null }[], limit: number): string => {
         return messages
           .slice(-limit)
           .map(m => {
             const label = m.role === 'user' ? 'User' : 'Assistant';
-            const text = m.role === 'assistant' && m.content.length > ASSISTANT_CONTENT_CAP
-              ? m.content.slice(0, ASSISTANT_CONTENT_CAP) + '...(truncated)'
-              : m.content;
+            const meta = m.role === 'user' ? safeParseChatMeta(m.metadata) : null;
+            const baseText = m.role === 'user' ? buildModelUserContent(m.content || '', meta) : m.content;
+            const text = m.role === 'assistant' && baseText.length > ASSISTANT_CONTENT_CAP
+              ? baseText.slice(0, ASSISTANT_CONTENT_CAP) + '...(truncated)'
+              : baseText;
             return `[${label}]: ${text}`;
           })
           .join('\n');
@@ -484,24 +753,112 @@ Text: "${query}"`;
       activeChatSessions.set(sessionId, 'running');
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
+      const requestStartedAt = Date.now();
+      const sinceRequestStart = () => Date.now() - requestStartedAt;
+      const asSeconds = (ms: number) => (ms / 1000).toFixed(3);
 
-      let plan: any;
-      try {
-        const routingHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_ROUTING);
-        const routingQuery = routingHistory
-          ? `【Conversation Context】\n${routingHistory}\n\n【Latest User Message】\n${data.content}`
-          : data.content;
-        plan = await aiService.evaluateRouting(routingQuery);
-      } catch (routingErr: any) {
-        console.error('evaluateRouting failed:', routingErr.message);
-        plan = { isSimpleChat: true, queryType: 'general', capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false } } };
+      let routeImageDigest = '';
+      if (hasImages) {
+        const digestStartedAt = Date.now();
+        try {
+          routeImageDigest = await aiService.analyzeImagesForRouting(userContent, images);
+          if (latestUserMessageId && routeImageDigest) {
+            await prisma.chatMessage.update({
+              where: { id: latestUserMessageId },
+              data: {
+                metadata: stringifyChatMeta({
+                  images,
+                  routeImageDigest,
+                  routeImageDigestAt: new Date().toISOString(),
+                }),
+              },
+            });
+          }
+          console.log(
+            `[agent:chat:timing] image_digest_s=${asSeconds(Date.now() - digestStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} digest_len=${routeImageDigest.length}`,
+          );
+        } catch (digestErr: any) {
+          console.warn('[agent:chat] route image digest failed:', digestErr?.message || digestErr);
+        }
       }
 
-      if (data.mode === 'roundtable') {
+      let plan: any;
+      const routingStartedAt = Date.now();
+      try {
+        const routingHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_ROUTING);
+        const routingDigest =
+          routeImageDigest && routeImageDigest.length > 180
+            ? `${routeImageDigest.slice(0, 180)}...(truncated)`
+            : routeImageDigest;
+        const routingDigestBlock = routeImageDigest
+          ? `\n\n【Latest Image Digest】\n${routingDigest}`
+          : '';
+        const routingQuery = routingHistory
+          ? `【Conversation Context】\n${routingHistory}\n\n【Latest User Message】\n${userContent}${routingDigestBlock}`
+          : `${userContent}${routingDigestBlock}`;
+        plan = await aiService.evaluateRouting(routingQuery);
+        if (routeImageDigest) {
+          plan.imageDigest = routeImageDigest;
+        }
+        console.log(
+          `[agent:chat:timing] routing_s=${asSeconds(Date.now() - routingStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} digest_len=${routeImageDigest.length}`,
+        );
+      } catch (routingErr: any) {
+        console.error('evaluateRouting failed:', routingErr.message);
+        plan = {
+          isSimpleChat: true,
+          queryType: 'general',
+          imageDigest: routeImageDigest,
+          capabilities: { analysis: { needed: false }, search: { needed: false }, simulate: { needed: false }, web3: { needed: false } },
+        };
+      }
+
+      if (!hasImages && data.mode === 'roundtable') {
         plan.isSimpleChat = false;
       }
 
-      // Guru Council mode: always trigger simulation + search
+      // Guardrail: image-heavy stock questions can be misrouted as general when digest is terse.
+      // If user explicitly asks about stocks and routing says simple chat, force analysis/search.
+      if (hasImages && routeImageDigest && plan.isSimpleChat) {
+        const stockIntent = /股票|A股|港股|美股|个股|标的|行情|涨停|跌停|分析|估值|stock|stocks|share|ticker|equity|price/i.test(
+          `${userContent}\n${routeImageDigest}`,
+        );
+        if (stockIntent) {
+          const tickersFromDigest = Array.from(
+            new Set((routeImageDigest.match(/\b\d{6}\b/g) || []).slice(0, 5)),
+          );
+          const digestForSearch = routeImageDigest.replace(/\s+/g, ' ').trim().slice(0, 220);
+          const isZhIntent = /[\u4e00-\u9fff]/.test(userContent || routeImageDigest || '');
+          const fallbackSearchQuery = isZhIntent
+            ? `${digestForSearch} 股票分析 最新消息`
+            : `${digestForSearch} stock analysis latest news`;
+          plan = {
+            ...plan,
+            isSimpleChat: false,
+            queryType: 'investment-analysis',
+            capabilities: {
+              ...plan.capabilities,
+              analysis: {
+                ...plan.capabilities.analysis,
+                needed: true,
+                tickers: tickersFromDigest.length > 0 ? tickersFromDigest : plan.capabilities.analysis?.tickers,
+              },
+              search: {
+                ...plan.capabilities.search,
+                needed: true,
+                query: plan.capabilities.search?.query || fallbackSearchQuery,
+              },
+              simulate: { ...plan.capabilities.simulate, needed: false },
+              web3: { ...plan.capabilities.web3, needed: false },
+            },
+          };
+          console.warn(
+            `[agent:chat:routing] image-stock safeguard activated. digest_len=${routeImageDigest.length} tickers=${tickersFromDigest.join(',') || 'none'}`,
+          );
+        }
+      }
+
+      // Guru Council mode: always trigger simulation + search (including with images)
       if (data.agentId === 'guru-council') {
         plan.isSimpleChat = false;
         plan.queryType = 'guru-council';
@@ -533,7 +890,7 @@ Text: "${query}"`;
           'stanley druckenmiller': 'stanley_druckenmiller', 'druckenmiller': 'stanley_druckenmiller',
           'warren buffett': 'warren_buffett', 'buffett': 'warren_buffett', 'warren': 'warren_buffett',
         };
-        const queryLower = data.content.toLowerCase();
+        const queryLower = userContent.toLowerCase();
         const mentionedSet = new Set<string>();
         // Sort by length descending to match longer phrases first
         const sortedKeys = Object.keys(GURU_NAME_MAP).sort((a, b) => b.length - a.length);
@@ -555,7 +912,7 @@ Text: "${query}"`;
       
       socket.emit('agent:chat:routed', { 
         sessionId, 
-        mode: data.mode === 'roundtable' ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
+        mode: (!hasImages && data.mode === 'roundtable') ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
       });
 
       const streamToChat = (chunk: string) => {
@@ -568,7 +925,14 @@ Text: "${query}"`;
         emitter.emitModule('search', 'active', { variant: 'data_providers', providers: [] });
         try {
           const context = await prisma.chatMessage.findMany({ where: { userId, sessionId }, orderBy: { createdAt: 'asc' }, take: 10 });
-          const mappedContext = context.map(m => ({ role: m.role, content: m.content, agentId: m.agentId }));
+          const mappedContext = context.map((m) => {
+            const meta = safeParseChatMeta(m.metadata);
+            if (m.role === 'user') {
+              return { role: m.role, content: buildModelUserContent(m.content || '', meta), agentId: m.agentId };
+            }
+
+            return { role: m.role, content: m.content, agentId: m.agentId };
+          });
           const stream = await aiService.chatStream(mappedContext, 'superagent', undefined, 2560);
           emitter.emitModule('search', 'completed');
 
@@ -636,11 +1000,13 @@ Text: "${query}"`;
 
       const promises: Promise<{ type: string; data: any }>[] = [];
       const startTime = Date.now();
+      const toolDispatchStartedAt = Date.now();
 
       let finalSocialSources: any[] = [];
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
+      let savedXProfileCard: Record<string, unknown> | null = null;
 
       if (plan.capabilities.search.needed) {
         emitter.emitModule('search', 'active', {
@@ -653,11 +1019,33 @@ Text: "${query}"`;
         });
         const signalResearchLogLines: string[] = [];
         let logHintSources: any[] = [];
+        // Faster default for SuperAgent chat: focus on X + web, skip slower auxiliary sources unless overridden.
+        const superagentSearchSources = (process.env.SUPERAGENT_LAST30DAYS_SEARCH || 'x,web').trim();
+        const routedSearchQuery = plan.capabilities.search.query || [userContent, plan.imageDigest].filter(Boolean).join(' ; ');
+        const explicitHandles = explicitHandlesFromText(userContent);
+        let effectiveSearchQuery = routedSearchQuery;
+        if (explicitHandles.length > 0) {
+          const missingHandles = explicitHandles.filter(
+            (h) => !new RegExp(`@?${h}\\b`, 'i').test(routedSearchQuery),
+          );
+          if (missingHandles.length > 0) {
+            effectiveSearchQuery = `${routedSearchQuery} ${missingHandles.map((h) => `@${h}`).join(' ')}`.trim();
+            console.log(
+              `[search_query] patched handles into routed query. original="${routedSearchQuery}" patched="${effectiveSearchQuery}"`,
+            );
+          }
+        }
 
         promises.push(
           researchService.runDeepResearch(
-            plan.capabilities.search.query || data.content,
-            { deep: false },
+            effectiveSearchQuery,
+            {
+              deep: false,
+              searchSources: superagentSearchSources || undefined,
+              // Skip last30days internal synthesis to avoid double summarization latency;
+              // SuperAgent already performs final synthesis after all tools settle.
+              skipInnerSynthesis: true,
+            },
             {
               onResearchLine: (line) => {
                 const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '');
@@ -686,6 +1074,17 @@ Text: "${query}"`;
             }
             // Fallback: log-based platform hints
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
+            const sourceDomains = Array.from(new Set((socialSources || []).map((s) => s.domain).filter(Boolean)));
+            const sourcePreview = (socialSources || [])
+              .slice(0, 3)
+              .map((s) => `${s.domain || 'unknown'}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
+              .join(' || ');
+            console.log(
+              `[sources] final extraction: count=${socialSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
+            );
+            if (sourcePreview) {
+              console.log(`[sources] final extraction preview: ${sourcePreview}`);
+            }
 
             finalSocialSources = socialSources;
             emitter.emitModule('search', 'completed', {
@@ -696,11 +1095,64 @@ Text: "${query}"`;
                 { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
               ]
             });
+            const xProfiles = res.xProfiles || [];
+            const routerXProfileFlag = plan?.capabilities?.search?.showXAccountProfile;
+            const shouldShowXProfileCard =
+              xProfiles.length &&
+              (routerXProfileFlag === true ||
+                (routerXProfileFlag !== false && wantsTwitterProjectProfileHint(userContent)));
+            if (shouldShowXProfileCard) {
+              const picked = pickXProfileForUser(xProfiles, userContent);
+              if (picked && (picked.followers != null || picked.following != null || picked.joinedDisplay || picked.joinedRaw)) {
+                const payload = {
+                  handle: picked.handle,
+                  profileUrl: `https://x.com/${encodeURIComponent(picked.handle)}`,
+                  followers: picked.followers,
+                  following: picked.following,
+                  joinedDisplay: picked.joinedDisplay || picked.joinedRaw || '',
+                  avatarUrl: picked.avatarUrl || '',
+                };
+                savedXProfileCard = payload;
+                emitToUser(userId, 'agent:chat:x_profile', { sessionId, profile: payload });
+                console.log(
+                  `[x_profile] selected handle=@${payload.handle} followers=${payload.followers ?? 'n/a'} following=${payload.following ?? 'n/a'} query="${userContent.slice(0, 120)}"`,
+                );
+              } else {
+                console.log(
+                  `[x_profile] skipped: no high-confidence profile match for query="${userContent.slice(0, 120)}" profiles=${xProfiles.length}`,
+                );
+              }
+            }
             return { type: 'SEARCH', data: res.summary, sources: socialSources };
           }).catch(e => {
             emitter.emitModule('search', 'completed', {});
             return { type: 'SEARCH', data: 'Error: ' + e.message };
           })
+        );
+      }
+
+      if (plan.capabilities.web3?.needed) {
+        emitter.emitModule('web3', 'active', {
+          variant: 'coingecko_mcp',
+          label: 'CoinGecko MCP',
+        });
+        const routedWeb3Q = (plan.capabilities.web3.query || '').trim();
+        const originalQ = userContent.trim();
+        const web3Q =
+          routedWeb3Q && originalQ && routedWeb3Q !== originalQ
+            ? `${originalQ} ; ${routedWeb3Q}`
+            : routedWeb3Q || originalQ;
+        promises.push(
+          web3ResearchService
+            .runQuery(web3Q)
+            .then((report) => {
+              emitter.emitModule('web3', 'completed', { variant: 'coingecko_mcp' });
+              return { type: 'WEB3', data: report };
+            })
+            .catch((e) => {
+              emitter.emitModule('web3', 'completed', {});
+              return { type: 'WEB3', data: 'Error: ' + (e as Error).message };
+            }),
         );
       }
 
@@ -719,7 +1171,7 @@ Text: "${query}"`;
             // the raw analysis buffer instead of the final synthesized content
             const analysisSubSessionId = `${sessionId}:analysis`;
             stockAnalysisService.runStreamAnalysis(
-              "Analyze: " + (plan.capabilities.analysis.tickers?.join(', ') || data.content),
+              "Analyze: " + (plan.capabilities.analysis.tickers?.join(', ') || userContent),
               analysisSubSessionId,
               userId,
               (step: any) => {
@@ -790,7 +1242,7 @@ Text: "${query}"`;
                       const numPrice = typeof q.price === 'number' ? q.price : parseFloat(String(q.price));
                       if (!isNaN(numPrice)) {
                       // Detect language from user's original message
-                      const isZh = /[\u4e00-\u9fff]/.test(data.content);
+                      const isZh = /[\u4e00-\u9fff]/.test(userContent);
                       const fmtVol = (v: number | null) => {
                         if (v == null) return undefined;
                         if (isZh) {
@@ -832,7 +1284,7 @@ Text: "${query}"`;
                           if (/\.(US|NASDAQ|NYSE)$/i.test(t)) return isZh ? '美股' : 'US';
                         }
                         // Check user query for market hints
-                        const query = data.content.toLowerCase();
+                        const query = (userContent || '').toLowerCase();
                         if (/港股|hk\b|恒生|腾讯|美团|小米|阿里巴巴|京东|网易|百度/.test(query))
                           return isZh ? '港股' : 'HK';
                         if (/a\s*股|沪深|上证|深证|创业板|科创板|茅台|平安|招商/.test(query))
@@ -865,7 +1317,7 @@ Text: "${query}"`;
                       savedQuoteCard = quotePayload;
                       // Validate: only emit the quote card if the stock name or symbol
                       // reasonably matches the user's query (prevent wrong-stock cards)
-                      const queryLower = data.content.toLowerCase();
+                      const queryLower = (userContent || '').toLowerCase();
                       const nameMatch = q.name && queryLower.includes(q.name.toLowerCase());
                       const symMatch = q.symbol && queryLower.includes(q.symbol.toLowerCase());
                       const tickerMatch = (plan.capabilities.analysis.tickers || []).some(
@@ -910,10 +1362,17 @@ Text: "${query}"`;
         if (plan.specificGurus?.length > 0) {
           analysisOptions.analysts = plan.specificGurus;
         }
+        console.log(
+          `[agent:chat:simulation] planned_requested=${analysisOptions.analysts?.join(',') || '(tool_default)'} tickers=${tickers.join(',')} sessionId=${sessionId}`,
+        );
 
         promises.push(
           hedgefundService.runAnalysis(analysisOptions, () => {})
             .then(hfResult => {
+              const toDisplayName = (name: string) => name.replace(/_agent$/i, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+              const plannedAnalysts = (hfResult.analysts || []).map(toDisplayName);
+              const producedAnalysts = Object.keys(hfResult.analyst_signals || {});
+              const missingAnalysts = plannedAnalysts.filter((name) => !producedAnalysts.includes(name));
               const panelists = Object.keys(hfResult.analyst_signals || {}).map(p => ({
                 name: p,
                 avatar: 'L',
@@ -922,6 +1381,12 @@ Text: "${query}"`;
                 confidence: Object.values(hfResult.analyst_signals[p] || {})[0]?.confidence || 0,
                 group: GENERIC_ANALYST_KEYS.has(p) ? 'analyst' : 'guru'
               }));
+              console.log(
+                `[agent:chat:simulation] planned_effective=${plannedAnalysts.join(',') || '(none)'} produced=${producedAnalysts.join(',') || '(none)'} missing=${missingAnalysts.join(',') || '(none)'} sessionId=${sessionId}`,
+              );
+              console.log(
+                `[agent:chat:simulation] frontend_panelists=${panelists.map((x) => x.name).join(',') || '(none)'} count=${panelists.length} sessionId=${sessionId}`,
+              );
               finalPanelists = panelists;
               emitter.emitModule('simulation', 'completed', { panelists });
               const isGuruCouncil = plan.queryType === 'guru-council';
@@ -935,7 +1400,15 @@ Text: "${query}"`;
         );
       }
 
+      console.log(
+        `[agent:chat:timing] tool_dispatch_s=${asSeconds(Date.now() - toolDispatchStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} tools=${promises.length}`,
+      );
+
+      const toolsWaitStartedAt = Date.now();
       const results = await Promise.allSettled(promises);
+      console.log(
+        `[agent:chat:timing] tools_parallel_wait_s=${asSeconds(Date.now() - toolsWaitStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId}`,
+      );
       if (isAborted()) {
         console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
         activeChatSessions.delete(sessionId);
@@ -944,12 +1417,16 @@ Text: "${query}"`;
       }
       console.log('[agent:chat] Promise.allSettled completed:', results.map(r => r.status === 'fulfilled' ? `✅ ${r.value.type}` : `❌ ${(r as any).reason?.message}`).join(', '));
       
+      const contextBuildStartedAt = Date.now();
       const synthHistory = formatHistory(sessionHistory, MAX_HISTORY_FOR_SYNTHESIS);
       let contextString = "";
       if (synthHistory) {
         contextString += "【CONVERSATION HISTORY — for continuity, do NOT repeat old findings】\n" + synthHistory + "\n\n";
       }
-      contextString += "【User Original Request】\n" + data.content + "\n\n";
+      contextString += "【User Original Request】\n" + userContent + "\n\n";
+      if (plan.imageDigest) {
+        contextString += `【IMAGE_DIGEST】\n${plan.imageDigest}\n\n`;
+      }
       
       results.forEach(r => {
         if (r.status === 'fulfilled') {
@@ -979,7 +1456,7 @@ Your task is to produce a professional-grade DEEP RESEARCH REPORT — the kind t
 This is NOT a quick take or trader memo. This is a thorough, multi-dimensional research product that synthesizes all available evidence into a coherent investment thesis with rigorous supporting analysis.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 ${inputContext}
 
 === REPORT STRUCTURE ===
@@ -1173,7 +1650,7 @@ Your job is to form a clear, tradeable view and guide decision-making — ground
 Write like a sharp internal memo or trader note — not a formal report.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 Context:
 ${contextString}
 
@@ -1306,7 +1783,7 @@ Your job is NOT to summarize search results. Your job is to synthesize informati
 Write like an internal research brief — clear, structured, data-driven, with strong conclusions.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 Context:
 ${contextString}
 
@@ -1364,7 +1841,7 @@ Questions to Watch (LAST SECTION)
 Your job is to deliver a fast, scannable overview of what happened in the market — not deep analysis. Think: morning market email that a trader reads in 2 minutes.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 Context:
 ${contextString}
 
@@ -1413,7 +1890,7 @@ Your job is to present each guru's perspective through their known investment fr
 IMPORTANT: The raw simulation data below contains only short signal summaries (1-2 sentences per analyst). Your job is to EXPAND each guru's view into a full analysis paragraph by applying their well-known investment framework to the available data. Use the signal direction (bullish/bearish/neutral) and confidence as anchors, then reason through HOW that guru would arrive at that conclusion based on their published methodology.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 Context:
 ${contextString}
 
@@ -1469,7 +1946,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 Your task is to produce a SELF-CONTAINED HTML document that presents each guru's analysis in a visually compelling way. Think: investor presentation deck meets Apple design.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 ${inputContext}
 
 === OUTPUT FORMAT ===
@@ -1621,7 +2098,7 @@ The HTML must:
 Your task is to produce a professional-grade DEEP RESEARCH REPORT rendered as a SELF-CONTAINED HTML document. Think: Bloomberg Terminal meets Apple design aesthetics.
 
 === INPUT ===
-Topic: ${data.content}
+Topic: ${userContent}
 ${inputContext}
 
 === OUTPUT FORMAT ===
@@ -1809,6 +2286,7 @@ The HTML must:
           break;
       }
       const synthesisMaxTokens = queryType === 'market-brief' ? 4096 : 8192;
+      const synthesisModelOverride = config.lokaAi.synthesisModel || undefined;
 
       // ── Helper: run HTML generation stream and return the result ──
       const runHtmlGeneration = async (htmlInput: string): Promise<string> => {
@@ -1884,8 +2362,12 @@ The HTML must:
 
       // ── Start parallel HTML generation for non-roundtable eligible queries ──
       const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+      const htmlReportEnabled = htmlEligible && !config.superAgentDisableHtmlReport;
+      if (htmlEligible && config.superAgentDisableHtmlReport) {
+        console.log('[agent:chat:html] Skipped (SUPERAGENT_DISABLE_HTML_REPORT is set)');
+      }
       let parallelHtmlPromise: Promise<string> | null = null;
-      if (htmlEligible && !isDeepResearch && contextString.length > 200) {
+      if (htmlReportEnabled && !isDeepResearch && contextString.length > 200) {
         console.log(`[agent:chat:html] Starting PARALLEL HTML generation (queryType=${queryType}), contextString length=${contextString.length}`);
         emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 }); // msgIdx resolved later
         parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
@@ -1894,14 +2376,103 @@ The HTML must:
         });
       }
 
+      const buildLocalSynthesisFallback = (cause: string): string => {
+        const compact = contextString
+          .replace(/\r/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        const preview = compact.length > 1400 ? `${compact.slice(0, 1400)}\n...(truncated)` : compact;
+        const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+        if (isZh) {
+          return [
+            '## 临时降级说明',
+            `最终合成阶段遇到上游模型错误（${cause}）。当前先返回降级摘要，避免你白等。`,
+            '',
+            '### 建议',
+            '- 你可以直接回复“继续深度总结”，我会基于当前已抓取数据再次合成。',
+            '- 如果连续失败，建议稍后重试或切换模型。',
+            preview ? `\n### 已抓取数据摘要（截断）\n${preview}` : '',
+          ].join('\n');
+        }
+        return [
+          '## Temporary Fallback',
+          `Final synthesis failed due to upstream model error (${cause}). Returning a degraded summary so the run does not fail silently.`,
+          '',
+          '### Next Step',
+          '- Reply with "continue synthesis" to retry based on fetched data.',
+          '- If this keeps failing, retry later or switch model/provider.',
+          preview ? `\n### Retrieved Context (truncated)\n${preview}` : '',
+        ].join('\n');
+      };
+
+      const synthesizeFallbackContent = async (cause: string): Promise<string> => {
+        const compact = contextString
+          .replace(/\r/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim()
+          .slice(0, 10000);
+        const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+        const fallbackPrompt = isZh
+          ? `你是投资研究助手的“故障降级总结器”。上游流式模型暂时失败，请基于已完成的工具结果生成一份简明、可执行的中文结论。\n\n要求：\n1) 先给结论（偏多/偏空/观望）和置信度（高/中/低）\n2) 给出3-5条关键依据（来自上下文，不编造）\n3) 给出主要风险与接下来1-2个验证动作\n4) 保持精炼（500-900字），不要输出JSON\n\n用户问题：${userContent}\n查询类型：${queryType}\n\n已获取上下文：\n${compact}`
+          : `You are a fallback synthesizer for an investment research assistant. Streaming synthesis failed upstream. Generate a concise actionable summary using ONLY the fetched context.\n\nRequirements:\n1) Start with verdict (bullish/bearish/neutral) + confidence (high/medium/low)\n2) Provide 3-5 key evidence points grounded in context\n3) List major risks and 1-2 next validation steps\n4) Keep it concise (300-600 words), no JSON\n\nUser query: ${userContent}\nQuery type: ${queryType}\n\nFetched context:\n${compact}`;
+
+        const attempts = 2;
+        for (let i = 1; i <= attempts; i += 1) {
+          try {
+            const fallbackResp = await aiService.chat(
+              [{ role: 'user', content: fallbackPrompt }],
+              'superagent',
+              undefined,
+              synthesisModelOverride,
+            );
+            const content = (fallbackResp.content || '').trim();
+            if (content) {
+              console.log(`[agent:chat:fallback] ✅ fallback synthesis succeeded (attempt=${i})`);
+              return content;
+            }
+          } catch (fallbackErr: any) {
+            console.warn(
+              `[agent:chat:fallback] attempt=${i} failed:`,
+              fallbackErr?.message || String(fallbackErr),
+            );
+          }
+          if (i < attempts) {
+            await new Promise((resolve) => setTimeout(resolve, 1200 * i));
+          }
+        }
+        console.warn('[agent:chat:fallback] all fallback attempts failed; using local degraded message');
+        return buildLocalSynthesisFallback(cause);
+      };
+
+      const synthStartedAt = Date.now();
+      const shouldLogSynthesisText =
+        /^(1|true|yes|on)$/i.test(String(process.env.SUPERAGENT_LOG_SYNTHESIS_TEXT || '').trim());
+      const logSynthesisFinalText = (kind: 'primary' | 'fallback', content: string) => {
+        if (!shouldLogSynthesisText) return;
+        const text = String(content ?? '');
+        console.log(
+          `[agent:chat:synthesis_text] kind=${kind} sessionId=${sessionId} chars=${text.length} BEGIN`,
+        );
+        console.log(text);
+        console.log(
+          `[agent:chat:synthesis_text] kind=${kind} sessionId=${sessionId} END`,
+        );
+      };
       try {
         console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
-        const synthesisStream = await aiService.chatStream([{ role: 'user', content: synthesizePrompt }], 'superagent', undefined, synthesisMaxTokens);
+        const synthesisStream = await aiService.chatStream(
+          [{ role: 'user', content: synthesizePrompt }],
+          'superagent',
+          undefined,
+          synthesisMaxTokens,
+          synthesisModelOverride,
+        );
         console.log('[agent:chat] Synthesis stream obtained, reading...');
         const synReader = synthesisStream.getReader();
         const synDecoder = new TextDecoder();
         let synFullContent = '';
         let synBuffer = '';
+        let synthesisFirstTokenAt: number | null = null;
 
         while (true) {
           const { done, value } = await synReader.read();
@@ -1910,7 +2481,11 @@ The HTML must:
               try {
                 const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
                 const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
+                if (delta) {
+                  if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                  synFullContent += delta;
+                  if (!isDeepResearch) streamToChat(delta);
+                }
               } catch (e) { }
             }
             break;
@@ -1926,7 +2501,11 @@ The HTML must:
               try {
                 const parsed = JSON.parse(sseData);
                 const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) { synFullContent += delta; if (!isDeepResearch) streamToChat(delta); }
+                if (delta) {
+                  if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                  synFullContent += delta;
+                  if (!isDeepResearch) streamToChat(delta);
+                }
               } catch (e) { }
             }
           }
@@ -1938,8 +2517,6 @@ The HTML must:
           chatAbortControllers.delete(sessionId);
           return;
         }
-
-        const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
 
         const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
         if (plan.capabilities.search.needed) flowModules.push({ type: 'search', status: 'completed', data: { variant: 'social', sources: finalSocialSources } });
@@ -1960,16 +2537,17 @@ The HTML must:
         if (data.mode === 'roundtable') {
           // Phase 1: Initial draft is already generated silently (not streamed)
           emitter.emitModule('consensus', 'active', { status: 'building', round: 1, maxRounds: 3 });
+          const roundtableStartedAt = Date.now();
 
           try {
             // Phase 2: Expert debate — send initial draft to consensus engine
             emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
             // Detect language so experts respond consistently
-            const isZhTask = /[\u4e00-\u9fff]/.test(data.content);
+            const isZhTask = /[\u4e00-\u9fff]/.test(userContent);
             const langInstruction = isZhTask
               ? '\n\n重要：你的所有分析和结论必须全部使用中文。不要评价报告本身的质量，而是对分析主题给出你自己的独立分析和判断。'
               : '\n\nIMPORTANT: Provide your own independent analysis of the topic, NOT a review of the report quality. Respond entirely in English.';
-            const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${data.content}"
+            const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${userContent}"
 
 Focus on:
 1. Your directional view (bullish/bearish/neutral) with conviction level
@@ -2043,8 +2621,15 @@ Research context:\n${synFullContent}${langInstruction}`;
             const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
 
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
+            const deepSecondPassStartedAt = Date.now();
 
-            const deepStream = await aiService.chatStream([{ role: 'user', content: deepResearchFinalPrompt }], 'superagent', undefined, 16384);
+            const deepStream = await aiService.chatStream(
+              [{ role: 'user', content: deepResearchFinalPrompt }],
+              'superagent',
+              undefined,
+              16384,
+              synthesisModelOverride,
+            );
             const deepReader = deepStream.getReader();
             const deepDecoder = new TextDecoder();
             let deepFullContent = '';
@@ -2083,6 +2668,9 @@ Research context:\n${synFullContent}${langInstruction}`;
 
             // Use the deep research output as final content
             finalDbContent = deepFullContent;
+            console.log(
+              `[agent:chat:timing] deep_second_pass_s=${asSeconds(Date.now() - deepSecondPassStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId}`,
+            );
 
             if (consensusResult.consensus) {
               consensusResult.consensus.finalAnswer = finalDbContent;
@@ -2101,12 +2689,17 @@ Research context:\n${synFullContent}${langInstruction}`;
               sessionId,
               result: { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } }
             });
+          } finally {
+            console.log(
+              `[agent:chat:timing] roundtable_total_s=${asSeconds(Date.now() - roundtableStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId}`,
+            );
           }
         }
 
         if (consensusFlowData) {
           flowModules.push({ type: 'consensus', status: 'completed', data: consensusFlowData as unknown as Record<string, unknown> });
         }
+        const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
         flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
 
         await prisma.chatMessage.create({
@@ -2120,44 +2713,113 @@ Research context:\n${synFullContent}${langInstruction}`;
               thinkingFlow: {
                 modules: flowModules,
                 isActive: false,
-                route: 'Super Agent Orchestrator',
-                ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
+                route: 'Super Agent Orchestrator'
               },
               consensusResult: savedConsensusResult ?? undefined,
               quoteCard: savedQuoteCard ?? undefined,
+              xProfileCard: savedXProfileCard ?? undefined,
               sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
             })
           }
         });
+        logSynthesisFinalText('primary', finalDbContent);
 
         emitter.emitModule('done', 'completed', { duration: dur });
-        emitter.emitStreamDone(finalDbContent, {
-          sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
-        });
+        const streamDoneSources = finalSocialSources.length > 0 ? finalSocialSources : undefined;
+        console.log(
+          `[agent:chat:sources] stream_done_sources_count=${streamDoneSources?.length || 0} sessionId=${sessionId}`,
+        );
+        emitter.emitStreamDone(finalDbContent, { sources: streamDoneSources });
 
-        // --- HTML report: await parallel result or generate sequentially for roundtable ---
-        if (parallelHtmlPromise) {
-          // Non-roundtable: HTML was already generating in parallel, just await it
-          console.log(`[agent:chat:html] Awaiting parallel HTML promise...`);
-          const htmlContent = await parallelHtmlPromise;
-          await emitHtmlResult(htmlContent);
-        } else if (htmlEligible && isDeepResearch && finalDbContent && finalDbContent.length > 200) {
-          // Roundtable / deep research: generate sequentially since we need the full consensus content
+        // --- Async HTML report generation (non-blocking) ---
+        // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
+        // IMPORTANT: respect SUPERAGENT_DISABLE_HTML_REPORT here as well (sequential branch).
+        const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+        const htmlModeLabel = isDeepResearch ? 'roundtable' : 'standard';
+        if (htmlEligible && config.superAgentDisableHtmlReport) {
+          console.log('[agent:chat:html] Skipped SEQUENTIAL generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
+        } else if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
+          // Emit generating signal immediately so frontend shows Web tab skeleton
           const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
           const genMsgIdx = pendingMsgCount - 1;
           emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
-          console.log(`[agent:chat:html] Starting SEQUENTIAL HTML generation for roundtable, input length=${finalDbContent.length}`);
+          const htmlSeqStartedAt = Date.now();
+          console.log(
+            `[agent:chat:html] Starting SEQUENTIAL HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
+          );
           try {
             const htmlContent = await runHtmlGeneration(finalDbContent);
             await emitHtmlResult(htmlContent);
+            console.log(
+              `[agent:chat:timing] html_sequential_s=${asSeconds(Date.now() - htmlSeqStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
+            );
           } catch (htmlErr: any) {
-            console.error('[agent:chat:html] ❌ Roundtable HTML generation failed:', htmlErr.message);
+            console.error(`[agent:chat:html] ❌ Sequential HTML generation failed (${htmlModeLabel}):`, htmlErr.message);
           }
         }
+
+        console.log(
+          `[agent:chat:timing] synthesizer_total_s=${asSeconds(Date.now() - synthStartedAt)} end_to_end_s=${asSeconds(sinceRequestStart())} ui_duration_s=${dur} sessionId=${sessionId}`,
+        );
       } catch (err: any) {
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
-        emitToUser(userId, 'agent:chat:error', { sessionId, error: err.message });
-        emitter.emitModule('done', 'completed', { duration: 0 });
+        if (isAborted()) {
+          console.log(`[agent:chat] Aborted during synthesis error handling for session ${sessionId}`);
+          activeChatSessions.delete(sessionId);
+          chatAbortControllers.delete(sessionId);
+          return;
+        }
+
+        const errMsg = typeof err?.message === 'string' ? err.message : String(err);
+        const fallbackContent = await synthesizeFallbackContent(errMsg);
+        const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
+        const fallbackModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
+        if (plan.capabilities.search.needed) fallbackModules.push({ type: 'search', status: 'completed' });
+        if (plan.capabilities.analysis.needed) fallbackModules.push({ type: 'analysis', status: 'completed' });
+        if (plan.capabilities.simulate.needed) fallbackModules.push({ type: 'simulation', status: 'completed' });
+        if (plan.capabilities.web3?.needed) fallbackModules.push({ type: 'web3', status: 'completed' });
+        fallbackModules.push({
+          type: 'done',
+          status: 'completed',
+          data: { duration: dur, degraded: true, cause: 'synthesis_error' },
+        });
+
+        await prisma.chatMessage.create({
+          data: {
+            userId,
+            sessionId,
+            role: 'assistant',
+            content: fallbackContent,
+            agentId: 'superagent',
+            metadata: JSON.stringify({
+              thinkingFlow: {
+                modules: fallbackModules,
+                isActive: false,
+                route: 'Super Agent Orchestrator',
+              },
+              quoteCard: savedQuoteCard ?? undefined,
+              xProfileCard: savedXProfileCard ?? undefined,
+              degraded: true,
+              degradedReason: errMsg,
+            }),
+          },
+        });
+        logSynthesisFinalText('fallback', fallbackContent);
+
+        streamToChat(fallbackContent);
+        emitter.emitModule('done', 'completed', { duration: dur, degraded: true, cause: 'synthesis_error' });
+        const fallbackStreamSources = finalSocialSources.length > 0 ? finalSocialSources : undefined;
+        console.log(
+          `[agent:chat:sources] fallback_stream_done_sources_count=${fallbackStreamSources?.length || 0} sessionId=${sessionId}`,
+        );
+        emitter.emitStreamDone(fallbackContent, { sources: fallbackStreamSources });
+        console.log(
+          `[agent:chat:timing] fallback_emitted_s=${asSeconds(Date.now() - synthStartedAt)} end_to_end_s=${asSeconds(sinceRequestStart())} ui_duration_s=${dur} sessionId=${sessionId}`,
+        );
+
+        console.log(
+          `[agent:chat:timing] synthesizer_total_s=${asSeconds(Date.now() - synthStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} (error)`,
+        );
       }
       activeChatSessions.delete(sessionId);
       chatAbortControllers.delete(sessionId);

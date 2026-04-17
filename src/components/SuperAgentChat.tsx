@@ -246,6 +246,46 @@ interface ThinkingFlow {
     rtReportStatus?: 'pending' | 'active' | 'done';
 }
 
+function mergeSearchSources(primary?: SearchSource[], secondary?: SearchSource[]): SearchSource[] {
+    const out: SearchSource[] = [];
+    const byKey = new Map<string, number>();
+    const list = [...(primary || []), ...(secondary || [])];
+
+    for (const s of list) {
+        const key = `${s.url || ''}|${s.domain || ''}|${s.title || ''}`.toLowerCase();
+        const idx = byKey.get(key);
+        if (idx == null) {
+            byKey.set(key, out.length);
+            out.push({ ...s });
+            continue;
+        }
+        const prev = out[idx];
+        out[idx] = {
+            ...prev,
+            ...s,
+            snippet: prev.snippet || s.snippet,
+            url: prev.url || s.url,
+        };
+    }
+    return out;
+}
+
+function collectThinkingSearchSources(flow?: ThinkingFlow): SearchSource[] {
+    if (!flow?.modules?.length) return [];
+    const gathered: SearchSource[] = [];
+    for (const m of flow.modules) {
+        if (m.type !== 'search' || !m.data) continue;
+        const data = m.data as SearchModuleData;
+        if (Array.isArray(data.sources)) gathered.push(...data.sources);
+        if (Array.isArray(data.sections)) {
+            for (const sec of data.sections) {
+                if (Array.isArray(sec.sources)) gathered.push(...sec.sources);
+            }
+        }
+    }
+    return mergeSearchSources(gathered, []);
+}
+
 const SA_SID_KEY = 'loka_superagent_sid';
 const SA_PENDING_KEY = 'loka_sa_analysis_pending';
 
@@ -1337,15 +1377,22 @@ const ThinkingProcessSidePanel: React.FC<{
     // defined at module level as HtmlReportFrame
 
     // ── Analysis Module Renderer ──
+    const AnalysisStageIcon: React.FC<{ id: string; className?: string }> = ({ id, className = 'w-3.5 h-3.5' }) => {
+        switch (id) {
+            case 'fundamental':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>;
+            case 'technical':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" /></svg>;
+            case 'sentiment':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>;
+            default:
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>;
+        }
+    };
+
     const AnalysisModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const d = mod.data as AnalysisModuleData | undefined;
         if (!d) return null;
-
-        const stageIcons: Record<string, string> = {
-            fundamental: '📊',
-            technical: '📈',
-            sentiment: '💬',
-        };
 
         return (
             <div>
@@ -1356,14 +1403,14 @@ const ThinkingProcessSidePanel: React.FC<{
                 <div className="ml-7 space-y-2.5 mb-3">
                     {d.stages.map((stage) => {
                         const hasResults = stage.status === 'done' && stage.result && stage.result.length > 0;
-                        const icon = stageIcons[stage.id || ''] || '🔍';
+                        const iconColor = stage.status === 'done' ? 'text-gray-500' : stage.status === 'active' ? 'text-blue-500' : 'text-gray-300';
                         return (
                             <div key={stage.id || stage.label} className={`rounded-xl border transition-all duration-300 overflow-hidden ${stage.status === 'done' ? 'border-gray-100 bg-gray-50/50' :
                                 stage.status === 'active' ? 'border-blue-100 bg-blue-50/30' :
                                     'border-gray-100 bg-white'
                                 }`}>
                                 <div className="flex items-center gap-2 px-3 py-2">
-                                    <span className="text-[13px]">{icon}</span>
+                                    <span className={`shrink-0 ${iconColor}`}><AnalysisStageIcon id={stage.id || ''} /></span>
                                     <span className={`text-[12px] font-medium flex-1 ${stage.status === 'done' ? 'text-gray-700' :
                                         stage.status === 'active' ? 'text-blue-600' : 'text-gray-400'
                                         }`}>{stage.label}</span>
@@ -2349,112 +2396,109 @@ interface SuperAgentChatProps {
 function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     if (!sources || sources.length === 0) return text;
 
-    // Build lookup: lowercase key → { url, label }
     const lookup = new Map<string, { url: string; label: string }>();
     for (const s of sources) {
         if (!s.url) continue;
         const entry = { url: s.url, label: s.domain };
         lookup.set(s.title.toLowerCase(), entry);
         lookup.set(s.domain.toLowerCase(), entry);
-        // Short name without TLD suffix (e.g. "finance.yahoo" from "finance.yahoo.com")
+
         const short = s.domain.replace(/\.\w+$/, '').toLowerCase();
         if (short.length > 2) lookup.set(short, entry);
-        // Reversed sub-domain form: "finance.yahoo" → "yahoo finance" (common in LLM output)
+
         const parts = short.split('.');
         if (parts.length >= 2) {
             const reversed = parts.reverse().join(' ');
             if (!lookup.has(reversed)) lookup.set(reversed, entry);
         }
-        // Single-word domain name: "reuters" from "reuters.com"
+
         const base = s.domain.replace(/\..*$/, '').toLowerCase();
         if (base.length > 3 && !lookup.has(base)) lookup.set(base, entry);
     }
 
-    // Step 0: Clean up malformed LLM output before citation injection
-    let result = text;
+    let result = text.replace(/\r\n/g, '\n');
 
-    // Remove orphaned URL path fragments that leaked as raw text (standalone lines)
-    result = result.replace(/^\s*[./][^\s\[]*\/[^\s]*[)）]*[。，；,.;!\s]*$/gm, '');
+    // Remove standalone leaked URL path fragments: /stocks/articles/xxx.html)
+    result = result.replace(
+        /(^|[\s（(])\/[a-z0-9._%+-]+(?:\/[a-z0-9._%+-]+){2,}(?:\.[a-z0-9]{2,8})?\)?(?=\s|$|[，。；,.;!?])/gim,
+        '$1',
+    );
 
-    // Remove inline URL path garbage: ".com/path/..." or "/path/to/...)" anywhere in text
-    result = result.replace(/\.(?:com|cn|org|net|io)(?:\.\w+)*\/[^\s\[\]]*[)]+[。，；,.;]*/g, '');
-    result = result.replace(/(?<![\w(\[])\/[a-z0-9_-]+(?:\/[a-z0-9_-]+){2,}[^\s]*[)]+[。，；,.;]*/gi, '');
+    // Remove path garbage attached right after a valid citation/link.
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\/[^\s)）]+/g, '$1');
+    result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\.[a-z]{2,8}\/[^\s)）]+/gi, '$1');
 
-    // Remove duplicate consecutive source-name lines (e.g. "Reuters\nReuters\n" from broken links)
-    result = result.replace(/^(.{2,30})\n\1$/gm, '$1');
+    // Remove malformed punycode/url shards that often leak from broken markdown parsing.
+    result = result.replace(/\[\s*xn--[^\]]+\]/gi, '');
+    result = result.replace(/\bxn--[a-z0-9-]{6,}(?:\.[a-z0-9-]+)*\b/gi, '');
 
     // Remove duplicate consecutive markdown links: [A](url)[A](url) → [A](url)
     result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\1/g, '$1');
 
+    // Remove bare source-name text leaked right after its own markdown link
+    result = result.replace(/(\[([^\]]+)\]\([^)]+\))\s*\n?\s*\2\s*\n?/g, '$1 ');
+
     // Strip stray closing parens/brackets after a valid markdown link
     result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*[)\]]+/g, '$1');
 
-    // Clean up trailing URL garbage after citation tags: [Name](url).cn/path...) or [Name](url)/path...)
-    result = result.replace(/(\[[^\]]+\]\([^)]+\))[./][^\s。，]*[)）]+[。，；,.;]*/g, '$1');
-
-    // Step 1: Fix bare bracket citations [text] NOT followed by (
+    // Fix bare bracket citations [text] NOT followed by (
     result = result.replace(/\[([^\[\]]+)\](?!\()/g, (match, label) => {
         const hit = lookup.get(label.toLowerCase().trim());
         if (hit) return `[${label}](${hit.url})`;
         return match;
     });
 
-    // Step 2: Linkify plain-text domain/publication mentions that are NOT already inside []() links.
-    const phrases: { pattern: string; url: string; label: string }[] = [];
+    const phrases: { pattern: string; url: string }[] = [];
     const seenPatterns = new Set<string>();
     for (const s of sources) {
         if (!s.url) continue;
-        // Domain name (e.g. "yahoo.com")
-        const dom = s.domain.toLowerCase();
-        if (dom.length > 3 && !seenPatterns.has(dom)) {
-            seenPatterns.add(dom);
-            phrases.push({ pattern: s.domain, url: s.url, label: s.domain });
-        }
-        // Short name without suffix (e.g. "finance.yahoo")
+
+        const addPattern = (pattern: string) => {
+            const key = pattern.toLowerCase();
+            if (key.length <= 3 || seenPatterns.has(key)) return;
+            seenPatterns.add(key);
+            phrases.push({ pattern, url: s.url! });
+        };
+
+        addPattern(s.domain);
         const short = s.domain.replace(/\.\w+$/, '');
-        const shortLower = short.toLowerCase();
-        if (shortLower.length > 3 && !seenPatterns.has(shortLower)) {
-            seenPatterns.add(shortLower);
-            phrases.push({ pattern: short, url: s.url, label: s.domain });
-        }
-        // Reversed form: "Yahoo Finance" from "finance.yahoo.com"
+        addPattern(short);
+
         const parts = short.toLowerCase().split('.');
         if (parts.length >= 2) {
-            const reversed = parts.reverse().map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
-            if (!seenPatterns.has(reversed.toLowerCase())) {
-                seenPatterns.add(reversed.toLowerCase());
-                phrases.push({ pattern: reversed, url: s.url, label: s.domain });
-            }
+            const reversed = parts
+                .reverse()
+                .map(p => p.charAt(0).toUpperCase() + p.slice(1))
+                .join(' ');
+            addPattern(reversed);
         }
-        // Base domain word: "Reuters" from "reuters.com"
-        const base = s.domain.replace(/\..*$/, '');
-        if (base.length > 3 && !seenPatterns.has(base.toLowerCase())) {
-            seenPatterns.add(base.toLowerCase());
-            phrases.push({ pattern: base, url: s.url, label: s.domain });
-        }
+
+        addPattern(s.domain.replace(/\..*$/, ''));
     }
     phrases.sort((a, b) => b.pattern.length - a.pattern.length);
 
     for (const { pattern, url } of phrases) {
         const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const re = new RegExp(
-            `(?<!\\[|\\()\\b(${escaped})\\b(?![\\])(])`,
-            'gi'
-        );
+        const re = new RegExp(`\\b(${escaped})\\b`, 'gi');
         let replaced = false;
-        result = result.replace(re, (m, captured) => {
+        result = result.replace(re, (m, captured, offset: number, whole: string) => {
             if (replaced) return m;
+            const prev = whole[offset - 1] || '';
+            const next2 = whole.slice(offset + captured.length, offset + captured.length + 2);
+            // Skip if already part of markdown link syntax [label](url)
+            if (prev === '[' || next2 === '](') return m;
+            // Skip if this token is likely in a raw URL fragment
+            if (/[/:@.-]/.test(prev)) return m;
             replaced = true;
             return `[${captured}](${url})`;
         });
     }
 
-    // Step 3: Remove parenthesised citation wrappers like （[Link](url) 数据）
+    // Remove parenthesised citation wrappers like （[Link](url) 数据）
     result = result.replace(/[（(]\s*(\[[^\]]+\]\([^)]+\))\s*(?:数据|data|来源|source)?\s*[)）]/gi, ' $1');
 
-    // Step 4: Remove blank lines left by cleanup
-    result = result.replace(/\n{3,}/g, '\n\n');
-
+    // Clean repeated blank lines left by cleanup.
+    result = result.replace(/\n{3,}/g, '\n\n').trim();
     return result;
 }
 
@@ -3828,6 +3872,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     const isChinese = prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
                                                     return <p className="text-[13px] text-gray-400 italic">{isChinese ? '回复已取消' : 'Response cancelled'}</p>;
                                                 })() : msg.content ? (() => {
+                                                    const liveSources = mergeSearchSources(
+                                                        msg.sources,
+                                                        collectThinkingSearchSources(thinkingProcesses[i]),
+                                                    );
                                                     const cleaned = msg.role === 'assistant' ? stripInternalResearchCitations(msg.content) : msg.content;
                                                     const { body: bodyNoQuestions } = msg.role === 'assistant' && !msg.isStreaming
                                                         ? extractFollowUpQuestions(cleaned)
@@ -3938,8 +3986,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 </div>
                                                             ) : (
                                                             <div className="markdown-content text-[14.5px] text-gray-700 leading-relaxed space-y-1.5 [&_a]:break-words [&_ul]:pl-1 [&_ol]:pl-1">
-                                                                <SourcesProvider sources={msg.sources || []}>
-                                                                    {renderMarkdownContent(injectSourceUrls(body, msg.sources), i)}
+                                                                <SourcesProvider sources={liveSources}>
+                                                                    {renderMarkdownContent(injectSourceUrls(body, liveSources), i)}
                                                                 </SourcesProvider>
                                                             </div>
                                                             )}
