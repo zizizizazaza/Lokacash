@@ -538,6 +538,75 @@ const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: st
     );
 };
 
+const SOCIAL_DOMAINS = new Set(['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com']);
+
+/**
+ * Derive Roundtable Data Collection categories from the live thinking `modules`.
+ *
+ * Market Indicators come from the real `analysis` module's stages[].result[].label
+ * (no hardcoded placeholder list). News & Social sources come from the real
+ * `search` module. Category status is derived from the underlying module status
+ * so the panel can update live as events stream in — not only at consensus_done.
+ */
+const deriveRtDataSearchFromModules = (modules: ThinkingModule[]): RtDataCategory[] => {
+    const mapModuleStatus = (s?: string): 'pending' | 'active' | 'done' => {
+        if (s === 'completed' || s === 'done' || s === 'concluded') return 'done';
+        if (s === 'active' || s === 'analyzing') return 'active';
+        return 'pending';
+    };
+
+    const searchMod = modules.find(m => m.type === 'search');
+    const searchData = searchMod?.data as SearchModuleData | undefined;
+    const searchSources = searchData?.sources || [];
+    const sectionSocial = searchData?.sections?.find((s: any) => s.id === 'social')?.sources || [];
+    const newsSrc = searchSources.filter(s => !SOCIAL_DOMAINS.has(s.domain));
+    const socialSrc = [...sectionSocial, ...searchSources.filter(s => SOCIAL_DOMAINS.has(s.domain))];
+    const searchStatus = mapModuleStatus(searchMod?.status);
+
+    const analysisMod = modules.find(m => m.type === 'analysis');
+    const analysisData = analysisMod?.data as AnalysisModuleData | undefined;
+    const indicatorItems: string[] = [];
+    for (const stage of analysisData?.stages || []) {
+        for (const r of stage.result || []) {
+            if (r.label && !indicatorItems.includes(r.label)) indicatorItems.push(r.label);
+        }
+    }
+    const analysisStatus = mapModuleStatus(analysisMod?.status);
+
+    const categories: RtDataCategory[] = [];
+    // Only include Market Indicators when there is real analysis data (omit for crypto-only queries).
+    if (analysisMod) {
+        categories.push({
+            id: 'indicators',
+            label: 'Market Indicators',
+            labelCN: '市场指标',
+            icon: 'indicators',
+            status: indicatorItems.length > 0 ? 'done' : analysisStatus,
+            count: indicatorItems.length || undefined,
+            ...(indicatorItems.length > 0 ? { items: indicatorItems } : {}),
+        });
+    }
+    categories.push({
+        id: 'news',
+        label: 'News & Reports',
+        labelCN: '新闻与报告',
+        icon: 'news',
+        status: newsSrc.length > 0 ? 'done' : searchStatus,
+        count: newsSrc.length || undefined,
+        ...(newsSrc.length > 0 ? { sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
+    });
+    categories.push({
+        id: 'social',
+        label: 'Social Media',
+        labelCN: '社交媒体',
+        icon: 'social',
+        status: socialSrc.length > 0 ? 'done' : searchStatus,
+        count: socialSrc.length || undefined,
+        ...(socialSrc.length > 0 ? { sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
+    });
+    return categories;
+};
+
 /** Reconstruct rt* process fields from a saved consensus result for history restoration */
 const reconstructRtFieldsFromConsensus = (
     consensusResult: any,
@@ -553,28 +622,8 @@ const reconstructRtFieldsFromConsensus = (
         agent_3: 'Quant Tracker',
     };
 
-    // --- Reconstruct rtDataSearch from modules ---
-    const searchMod = modules.find(m => m.type === 'search');
-    const searchData = searchMod?.data as SearchModuleData | undefined;
-    const searchSources = searchData?.sources || [];
-    const sectionSources = searchData?.sections?.find((s: any) => s.id === 'social')?.sources || [];
-
-    const newsSrc = searchSources.filter(s =>
-        !['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
-    );
-    const socialSrc = [...sectionSources, ...searchSources.filter(s =>
-        ['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
-    )];
-
-    const rtDataSearch: RtDataCategory[] = [
-        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
-        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done', count: newsSrc.length || 8,
-            ...(newsSrc.length > 0 ? { sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
-        },
-        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done', count: socialSrc.length || 6,
-            ...(socialSrc.length > 0 ? { sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
-        },
-    ];
+    // --- Reconstruct rtDataSearch from modules (no hardcoded placeholders) ---
+    const rtDataSearch: RtDataCategory[] = deriveRtDataSearchFromModules(modules);
 
     // --- Reconstruct rtRounds from discussionRounds or agentResponses ---
     const discussionRounds: any[] = consensus.discussionRounds || [];
@@ -629,13 +678,35 @@ const reconstructRtFieldsFromConsensus = (
     const consensusReached = consensus.consensusReached !== false;
     const finalText = consensus.finalAnswer || '';
     const verdictMatch = finalText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
-const finalVerdict = verdictMatch ? verdictMatch[1].trim() : (consensusReached ? 'Bullish' : 'Neutral');
+    const finalVerdict = verdictMatch ? verdictMatch[1].trim() : (consensusReached ? 'Bullish' : 'Neutral');
 
     const allAgents = rtRounds.length > 0 ? rtRounds[rtRounds.length - 1].agents : [];
+    // Compute conflictRate from real agent verdicts (last round).
+    // Definition: proportion of agents whose verdict differs from the majority.
+    // Example: 4 agents with 3 Bullish + 1 Bearish → 1/4 = 25%. Full agreement → 0%.
+    const normVerdict = (v?: string): string => {
+        const s = (v || 'Neutral').toLowerCase();
+        if (s.includes('bull') || s.includes('positive') || s.includes('long')) return 'Bullish';
+        if (s.includes('bear') || s.includes('negative') || s.includes('short')) return 'Bearish';
+        return 'Neutral';
+    };
+    let conflictRate = 0;
+    if (allAgents.length > 1) {
+        const counts = allAgents.reduce<Record<string, number>>((acc, a) => {
+            const v = normVerdict(a.verdict);
+            acc[v] = (acc[v] || 0) + 1;
+            return acc;
+        }, {});
+        const majority = Math.max(...Object.values(counts));
+        conflictRate = Math.round(((allAgents.length - majority) / allAgents.length) * 100);
+    } else if (!consensusReached) {
+        conflictRate = 50; // single-agent fallback when consensus flag is negative
+    }
+
     const rtConsensus: RtConsensusResult = {
         status: 'done',
         hasConsensus: consensusReached,
-        conflictRate: consensusReached ? 15 : 40,
+        conflictRate,
         agentConclusions: allAgents.map(a => ({
             agentName: a.agentName,
             verdict: a.verdict || 'Neutral',
@@ -1172,28 +1243,37 @@ const ThinkingInlineTrigger: React.FC<{
         return labels[type] || 'Thinking';
     }, [thinking.isActive, activeModule, durLabel]);
 
-    // ── Capsule items: only show items for currently-running tools ──
-    const visibleCapsules = useMemo(() => {
+    // ── Ticker: collect all trace items (deduplicated) for single-item rotation ──
+    const allTickerItems = useMemo(() => {
         if (!thinking.isActive || trace.length === 0) return [];
-        // Only show items from tools that are still running
-        const runningTools = trace.filter(t => t.status === 'running');
-        if (runningTools.length === 0) return [];
+        const items: string[] = [];
         const seen = new Set<string>();
-        const items: { label: string; isDomain: boolean }[] = [];
-        for (const t of runningTools) {
-            if (t.displayName && !seen.has('a:' + t.displayName)) {
-                seen.add('a:' + t.displayName);
-                items.push({ label: t.displayName, isDomain: false });
+        for (const t of trace) {
+            if (t.displayName && !seen.has(t.displayName)) {
+                seen.add(t.displayName);
+                items.push(t.displayName);
             }
             const domains = (t.tool && TOOL_SOURCE_DOMAINS[t.tool]) || [];
             for (const d of domains) {
-                if (d === 'loka-db' || seen.has('d:' + d)) continue;
-                seen.add('d:' + d);
-                items.push({ label: d, isDomain: true });
+                if (d === 'loka-db' || seen.has(d)) continue;
+                seen.add(d);
+                items.push(d);
             }
         }
-        return items.slice(-5);
+        return items;
     }, [trace, thinking.isActive]);
+
+    const [tickerIdx, setTickerIdx] = useState(0);
+
+    useEffect(() => {
+        if (!thinking.isActive || allTickerItems.length <= 1) return;
+        const id = setInterval(() => {
+            setTickerIdx(i => (i + 1) % allTickerItems.length);
+        }, 1800);
+        return () => clearInterval(id);
+    }, [thinking.isActive, allTickerItems.length]);
+
+    useEffect(() => { setTickerIdx(0); }, [allTickerItems.length]);
 
     const isSimple = thinking.routedMode === 'fast';
 
@@ -1224,15 +1304,12 @@ const ThinkingInlineTrigger: React.FC<{
                 <span className="text-[13px] font-medium text-gray-500">{phaseLabel}</span>
                 <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
             </div>
-            {/* Capsule row below */}
-            {thinking.isActive && visibleCapsules.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1 mt-1.5 pl-6 animate-fade-hint">
-                    {visibleCapsules.map((item, i) => (
-                        <span key={i} className={`inline-flex items-center px-1.5 py-[1px] rounded-full text-[10px] font-medium ${item.isDomain ? 'bg-gray-100 text-gray-500' : 'bg-blue-50 text-blue-500'}`}>
-                            {item.isDomain && <span className="w-1 h-1 rounded-full bg-blue-400 mr-1 opacity-60" />}
-                            {item.label}
-                        </span>
-                    ))}
+            {/* Ticker row: one item at a time, cycling with slide-in animation */}
+            {thinking.isActive && allTickerItems.length > 0 && (
+                <div className="mt-1 pl-6 h-[18px] overflow-hidden">
+                    <span key={tickerIdx} className="block text-[11px] text-gray-400 ticker-in">
+                        {allTickerItems[tickerIdx % allTickerItems.length]}
+                    </span>
                 </div>
             )}
         </button>
@@ -1967,38 +2044,30 @@ const ThinkingProcessSidePanel: React.FC<{
     };
 
     const RtPhaseDataSearch: React.FC = () => {
-        // Merge sources from search module if available
-        const searchMod = thinking.modules.find(m => m.type === 'search');
-        const searchData = searchMod?.data as SearchModuleData | undefined;
-        const searchSources = searchData?.sources || [];
-        const sectionSources = searchData?.sections?.find(s => s.id === 'social')?.sources || [];
-
-        const categories: RtDataCategory[] = thinking.rtDataSearch || [
-            { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'pending' },
-            { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'pending' },
-            { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'pending' },
-        ];
-
-        // Auto-inject search sources into news/social if they have no sources yet
-        const enriched = categories.map(cat => {
-            if (cat.sources && cat.sources.length > 0) return cat;
-            if (cat.id === 'news') {
-                const newsSrc = searchSources.filter(s =>
-                    !['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
-                );
-                if (newsSrc.length > 0) return { ...cat, sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })), count: cat.count ?? newsSrc.length };
-            }
-            if (cat.id === 'social') {
-                const socialSrc = [...sectionSources, ...searchSources.filter(s =>
-                    ['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
-                )];
-                if (socialSrc.length > 0) return { ...cat, sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })), count: cat.count ?? socialSrc.length };
-            }
-            return cat;
-        });
+        // Live-derive categories from the current modules so the panel updates
+        // continuously as search / analysis events stream in (not only once at
+        // consensus_done). If rtDataSearch was already populated by a completed
+        // consensus (history restore), merge it over the derived one.
+        const derived = deriveRtDataSearchFromModules(thinking.modules);
+        const saved = thinking.rtDataSearch;
+        const enriched: RtDataCategory[] = saved
+            ? derived.map(d => {
+                const s = saved.find(x => x.id === d.id);
+                if (!s) return d;
+                // Prefer saved data when it's more complete
+                return {
+                    ...d,
+                    ...s,
+                    status: s.status === 'done' ? 'done' : d.status,
+                    sources: s.sources && s.sources.length > 0 ? s.sources : d.sources,
+                    items: s.items && s.items.length > 0 ? s.items : d.items,
+                    count: s.count ?? d.count,
+                };
+            })
+            : derived;
 
         const anyActive = enriched.some(c => c.status === 'active');
-        const allDone = enriched.every(c => c.status === 'done');
+        const allDone = enriched.length > 0 && enriched.every(c => c.status === 'done');
         const phaseStatus = allDone ? 'done' : anyActive ? 'active' : 'pending';
         const collapsed = !!collapsedSections['dataCollection'];
 
@@ -2429,14 +2498,25 @@ function summarizeTitle(raw: string): string {
     const cmpMatch = q.match(/(?:compare|对比|vs\.?)\s+(.{2,15})\s+(?:vs\.?|and|与|和|跟)\s+(.{2,15})/i);
     if (cmpMatch) return `${cmpMatch[1].trim()} vs ${cmpMatch[2].trim().replace(/\s*(fundamentals|for|的|基本面).*/i, '')} Comparison`;
 
-    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,30}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况).*)?$/i);
-    if (analyzeMatch) return `${analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim()} Analysis`;
+    // risk-reward pattern: must be checked before generic analyze/risk rules
+    if (/risk[\s-]reward/i.test(q)) {
+        return tickers.length > 0 ? `${tickers[0]} Risk-Reward Analysis` : 'Risk-Reward Analysis';
+    }
+
+    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,50}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况).*)?$/i);
+    if (analyzeMatch) {
+        if (tickers.length > 0) return `${tickers.slice(0, 2).join(' & ')} Analysis`;
+        const captured = analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim();
+        const words = captured.split(/\s+/).slice(0, 4).join(' ');
+        return `${words} Analysis`;
+    }
 
     const buyMatch = q.match(/(?:is|should|are|值得|适合|能不能|可以)\s+(.{2,20}?)\s+(?:still\s+)?(?:a\s+)?(?:buy|worth|invest|入手|买入|购买)/i);
     if (buyMatch) return `${buyMatch[1].replace(/^(i|we)\s+/i, '').trim()} Investment Outlook`;
 
     if (/risk|风险/.test(q)) {
-        const subject = q.match(/(?:risk|风险)\s*(?:of|assessment|评估)?\s*(?:of|for)?\s*(.{2,20})/i);
+        if (tickers.length > 0) return `${tickers[0]} Risk Assessment`;
+        const subject = q.match(/(?:risk|风险)\s+(?:(?:assessment|评估|of|for)\s+)?(.{2,20})/i);
         return subject ? `${subject[1].trim()} Risk Assessment` : 'Risk Assessment';
     }
     if (/forecast|predict|预测|simulate|模拟/.test(q)) {
@@ -2636,9 +2716,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 userImages?: ChatImagePayload[];
                 streaming?: boolean;
             };
-            const sid = sessionStorage.getItem(SA_SID_KEY);
             const pendingImages = Array.isArray(p.userImages) ? p.userImages : [];
-            if (!p?.streaming || (typeof p.userContent !== 'string' && pendingImages.length === 0) || p.sessionId !== sid) return [];
+            // When viewing an existing session, the "effective" sid is initialSessionId.
+            // Falling back to SA_SID_KEY is only correct when starting a brand-new chat.
+            const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+            if (!p?.streaming || (typeof p.userContent !== 'string' && pendingImages.length === 0) || p.sessionId !== effectiveSid) return [];
             return [
                 { role: 'user', content: p.userContent || '', images: pendingImages, timestamp: new Date().toLocaleTimeString() },
                 {
@@ -2659,13 +2741,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             const raw = sessionStorage.getItem(SA_PENDING_KEY);
             if (!raw) return false;
             const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
-            const sid = sessionStorage.getItem(SA_SID_KEY);
-            return !!(p?.streaming && p.sessionId === sid);
+            const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+            return !!(p?.streaming && p.sessionId === effectiveSid);
         } catch {
             return false;
         }
     });
     const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
+    // True while fetching session history from the server (prevents blank-page flash).
+    const [historyLoading, setHistoryLoading] = useState(!!initialSessionId);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
@@ -2677,7 +2761,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 const raw = sessionStorage.getItem(SA_PENDING_KEY);
                 if (!raw) return false;
                 const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
-                return !!(p?.streaming && p.sessionId === sessionStorage.getItem(SA_SID_KEY));
+                const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+                return !!(p?.streaming && p.sessionId === effectiveSid);
             } catch {
                 return false;
             }
@@ -2905,7 +2990,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
-    /** Normalize one follow-up line: drop citations/links, keep a single interrogative sentence only. */
+    /** Normalize one follow-up line: drop citations/links, coerce into a concise question. */
     const sanitizeFollowUpQuestionLine = useCallback((raw: string): string | null => {
         let s = raw
             .replace(/\[[^\]]*]\([^)]*\)/g, '')
@@ -2919,7 +3004,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         if (qIdx >= 0) {
             s = s.slice(0, qIdx + 1).trim();
         } else {
-            return null;
+            // Some models output "questions to watch" as statements without punctuation.
+            // Normalize these lines into interrogative form so UI can stay consistent.
+            s = s.replace(/[。.!！]+$/g, '').trim();
+            if (s.length < 6) return null;
+            s = /[\u4e00-\u9fff]/.test(s) ? `${s}？` : `${s}?`;
         }
         if (s.length < 4) return null;
         return s;
@@ -2930,7 +3019,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         // Only match explicit "follow-up question" blocks near the tail to avoid truncating main report sections.
         // Examples: **Questions to watch**, ## Follow-up Questions, **你可能还会问**
         const pattern =
-            /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:questions?\s+to\s+watch|follow[\s-]*up\s+questions?|next\s+questions?|key\s+questions?|你可能还会问|后续问题|追问建议|延伸问题|相关问题|值得(?:继续)?关注(?:的)?问题)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)])\s+.+\n?)+)\s*$/i;
+            /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:questions?\s+to\s+watch|follow[\s-]*up\s+questions?|next\s+questions?|key\s+questions?|你可能还会问|后续问题|追问建议|延伸问题|相关问题|值得(?:继续)?关注(?:的)?问题|持续关注的核心问题|需要持续追踪的关键问题|持续追踪的关键问题)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)])\s+.+\n?)+)\s*$/i;
         const match = content.match(pattern);
         if (match) {
             const questions = match[1].split('\n')
@@ -2939,14 +3028,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
                 .map((l) => sanitizeFollowUpQuestionLine(l))
                 .filter((q): q is string => Boolean(q));
+            const dedupedQuestions = Array.from(new Set(questions));
             // Guardrail: only strip when the follow-up block is at the end and contains multiple items.
             const isTailBlock = typeof match.index === 'number' && match.index > content.length * 0.6;
-            if (questions.length >= 1 && isTailBlock) {
-                return { body: content.slice(0, match.index).trimEnd(), questions };
+            if (dedupedQuestions.length >= 1 && isTailBlock) {
+                return { body: content.slice(0, match.index).trimEnd(), questions: dedupedQuestions };
             }
         }
         return { body: content, questions: [] };
     }, [sanitizeFollowUpQuestionLine]);
+
+    /** Strip follow-up question blocks from generated HTML so both modes share one unified related-questions component. */
+    const stripFollowUpSectionFromHtml = useCallback((html: string): string => {
+        if (!html) return html;
+        const heading =
+            '(?:questions?\\s+to\\s+watch|follow[\\s-]*up\\s+questions?|next\\s+questions?|key\\s+questions?|你可能还会问|后续问题|追问建议|延伸问题|相关问题|值得(?:继续)?关注(?:的)?问题|持续关注的核心问题|需要持续追踪的关键问题|持续追踪的关键问题)';
+        const blockPattern = new RegExp(
+            `<h[1-6][^>]*>[\\s\\S]{0,120}?${heading}[\\s\\S]{0,120}?<\\/h[1-6]>\\s*(?:<(?:ul|ol)[\\s\\S]*?<\\/(?:ul|ol)>|(?:<p[^>]*>[\\s\\S]*?<\\/p>\\s*){1,10})`,
+            'gi',
+        );
+        return html.replace(blockPattern, '');
+    }, []);
 
     // Chat title: summarize the user's question into a short topic label
     const chatTitle = useMemo(() => {
@@ -3414,6 +3516,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             const msgIdx = activeMsgIdxRef.current;
             if (msgIdx < 0) return;
             setConsensusResults(prev => ({ ...prev, [msgIdx]: data.result }));
+            // Sync the real consensus output into thinkingProcesses so the right-side
+            // Roundtable panel (Data Collection / Round 1 / Round 2 / Consensus) shows
+            // genuine agent names, verdicts and reasoning instead of any placeholder.
+            setThinkingProcesses(prev => {
+                const existing = prev[msgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
+                const rtFields = reconstructRtFieldsFromConsensus(data.result, existing.modules || []);
+                if (!rtFields) return prev;
+                return {
+                    ...prev,
+                    [msgIdx]: {
+                        ...existing,
+                        routedMode: 'roundtable',
+                        ...rtFields,
+                    },
+                };
+            });
         };
 
         const onQuote = (data: { sessionId: string; quote: any }) => {
@@ -3507,28 +3625,56 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     ok?: boolean;
                     isRunning?: boolean;
                     steps?: unknown[];
+                    modules?: Array<{ moduleType: string; status: string; data?: any }>;
+                    mode?: string;
                     report?: string;
                     status?: string;
                 }) => {
-                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, isRunning: res?.isRunning, status: res?.status });
+                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, modulesLen: Array.isArray(res?.modules) ? res.modules.length : 0, mode: res?.mode, isRunning: res?.isRunning, status: res?.status });
+                    // Restore roundtable chatMode so the right-side panel picks the correct variant
+                    // when a client returns mid-stream to a roundtable session.
+                    if (res?.mode === 'roundtable' && chatMode !== 'roundtable') {
+                        setChatMode('roundtable');
+                    }
 
                     const stepsLen = Array.isArray(res?.steps) ? res.steps.length : 0;
+                    const modulesLen = Array.isArray(res?.modules) ? res.modules.length : 0;
                     const hasSteps = stepsLen > 0;
+                    const hasModules = modulesLen > 0;
 
-                    if (res?.ok && hasSteps) {
+                    if (res?.ok && (hasSteps || hasModules)) {
                         const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
-                        const trace = buildTraceFromSteps(res.steps!);
-                        const planning = extractPlanningMessage(res.steps!);
+                        const trace = hasSteps ? buildTraceFromSteps(res.steps!) : undefined;
+                        const planning = hasSteps ? extractPlanningMessage(res.steps!) : undefined;
+                        // Reduce module event stream into final per-type module state
+                        const rebuiltModules: ThinkingModule[] = [];
+                        if (hasModules) {
+                            const byType = new Map<string, ThinkingModule>();
+                            for (const ev of res.modules!) {
+                                const existing = byType.get(ev.moduleType);
+                                const merged: ThinkingModule = {
+                                    type: ev.moduleType as any,
+                                    status: ev.status as any,
+                                    data: ev.data
+                                        ? { ...(existing?.data || {}), ...ev.data }
+                                        : existing?.data,
+                                };
+                                byType.set(ev.moduleType, merged);
+                            }
+                            for (const mod of byType.values()) rebuiltModules.push(mod);
+                        }
                         setThinkingProcesses(prev => ({
                             ...prev,
                             [msgIdx]: {
                                 ...(prev[msgIdx] || {
                                     modules: [],
                                     isActive: !!res.isRunning,
-                                    route: 'Investment Analyst',
+                                    route: res?.mode === 'roundtable' ? 'Roundtable' : 'Investment Analyst',
                                 }),
-                                toolTrace: trace,
-                                planningMessage: planning,
+                                ...(hasModules ? { modules: rebuiltModules } : {}),
+                                ...(trace !== undefined ? { toolTrace: trace } : {}),
+                                ...(planning !== undefined ? { planningMessage: planning } : {}),
+                                ...(res?.mode === 'roundtable' ? { routedMode: 'roundtable' } : {}),
                                 isActive: !!res.isRunning,
                             },
                         }));
@@ -3742,25 +3888,54 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     useEffect(() => {
         if (initialSessionId) {
             api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
+                setHistoryLoading(false);
                 if (history && history.length > 0) {
-                    setMessages(
-                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
-                            let sources: SearchSource[] | undefined;
-                            const userImages = m.role === 'user' ? parseUserImagesFromMetadata(m.metadata) : [];
-                            if (m.metadata) {
-                                try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
-                            }
-                            return {
-                                role: m.role as 'user' | 'assistant',
-                                content: m.content || '',
-                                timestamp: new Date(m.createdAt).toLocaleTimeString(),
-                                isStreaming: false,
-                                images: userImages.length > 0 ? userImages : undefined,
-                                metadata: m.metadata ?? null,
-                                sources,
-                            };
-                        }),
+                    // Guard: if we're returning to a session that is currently streaming
+                    // (pending restore is active), only override messages once the server
+                    // Always apply history from DB (no guard). If the stream is still
+                    // mid-flight, append a streaming placeholder below so socket events
+                    // have a slot to write into. This handles A→B→A navigation cleanly:
+                    //  - completed stream: DB has final content → placeholder skipped
+                    //  - mid-stream return: DB has only user msg → placeholder added
+                    const transformedHistory = history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
+                        let sources: SearchSource[] | undefined;
+                        const userImages = m.role === 'user' ? parseUserImagesFromMetadata(m.metadata) : [];
+                        if (m.metadata) {
+                            try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
+                        }
+                        return {
+                            role: m.role as 'user' | 'assistant',
+                            content: m.content || '',
+                            timestamp: new Date(m.createdAt).toLocaleTimeString(),
+                            isStreaming: false,
+                            images: userImages.length > 0 ? userImages : undefined,
+                            metadata: m.metadata ?? null,
+                            sources,
+                        };
+                    });
+                    // Decide based on history shape alone: if the last persisted message is a
+                    // user msg or an empty assistant msg, treat the stream as still in-flight
+                    // and append a placeholder. Replay (below) resolves the actual server state
+                    // — either filling the placeholder with content, or replacing it with a
+                    // "cannot restore" notice if the server has no buffer.
+                    const lastHistoryMsg = transformedHistory[transformedHistory.length - 1];
+                    const streamStillActive = (
+                        lastHistoryMsg.role === 'user' ||
+                        (lastHistoryMsg.role === 'assistant' && !lastHistoryMsg.content)
                     );
+                    if (streamStillActive) {
+                        setMessages([
+                            ...transformedHistory,
+                            {
+                                role: 'assistant',
+                                content: '',
+                                timestamp: new Date().toLocaleTimeString(),
+                                isStreaming: true,
+                            },
+                        ]);
+                    } else {
+                        setMessages(transformedHistory);
+                    }
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
@@ -3804,7 +3979,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                             }
                         },
                     );
-                    setThinkingProcesses(restoredThinking);
+                    // Merge instead of replace: preserves the active-stream placeholder's
+                    // thinkingProcesses entry (set by the initial-send useEffect) when we
+                    // return to a session whose stream is still mid-flight.
+                    // If we appended a streaming placeholder, guarantee it has an active
+                    // thinking entry so the ThinkingInlineTrigger actually renders.
+                    const placeholderIdx = transformedHistory.length;
+                    setThinkingProcesses(prev => {
+                        const merged = { ...prev, ...restoredThinking };
+                        if (streamStillActive) {
+                            merged[placeholderIdx] = {
+                                modules: merged[placeholderIdx]?.modules ?? [],
+                                route: merged[placeholderIdx]?.route || 'Investment Analyst',
+                                ...merged[placeholderIdx],
+                                isActive: true,
+                            };
+                        }
+                        return merged;
+                    });
                     // Restore chatMode to roundtable if history contains roundtable data
                     if (hasRoundtableHistory) {
                         setChatMode('roundtable');
@@ -3822,9 +4014,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                         setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
                         setMsgViewMode(prev => ({ ...prev, ...restoredViewModes }));
                     }
-                    activeMsgIdxRef.current = history.length - 1;
+                    // If we appended a streaming placeholder, point activeMsgIdxRef at it
+                    // so incoming socket chunks write into the placeholder, not the user msg.
+                    activeMsgIdxRef.current = streamStillActive ? transformedHistory.length : transformedHistory.length - 1;
                 }
-            }).catch(console.error);
+            }).catch(err => { setHistoryLoading(false); console.error(err); });
         }
     }, [initialSessionId]);
 
@@ -3841,6 +4035,25 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         if (initialSessionId) {
             hasSentInitial.current = true;
             saLog('initial: skipped auto-send because initialSessionId is provided (history load)');
+            // If messages init created a streaming placeholder (from SA_PENDING_KEY match),
+            // point activeMsgIdxRef at it IMMEDIATELY so socket events (onModule, onProgress)
+            // that arrive before history fetch resolves land on the correct slot.
+            // Without this, modules events would write to index -1 and be lost, leaving the
+            // Thinking Process panel empty even though the inline trigger shows activity.
+            const streamingIdx = messages.findIndex(m => m.role === 'assistant' && m.isStreaming);
+            if (streamingIdx >= 0) {
+                activeMsgIdxRef.current = streamingIdx;
+                setActiveGraphMsgIdx(streamingIdx);
+                setThinkingProcesses(prev => ({
+                    ...prev,
+                    [streamingIdx]: {
+                        modules: prev[streamingIdx]?.modules ?? [],
+                        route: prev[streamingIdx]?.route || 'Investment Analyst',
+                        ...prev[streamingIdx],
+                        isActive: true,
+                    },
+                }));
+            }
             return;
         }
         if (restoredFromPendingRef.current) {
@@ -3895,101 +4108,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setShowGraphPanel(false);
         setSourcePanelData(null);
         setPanelTab('graph');
-        // Store roundtable context in thinking process (with demo data for UI preview)
+        // Initialize roundtable thinking state with REAL agent selection only.
+        // Panel data (rtDataSearch, rtRounds, rtConsensus) is populated by real
+        // socket events (agent:chat:consensus_done) and metadata restoration
+        // on stream completion — not from hardcoded preview data.
         const agentIds = [...selectedSummonIds];
-        const nextMsgIdx = messages.length; // assistant message will be at this index
-        const selectedAgents = SUMMON_POOL.filter(a => agentIds.includes(a.id));
+        const nextMsgIdx = messages.length;
         const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
-        const allAgents = [...systemAgents, ...selectedAgents];
-        // Demo: if no user-selected agents, inject some defaults for preview
-        const demoExtraIds = allAgents.length <= 4 ? ['buffett_style', 'dalio_style', 'sentiment_focus'] : [];
-        const demoExtras = SUMMON_POOL.filter(a => demoExtraIds.includes(a.id));
-        const demoAllAgents = [...allAgents, ...demoExtras];
-        const demoAgentIds = demoAllAgents.map(a => a.id);
-        // Use up to 4 for round 1, all for round 2
-        const r1Agents = demoAllAgents.slice(0, 2);
-        const r2Agents = demoAllAgents.slice(0, Math.min(7, demoAllAgents.length));
-        const verdicts = ['Bullish', 'Neutral', 'Bearish', 'Bullish', 'Bearish', 'Neutral', 'Bullish'];
-        const confs = [78, 62, 45, 71, 82, 58, 75];
-        const reasonings = [
-            'Revenue grew 18% YoY to $4.2B, beating consensus by $120M. Operating margins expanded 240bps to 28.3% driven by cost optimization and scale efficiencies. Free cash flow conversion improved to 92%. Forward P/E of 22x sits below 5-year average of 26x, suggesting room for multiple expansion. RSI at 58 indicates neutral momentum with no overbought signals. Key risk: rising interest rates could compress multiples in the near term.',
-            'Current valuation appears fair at 1.8x PEG ratio. Technical indicators are mixed — MACD shows a pending bullish crossover but volume has been declining for 3 consecutive weeks. The 50-day moving average ($148) is approaching the 200-day ($152), and a golden cross could trigger momentum buying. However, broad macro headwinds including hawkish Fed commentary and rising 10Y yields create uncertainty. Recommend maintaining position but not adding until clearer directional signals emerge.',
-            'Sector-wide de-rating in progress as competition intensifies. Company lost 2.1% market share in the latest quarter per IDC data. Gross margins contracted 180bps sequentially. Social sentiment turned notably negative after the product recall announcement, with Twitter mention sentiment dropping from +0.42 to -0.18 in two weeks. Balance sheet remains strong with $8.2B cash and minimal debt, which provides a floor, but near-term catalysts are lacking.',
-            'Tail risk assessment: correlation breakdown probability sits at 12% based on our fractal model. The current volatility regime is transitioning from low to moderate — VIX term structure shifted to contango. Max drawdown scenario under a 2-sigma stress event would be -18%. However, the company maintains a strong Altman Z-score of 4.2, suggesting minimal bankruptcy risk. Hedging cost via put spreads is relatively cheap at 45bps.',
-            'This is a wonderful business at a fair price. 85% customer retention rate, $3.2B in recurring revenue, and a brand moat evidenced by 40% pricing premium vs. closest competitor. Management has demonstrated disciplined capital allocation with $2.1B returned via buybacks. The stock trades at a 21% discount to peer median. As I always say: it is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.',
-            'The debt cycle analysis shows we are in the late expansion phase. Central bank tightening is creating headwinds across risk assets. However, this particular company has low leverage (0.8x net debt/EBITDA) and strong cash generation, making it relatively defensive. In an all-weather framework, this position contributes positive risk-adjusted returns across 3 of 4 economic environments. Maintain position but size conservatively given macro uncertainty.',
-            'Social sentiment analysis reveals a notable divergence: retail sentiment is turning bullish (+340% mention volume) while institutional positioning shows cautious accumulation. NLP analysis of recent earnings call transcripts indicates management confidence has increased — forward-looking language ratio improved from 0.42 to 0.61. The contrarian signal here is moderately bullish: when retail and institutions align gradually, the trend tends to persist.',
-        ];
+        const selectedAgents = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
+        const finalAgentIds = [...systemAgents.map(a => a.id), ...selectedAgents.map(a => a.id)];
         setThinkingProcesses(prev => {
             const flow = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
             return {
                 ...prev,
                 [nextMsgIdx]: {
                     ...flow,
-                    selectedAgentIds: demoAgentIds,
+                    selectedAgentIds: finalAgentIds,
                     startTime: Date.now(),
                     routedMode: 'roundtable',
-                    rtPreparationStatus: 'done',
-                    // Phase 1: Data Collection (all done for demo)
-                    rtDataSearch: [
-                        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
-                        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done', count: 15, sources: [
-                            { title: 'Q4 Earnings Beat Expectations — Revenue surges 18% YoY', domain: 'reuters.com', favicon: 'reuters', url: 'https://reuters.com' },
-                            { title: 'Analyst Upgrades Rating to Overweight on Margin Expansion', domain: 'bloomberg.com', favicon: 'bloomberg', url: 'https://bloomberg.com' },
-                            { title: 'Sector Outlook: Mixed Signals Amid Rising Rates', domain: 'wsj.com', favicon: 'wsj', url: 'https://wsj.com' },
-                            { title: 'New Product Line Could Drive $2B in Incremental Revenue', domain: 'cnbc.com', favicon: 'cnbc', url: 'https://cnbc.com' },
-                        ]},
-                        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done', count: 23, sources: [
-                            { title: 'Bullish sentiment trending — $TICKER mentions up 340% this week', domain: 'x.com', favicon: 'x', url: 'https://x.com' },
-                            { title: 'Community DD: Deep value analysis with DCF model breakdown', domain: 'reddit.com', favicon: 'reddit', url: 'https://reddit.com' },
-                            { title: 'Institutional flow data shows heavy accumulation at support', domain: 'stocktwits.com', favicon: 'stocktwits', url: 'https://stocktwits.com' },
-                        ]},
-                    ],
-                    // Phase 2: Round 1 — Initial inference (2 agents)
-                    rtRounds: [
-                        {
-                            round: 1,
-                            status: 'done',
-                            agents: r1Agents.map((a, i) => ({
-                                agentId: a.id,
-                                agentName: a.name,
-                                status: 'done' as const,
-                                verdict: verdicts[i],
-                                confidence: confs[i],
-                                reasoning: reasonings[i],
-                            })),
-                        },
-                        // Phase 3: Round 2 — Cross-validation (all agents)
-                        {
-                            round: 2,
-                            status: 'done',
-                            agents: r2Agents.map((a, i) => ({
-                                agentId: a.id,
-                                agentName: a.name,
-                                status: 'done' as const,
-                                verdict: i === 2 ? 'Neutral' : verdicts[i],  // agent C changed mind
-                                confidence: confs[i] + (i === 2 ? 10 : 0),
-                                reasoning: reasonings[i],
-                                changedMind: i === 2,
-                                previousVerdict: i === 2 ? 'Bearish' : undefined,
-                                crossReferences: [r2Agents[(i + 1) % r2Agents.length]?.name, r2Agents[(i + 2) % r2Agents.length]?.name].filter(Boolean),
-                            })),
-                        },
-                    ],
-                    // Phase 4: Consensus
-                    rtConsensus: {
-                        status: 'done',
-                        hasConsensus: true,
-                        conflictRate: 20,
-                        agentConclusions: r2Agents.map((a, i) => ({
-                            agentName: a.name,
-                            verdict: i === 2 ? 'Neutral' : verdicts[i],
-                            confidence: confs[i] + (i === 2 ? 10 : 0),
-                        })),
-                        finalVerdict: 'Bullish',
-                        finalConfidence: 74,
-                    },
-                    rtReportStatus: 'done',
+                    // Leave rtPreparationStatus/rtDataSearch/rtRounds/rtConsensus
+                    // unset — they populate from real events as the backend progresses.
+                    rtReportStatus: 'pending',
                 },
             };
         });
@@ -4150,7 +4289,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                     </aside>
                                 )}
                                 <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
-                            {messages.map((msg, i) => (
+                            {historyLoading && messages.length === 0 ? (
+                                /* Loading skeleton while fetching session history (only when no pending messages) */
+                                <div className="space-y-8 animate-pulse">
+                                    <div className="flex justify-end">
+                                        <div className="h-10 w-56 bg-gray-200 rounded-2xl" />
+                                    </div>
+                                    <div className="flex items-start gap-3">
+                                        <div className="w-7 h-7 rounded-xl bg-gray-200 shrink-0" />
+                                        <div className="flex-1 space-y-2">
+                                            <div className="h-4 bg-gray-200 rounded w-3/4" />
+                                            <div className="h-4 bg-gray-200 rounded w-5/6" />
+                                            <div className="h-4 bg-gray-200 rounded w-2/3" />
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
@@ -4405,7 +4559,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                 );
                                                             })()}
                                                             {showWebView ? (
-                                                                <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
+                                                                <HtmlReportFrame html={stripFollowUpSectionFromHtml(htmlReports[i])} isStreaming={false} />
                                                             ) : showWebSkeleton ? (
                                                                 <div className="rounded-xl border border-gray-100 bg-gray-50 p-6 space-y-4 animate-pulse">
                                                                     <div className="h-3 bg-gray-200 rounded w-1/4" />

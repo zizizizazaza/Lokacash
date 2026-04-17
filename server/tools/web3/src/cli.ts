@@ -13,6 +13,8 @@ const PRO_REST = 'https://pro-api.coingecko.com/api/v3';
 const TOOL_CACHE_TTL_MS = Number(process.env.COINGECKO_TOOL_CACHE_TTL_MS || '300000');
 const REST_RETRY_ATTEMPTS = Math.max(1, Number(process.env.COINGECKO_REST_RETRY_ATTEMPTS || '3'));
 const REST_RETRY_BASE_DELAY_MS = Math.max(50, Number(process.env.COINGECKO_REST_RETRY_BASE_DELAY_MS || '350'));
+const SPOT_CACHE_TTL_MS = Math.max(1_000, Number(process.env.WEB3_SPOT_CACHE_TTL_MS || '20000'));
+const EXCHANGE_FALLBACK_TIMEOUT_MS = Math.max(2_000, Number(process.env.WEB3_EXCHANGE_TIMEOUT_MS || '6000'));
 
 type Web3Intent =
   | 'token_quote'
@@ -76,6 +78,15 @@ type CoinDetail = {
     subreddit_url?: string;
     repos_url?: { github?: string[] };
   };
+  platforms?: Record<string, string>;
+  detail_platforms?: Record<
+    string,
+    {
+      contract_address?: string;
+      decimal_place?: number | null;
+      geckoterminal_url?: string;
+    }
+  >;
 };
 
 type ResolvedAsset = {
@@ -111,6 +122,12 @@ type Web3CliResult = {
   missingData: string[];
 };
 
+type SpotCacheEntry = {
+  row: CoinMarketsRow;
+  updatedAtMs: number;
+  source: 'coingecko' | 'cache' | 'binance' | 'okx';
+};
+
 const STOP_WORDS = new Set([
   'token',
   'coin',
@@ -138,6 +155,18 @@ const STOP_WORDS = new Set([
   'cryptocurrency',
   'find',
   'search',
+  'do',
+  'you',
+  'your',
+  'think',
+  'thoughts',
+  'opinion',
+  'about',
+  'tell',
+  'me',
+  'current',
+  'today',
+  'now',
   'hot',
   'popular',
   'tokens',
@@ -162,19 +191,8 @@ const STOP_WORDS = new Set([
 const ZH_NOISE_RE =
   /(这个代币|这个币|代币|币种|币价|现价|价格|行情|走势|怎么样|如何|多少|是什么|是多少|请问|帮我|看一下|一下|目前|现在|呢|啊|呀|的)$/g;
 
-const KNOWN_ASSET_PATTERNS: Array<{ id: string; symbol: string; name: string; patterns: RegExp[] }> = [
-  { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', patterns: [/\bbtc\b/i, /\bbitcoin\b/i, /比特币/] },
-  { id: 'ethereum', symbol: 'eth', name: 'Ethereum', patterns: [/\beth\b/i, /\bethereum\b/i, /以太坊/] },
-  { id: 'solana', symbol: 'sol', name: 'Solana', patterns: [/\bsol\b/i, /\bsolana\b/i, /索拉纳|sol链/] },
-  { id: 'binancecoin', symbol: 'bnb', name: 'BNB', patterns: [/\bbnb\b/i, /binance coin/i, /币安币/] },
-  { id: 'ripple', symbol: 'xrp', name: 'XRP', patterns: [/\bxrp\b/i, /\bripple\b/i, /瑞波/] },
-  { id: 'cardano', symbol: 'ada', name: 'Cardano', patterns: [/\bada\b/i, /\bcardano\b/i, /艾达|卡尔达诺/] },
-  { id: 'dogecoin', symbol: 'doge', name: 'Dogecoin', patterns: [/\bdoge\b/i, /\bdogecoin\b/i, /狗狗币/] },
-  { id: 'shiba-inu', symbol: 'shib', name: 'Shiba Inu', patterns: [/\bshib\b/i, /\bshiba\b/i, /柴犬币|柴犬/] },
-  { id: 'pepe', symbol: 'pepe', name: 'Pepe', patterns: [/\bpepe\b/i, /佩佩/] },
-  { id: 'aave', symbol: 'aave', name: 'Aave', patterns: [/\baave\b/i] },
-  { id: 'rave-dao', symbol: 'rave', name: 'RAVE DAO', patterns: [/\brave\b/i, /\brave-dao\b/i] },
-];
+import { CRYPTO_ASSETS } from './cryptoAssets.js';
+const KNOWN_ASSET_PATTERNS = CRYPTO_ASSETS;
 
 const KNOWN_CATEGORY_HINTS: Array<{ keywords: RegExp[]; preferredTerms: string[] }> = [
   { keywords: [/ai agent/i, /ai coins?/i, /人工智能|ai赛道|ai板块/], preferredTerms: ['ai', 'agent'] },
@@ -187,6 +205,7 @@ const KNOWN_CATEGORY_HINTS: Array<{ keywords: RegExp[]; preferredTerms: string[]
 
 let proxyInitialized = false;
 let toolCatalogCache: { fetchedAt: number; tools: McpTool[] } | null = null;
+const spotCache = new Map<string, SpotCacheEntry>();
 
 function initProxyFromEnv(): void {
   if (proxyInitialized) return;
@@ -261,6 +280,102 @@ async function fetchRestJson(pathOrUrl: string): Promise<unknown> {
   throw lastError instanceof Error ? lastError : new Error(`REST request failed: ${String(lastError)}`);
 }
 
+function isRest429Error(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  const message = (err as Error)?.message || '';
+  return status === 429 || /\bREST\s+429\b/.test(message) || /\b429\b/.test(message);
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number): Promise<unknown> {
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+  return res.json();
+}
+
+function getFallbackSymbolCandidates(resolved: ResolvedAsset): string[] {
+  const out: string[] = [];
+  const push = (v?: string) => {
+    const s = (v || '').trim().toUpperCase();
+    if (!s || out.includes(s)) return;
+    out.push(s);
+  };
+  push(resolved.symbol);
+  const nameSymbol = (resolved.name || '').replace(/[^A-Za-z]/g, '').toUpperCase();
+  if (nameSymbol && nameSymbol.length <= 8) push(nameSymbol);
+  const idSymbol = (resolved.id || '').replace(/[^A-Za-z]/g, '').toUpperCase();
+  if (idSymbol && idSymbol.length <= 8) push(idSymbol);
+  if (resolved.id === 'rave-dao') push('RAVE');
+  return out.slice(0, 4);
+}
+
+async function fetchBinanceSpotUsd(symbol: string): Promise<number | null> {
+  const pairs = [`${symbol}USDT`, `${symbol}BUSD`, `${symbol}USDC`];
+  for (const pair of pairs) {
+    try {
+      const raw = (await fetchJsonWithTimeout(
+        `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(pair)}`,
+        EXCHANGE_FALLBACK_TIMEOUT_MS,
+      )) as { price?: string };
+      const v = Number(raw?.price);
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch {
+      /* try next pair */
+    }
+  }
+  return null;
+}
+
+async function fetchOkxSpotUsd(symbol: string): Promise<number | null> {
+  const pairs = [`${symbol}-USDT`, `${symbol}-USDC`];
+  for (const pair of pairs) {
+    try {
+      const raw = (await fetchJsonWithTimeout(
+        `https://www.okx.com/api/v5/market/ticker?instId=${encodeURIComponent(pair)}`,
+        EXCHANGE_FALLBACK_TIMEOUT_MS,
+      )) as { data?: Array<{ last?: string }> };
+      const last = raw?.data?.[0]?.last;
+      const v = Number(last);
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch {
+      /* try next pair */
+    }
+  }
+  return null;
+}
+
+async function fetchExchangeFallbackSpot(resolved: ResolvedAsset): Promise<{ priceUsd: number; source: 'binance' | 'okx' } | null> {
+  const symbols = getFallbackSymbolCandidates(resolved);
+  for (const symbol of symbols) {
+    const binance = await fetchBinanceSpotUsd(symbol);
+    if (binance != null) return { priceUsd: binance, source: 'binance' };
+    const okx = await fetchOkxSpotUsd(symbol);
+    if (okx != null) return { priceUsd: okx, source: 'okx' };
+  }
+  return null;
+}
+
+function getCachedSpotRow(geckoId: string): CoinMarketsRow | null {
+  const cached = spotCache.get(geckoId);
+  if (!cached) return null;
+  if (Date.now() - cached.updatedAtMs > SPOT_CACHE_TTL_MS) {
+    spotCache.delete(geckoId);
+    return null;
+  }
+  return cached.row;
+}
+
+function setCachedSpotRow(row: CoinMarketsRow): void {
+  if (!row?.id) return;
+  spotCache.set(row.id, {
+    row,
+    updatedAtMs: Date.now(),
+    source: 'coingecko',
+  });
+}
+
 function fmtUsd(value?: number | null): string {
   if (value == null || Number.isNaN(value)) return 'n/a';
   return `$${value.toLocaleString('en-US', {
@@ -293,10 +408,19 @@ function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractDollarTicker(query: string): string | undefined {
+  const match = query.match(/\$([A-Za-z][A-Za-z0-9-]{1,15})\b/);
+  return match?.[1]?.toLowerCase();
+}
+
 function extractTokenHint(query: string): string | undefined {
   const words = (query.match(/[A-Za-z][A-Za-z0-9-]{1,20}/g) || [])
     .map((w) => w.toLowerCase())
-    .filter((w) => !STOP_WORDS.has(w));
+    .filter((w) => !STOP_WORDS.has(w) && w.length >= 3);
   return words[0];
 }
 
@@ -321,6 +445,7 @@ function buildSearchCandidates(query: string): string[] {
     if (!s) return;
     if (!out.includes(s)) out.push(s);
   };
+  push(extractDollarTicker(query));
   const zh = extractChineseHint(query);
   push(zh);
   if (zh && zh.endsWith('币') && zh.length > 2) push(zh.slice(0, -1));
@@ -350,6 +475,47 @@ function scoreCoinCandidate(coin: SearchCoin, term: string): number {
   return score;
 }
 
+function rankScore(rank?: number | null): number {
+  if (typeof rank !== 'number' || rank <= 0) return 0;
+  if (rank <= 20) return 4;
+  if (rank <= 100) return 3;
+  if (rank <= 400) return 2;
+  return 1;
+}
+
+async function resolveAssetByExplicitTicker(ticker: string): Promise<ResolvedAsset | null> {
+  const t = (ticker || '').trim().toLowerCase();
+  if (!t) return null;
+  try {
+    const raw = (await fetchRestJson(`/search?query=${encodeURIComponent(t)}`)) as { coins?: SearchCoin[] };
+    const coins = (raw.coins || []).slice(0, 50);
+    const exactSymbol = coins.filter((coin) => (coin.symbol || '').toLowerCase() === t);
+    if (!exactSymbol.length) return null;
+    const scored = exactSymbol
+      .map((coin) => {
+        const id = (coin.id || '').toLowerCase();
+        const name = (coin.name || '').toLowerCase();
+        let score = 0;
+        if (id === t || name === t) score += 120;
+        if (id.includes(t) || name.includes(t)) score += 35;
+        score += rankScore(coin.market_cap_rank) * 20;
+        return { coin, score };
+      })
+      .sort((a, b) => b.score - a.score);
+    const pick = scored[0]?.coin;
+    if (!pick?.id) return null;
+    return {
+      id: pick.id,
+      symbol: pick.symbol,
+      name: pick.name,
+      hint: `$${t}`,
+      source: 'coingecko-symbol',
+    };
+  } catch {
+    return null;
+  }
+}
+
 function inferKnownAsset(query: string): ResolvedAsset | null {
   for (const asset of KNOWN_ASSET_PATTERNS) {
     if (asset.patterns.some((pattern) => pattern.test(query))) {
@@ -365,27 +531,49 @@ function inferKnownAsset(query: string): ResolvedAsset | null {
 }
 
 async function resolveAsset(query: string): Promise<ResolvedAsset | null> {
+  const explicitTicker = extractDollarTicker(query);
+  if (explicitTicker) {
+    const tickerResolved = await resolveAssetByExplicitTicker(explicitTicker);
+    if (tickerResolved) return tickerResolved;
+  }
   const hints = buildSearchCandidates(query);
   const quick = inferKnownAsset(query);
+  if (quick && quick.symbol) {
+    const symbolRe = new RegExp(`\\$?${escapeRegExp(quick.symbol)}\\b`, 'i');
+    if (symbolRe.test(query)) {
+      return { ...quick, source: 'quick-map-explicit' };
+    }
+  }
   if (!hints.length) return quick;
 
   try {
     let bestCoin: SearchCoin | null = null;
     let bestHint: string | undefined;
     let bestScore = -1;
+    let secondBestScore = -1;
     for (const hint of hints) {
       const raw = (await fetchRestJson(`/search?query=${encodeURIComponent(hint)}`)) as { coins?: SearchCoin[] };
       const coins = raw.coins || [];
       for (const coin of coins.slice(0, 20)) {
-        const s = scoreCoinCandidate(coin, hint);
+        let s = scoreCoinCandidate(coin, hint);
+        if (quick?.id && coin.id === quick.id) s += 260;
+        if (quick?.symbol && (coin.symbol || '').toLowerCase() === quick.symbol.toLowerCase()) s += 160;
         if (s > bestScore) {
+          secondBestScore = bestScore;
           bestScore = s;
           bestCoin = coin;
           bestHint = hint;
+        } else if (s > secondBestScore) {
+          secondBestScore = s;
         }
       }
     }
     if (!bestCoin?.id) return quick;
+    const dynamicMinScore = explicitTicker ? 35 : quick ? 75 : 55;
+    const minMargin = explicitTicker ? 6 : 14;
+    const margin = bestScore - secondBestScore;
+    const lowConfidence = bestScore < dynamicMinScore || (secondBestScore >= 0 && margin < minMargin && bestScore < 150);
+    if (lowConfidence) return quick;
     return {
       id: bestCoin.id,
       symbol: bestCoin.symbol,
@@ -749,43 +937,85 @@ async function runTokenQuote(query: string): Promise<Web3CliResult> {
       missingData: ['token_unresolved'],
     };
   }
-  const rows = await fetchCoinsMarkets({
-    vs_currency: 'usd',
-    ids: resolved.id,
-    order: 'market_cap_desc',
-    per_page: 1,
-    page: 1,
-    sparkline: 'false',
-    price_change_percentage: '24h',
-  });
-  const row = rows[0];
+  let row: CoinMarketsRow | undefined;
+  const logs: string[] = [`intent=token_quote`, `resolved_id=${resolved.id}`, `resolver=${resolved.source}`];
+  const missingData: string[] = [];
+  let via: 'rest' | 'hybrid' = 'rest';
+  let resolver = resolved.source;
+  let errorMessage = '';
+
+  try {
+    const rows = await fetchCoinsMarkets({
+      vs_currency: 'usd',
+      ids: resolved.id,
+      order: 'market_cap_desc',
+      per_page: 1,
+      page: 1,
+      sparkline: 'false',
+      price_change_percentage: '24h',
+    });
+    row = rows[0];
+    if (row) setCachedSpotRow(row);
+  } catch (e) {
+    errorMessage = (e as Error).message;
+    logs.push(`coingecko_error=${truncate(errorMessage, 180)}`);
+    const cached = getCachedSpotRow(resolved.id);
+    if (cached) {
+      row = cached;
+      via = 'hybrid';
+      resolver = 'coingecko-cache';
+      logs.push(`fallback=cache ttl_ms=${SPOT_CACHE_TTL_MS}`);
+      missingData.push('coingecko_live_unavailable');
+    } else {
+      const fallback = await fetchExchangeFallbackSpot(resolved);
+      if (fallback) {
+        row = {
+          id: resolved.id,
+          symbol: (resolved.symbol || '').toLowerCase(),
+          name: resolved.name || resolved.id,
+          current_price: fallback.priceUsd,
+          market_cap_rank: undefined,
+        } as CoinMarketsRow;
+        via = 'hybrid';
+        resolver = `${fallback.source}-fallback`;
+        logs.push(`fallback=${fallback.source}`);
+        missingData.push('coingecko_live_unavailable', 'market_cap_missing', 'volume_missing');
+      }
+    }
+  }
+
+  if (!row && isRest429Error(new Error(errorMessage))) {
+    missingData.push('coingecko_rate_limited');
+  }
+
   const report = row
     ? [
-        '## Web3 资产快照（CoinGecko）',
+        via === 'hybrid' ? '## Web3 资产快照（多源兜底）' : '## Web3 资产快照（CoinGecko）',
         `资产: ${row.name} (${row.symbol.toUpperCase()}) / ${resolved.id}`,
         `现价: ${fmtUsd(row.current_price)}`,
         `24h 涨跌: ${fmtPct(row.price_change_percentage_24h)}`,
         `市值: ${fmtUsdCompact(row.market_cap)}`,
         `24h 交易量: ${fmtUsdCompact(row.total_volume)}`,
         `排名: #${row.market_cap_rank || 'n/a'}`,
+        via === 'hybrid' ? `数据说明: CoinGecko 实时接口不可用，已使用 ${resolver} 兜底。` : '',
       ].join('\n')
-    : `## Web3 数据\n未获取到 ${resolved.id} 的现货快照。`;
+    : `## Web3 数据\n未获取到 ${resolved.id} 的现货快照。${errorMessage ? `\n原因: ${errorMessage}` : ''}`;
 
   return {
     ok: true,
     report,
     intent: 'token_quote',
-    via: 'rest',
+    via,
     assets: row ? [{ id: row.id, symbol: row.symbol, name: row.name }] : [{ id: resolved.id, symbol: resolved.symbol, name: resolved.name }],
     market: { spot: row || {} },
     discovery: {},
     onchain: {},
     nft: {},
-    logs: [`intent=token_quote`, `resolved_id=${resolved.id}`, `resolver=${resolved.source}`],
-    missingData: row ? [] : ['spot_snapshot_missing'],
+    logs,
+    missingData: row ? missingData : [...missingData, 'spot_snapshot_missing'],
     resolvedId: resolved.id,
     spotPriceUsd: row?.current_price,
-    resolver: resolved.source,
+    resolver,
   };
 }
 
@@ -808,8 +1038,12 @@ async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
   }
 
   const days = pickChartDays(query);
-  const [rows, detail, chart] = await Promise.all([
-    fetchCoinsMarkets({
+  let rows: CoinMarketsRow[] = [];
+  const deepDiveLogs: string[] = [];
+  let deepDiveVia: 'rest' | 'hybrid' = 'rest';
+  let deepDiveResolver = resolved.source;
+  try {
+    rows = await fetchCoinsMarkets({
       vs_currency: 'usd',
       ids: resolved.id,
       order: 'market_cap_desc',
@@ -817,10 +1051,35 @@ async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
       page: 1,
       sparkline: 'false',
       price_change_percentage: '24h',
-    }),
-    fetchCoinDetail(resolved.id),
-    fetchCoinChart(resolved.id, days),
-  ]);
+    });
+    if (rows[0]) setCachedSpotRow(rows[0]);
+  } catch (e) {
+    const msg = (e as Error).message;
+    deepDiveLogs.push(`coingecko_spot_error=${truncate(msg, 180)}`);
+    const cached = getCachedSpotRow(resolved.id);
+    if (cached) {
+      rows = [cached];
+      deepDiveVia = 'hybrid';
+      deepDiveResolver = 'coingecko-cache';
+      deepDiveLogs.push('fallback=cache');
+    } else {
+      const fallback = await fetchExchangeFallbackSpot(resolved);
+      if (fallback) {
+        rows = [
+          {
+            id: resolved.id,
+            symbol: (resolved.symbol || '').toLowerCase(),
+            name: resolved.name || resolved.id,
+            current_price: fallback.priceUsd,
+          } as CoinMarketsRow,
+        ];
+        deepDiveVia = 'hybrid';
+        deepDiveResolver = `${fallback.source}-fallback`;
+        deepDiveLogs.push(`fallback=${fallback.source}`);
+      }
+    }
+  }
+  const [detail, chart] = await Promise.all([fetchCoinDetail(resolved.id), fetchCoinChart(resolved.id, days)]);
 
   const row = rows[0];
   const chartSummary = summarizeChart(chart);
@@ -828,7 +1087,7 @@ async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
   const description = truncate(detail?.description?.en || '', 280);
 
   const reportLines = [
-    '## Web3 深度快照（CoinGecko）',
+    deepDiveVia === 'hybrid' ? '## Web3 深度快照（多源兜底）' : '## Web3 深度快照（CoinGecko）',
     `资产: ${(row?.name || detail?.name || resolved.name || resolved.id) ?? resolved.id} (${(
       row?.symbol ||
       detail?.symbol ||
@@ -841,6 +1100,9 @@ async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
     `24h 交易量: ${fmtUsdCompact(row?.total_volume)}`,
     `排名: #${row?.market_cap_rank || detail?.market_cap_rank || 'n/a'}`,
   ];
+  if (deepDiveVia === 'hybrid') {
+    reportLines.push(`数据说明: CoinGecko 实时接口不可用，已使用 ${deepDiveResolver} 兜底现价。`);
+  }
   if (Object.keys(chartSummary).length) {
     reportLines.push(
       `${days}d 区间: ${fmtUsd(chartSummary.minUsd as number)} -> ${fmtUsd(chartSummary.maxUsd as number)} | 期间涨跌 ${fmtPct(
@@ -870,7 +1132,7 @@ async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
     ok: true,
     report: reportLines.join('\n'),
     intent: 'token_deep_dive',
-    via: 'rest',
+    via: deepDiveVia,
     assets: [{ id: resolved.id, symbol: row?.symbol || resolved.symbol, name: row?.name || resolved.name }],
     market: {
       spot: row || {},
@@ -880,11 +1142,17 @@ async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
     discovery: {},
     onchain: {},
     nft: {},
-    logs: [`intent=token_deep_dive`, `resolved_id=${resolved.id}`, `resolver=${resolved.source}`, `history_days=${days}`],
+    logs: [
+      `intent=token_deep_dive`,
+      `resolved_id=${resolved.id}`,
+      `resolver=${resolved.source}`,
+      `history_days=${days}`,
+      ...deepDiveLogs,
+    ],
     missingData,
     resolvedId: resolved.id,
     spotPriceUsd: row?.current_price,
-    resolver: resolved.source,
+    resolver: deepDiveResolver,
   };
 }
 
@@ -988,31 +1256,27 @@ function scoreTool(name: string, desc: string): number {
   return s;
 }
 
-async function loadToolCatalog(client: Client): Promise<McpTool[]> {
-  const now = Date.now();
-  if (toolCatalogCache && now - toolCatalogCache.fetchedAt < TOOL_CACHE_TTL_MS) {
-    return toolCatalogCache.tools;
-  }
-  const { tools } = await client.listTools();
-  toolCatalogCache = {
-    fetchedAt: now,
-    tools: (tools || []) as McpTool[],
-  };
-  return toolCatalogCache.tools;
+function isOnchainLikeTool(name: string, desc: string): boolean {
+  const t = `${name} ${desc || ''}`.toLowerCase();
+  return /(onchain|dex|pool|liquidity|geckoterminal|terminal|trade|volume|ohlc|ticker|network)/.test(t);
 }
 
-function pickTool(
-  tools: McpTool[],
-  query: string,
-  geckoId?: string,
-): { name: string; args: Record<string, unknown> } | null {
-  if (!tools.length) return null;
-  const ranked = [...tools].sort(
-    (a, b) => scoreTool(b.name, b.description ?? '') - scoreTool(a.name, a.description ?? ''),
-  );
-  const best = ranked[0];
-  if (!best) return null;
-  const props = best.inputSchema?.properties ?? {};
+function scoreToolForIntent(name: string, desc: string, intent: Web3Intent): number {
+  const t = `${name} ${desc || ''}`.toLowerCase();
+  let s = scoreTool(name, desc);
+  if (intent === 'onchain_scan') {
+    if (isOnchainLikeTool(name, desc)) s += 12;
+    if (/search|lookup|get_id|id_coins|simple price|coin list/.test(t)) s -= 6;
+  }
+  if (intent === 'nft_scan') {
+    if (/nft|collection|floor/.test(t)) s += 12;
+    if (/search|lookup|get_id|id_coins/.test(t)) s -= 4;
+  }
+  return s;
+}
+
+function buildToolArgs(tool: McpTool, query: string, geckoId?: string): Record<string, unknown> {
+  const props = tool.inputSchema?.properties ?? {};
   const keys = Object.keys(props);
   const args: Record<string, unknown> = {};
   const q = query.trim();
@@ -1029,7 +1293,116 @@ function pickTool(
     const first = keys[0];
     args[first] = geckoId || q;
   }
+  return args;
+}
+
+function formatHistoryDate(date = new Date()): string {
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const y = date.getUTCFullYear();
+  return `${d}-${m}-${y}`;
+}
+
+function resolvePrimaryContract(detail: CoinDetail | null): { network?: string; address?: string } {
+  if (!detail) return {};
+  const platforms = detail.platforms || {};
+  const detailPlatforms = detail.detail_platforms || {};
+  const preferred = ['ethereum', 'base', 'binance-smart-chain'];
+  const allNetworks = [...preferred, ...Object.keys(platforms), ...Object.keys(detailPlatforms)];
+  for (const network of unique(allNetworks)) {
+    const fromDetail = detailPlatforms[network]?.contract_address;
+    const fromPlatforms = platforms[network];
+    const address = (fromDetail || fromPlatforms || '').trim();
+    if (address) return { network, address };
+  }
+  return {};
+}
+
+function injectOnchainArgs(
+  args: Record<string, unknown>,
+  tool: McpTool,
+  detail: CoinDetail | null,
+  geckoId?: string,
+): Record<string, unknown> {
+  const out = { ...args };
+  const props = tool.inputSchema?.properties ?? {};
+  const keys = Object.keys(props);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const weekAgoSec = nowSec - 7 * 24 * 3600;
+  const historyDate = formatHistoryDate();
+  const { network, address } = resolvePrimaryContract(detail);
+
+  if (geckoId) {
+    if (keys.includes('id') && out.id == null) out.id = geckoId;
+    if (keys.includes('coin_id') && out.coin_id == null) out.coin_id = geckoId;
+    if (keys.includes('ids') && out.ids == null) out.ids = geckoId;
+  }
+  if (address) {
+    if (keys.includes('contract_address') && out.contract_address == null) out.contract_address = address;
+    if (keys.includes('address') && out.address == null) out.address = address;
+    if (keys.includes('token_address') && out.token_address == null) out.token_address = address;
+  }
+  if (network) {
+    if (keys.includes('network') && out.network == null) out.network = network;
+    if (keys.includes('chain') && out.chain == null) out.chain = network;
+    if (keys.includes('network_id') && out.network_id == null) out.network_id = network;
+  }
+  if (keys.includes('date') && out.date == null) out.date = historyDate;
+  if (keys.includes('from') && out.from == null) out.from = weekAgoSec;
+  if (keys.includes('to') && out.to == null) out.to = nowSec;
+  if (keys.includes('from_timestamp') && out.from_timestamp == null) out.from_timestamp = weekAgoSec;
+  if (keys.includes('to_timestamp') && out.to_timestamp == null) out.to_timestamp = nowSec;
+  if (keys.includes('days') && out.days == null) out.days = 7;
+  if (keys.includes('interval') && out.interval == null) out.interval = 'daily';
+  if (keys.includes('vs_currency') && out.vs_currency == null) out.vs_currency = 'usd';
+  return out;
+}
+
+async function loadToolCatalog(client: Client): Promise<McpTool[]> {
+  const now = Date.now();
+  if (toolCatalogCache && now - toolCatalogCache.fetchedAt < TOOL_CACHE_TTL_MS) {
+    return toolCatalogCache.tools;
+  }
+  const { tools } = await client.listTools();
+  toolCatalogCache = {
+    fetchedAt: now,
+    tools: (tools || []) as McpTool[],
+  };
+  return toolCatalogCache.tools;
+}
+
+function pickTool(
+  tools: McpTool[],
+  intent: Web3Intent,
+  query: string,
+  geckoId?: string,
+): { name: string; args: Record<string, unknown> } | null {
+  if (!tools.length) return null;
+  const ranked = [...tools].sort(
+    (a, b) => scoreToolForIntent(b.name, b.description ?? '', intent) - scoreToolForIntent(a.name, a.description ?? '', intent),
+  );
+  const best = ranked[0];
+  if (!best) return null;
+  const args = buildToolArgs(best, query, geckoId);
   return { name: best.name, args };
+}
+
+function pickToolBatch(
+  tools: McpTool[],
+  intent: Web3Intent,
+  query: string,
+  geckoId?: string,
+): Array<{ name: string; args: Record<string, unknown>; onchainLike: boolean }> {
+  if (!tools.length) return [];
+  const ranked = [...tools].sort(
+    (a, b) => scoreToolForIntent(b.name, b.description ?? '', intent) - scoreToolForIntent(a.name, a.description ?? '', intent),
+  );
+  const max = intent === 'onchain_scan' ? 4 : intent === 'nft_scan' ? 3 : 1;
+  return ranked.slice(0, max).map((tool) => ({
+    name: tool.name,
+    args: buildToolArgs(tool, query, geckoId),
+    onchainLike: isOnchainLikeTool(tool.name, tool.description ?? ''),
+  }));
 }
 
 function formatToolResult(result: { content?: { type: string; text?: string }[]; isError?: boolean }): string {
@@ -1060,32 +1433,81 @@ async function runLegacyMcpQuery(query: string, intent: Web3Intent): Promise<Web
   try {
     await client.connect(transport);
     const tools = await loadToolCatalog(client);
-    const pick = pickTool(tools, query, resolved?.id);
+    const coreSpot = resolved ? await runTokenQuote(query) : null;
+    const coinDetail = intent === 'onchain_scan' && resolved?.id ? await fetchCoinDetail(resolved.id) : null;
+    const picks = pickToolBatch(tools, intent, query, resolved?.id);
+    const pick = picks[0] || pickTool(tools, intent, query, resolved?.id);
     if (!pick) {
       throw new Error('no_suitable_tool');
     }
-      const out = await client.callTool({ name: pick.name, arguments: pick.args });
-      let text = formatToolResult(out as { content?: { type: string; text?: string }[]; isError?: boolean });
-    if (text.length > 14_000) {
-      text = `${text.slice(0, 14_000)}\n\n...(truncated for downstream synthesis)`;
+    const chunks: string[] = [];
+    const successfulTools: string[] = [];
+    const attemptedTools: string[] = [];
+    let gotOnchainLike = false;
+    for (const item of picks.length ? picks : [{ ...pick, onchainLike: false }]) {
+      try {
+        attemptedTools.push(item.name);
+        const toolMeta = tools.find((t) => t.name === item.name);
+        const enrichedArgs =
+          intent === 'onchain_scan' && toolMeta ? injectOnchainArgs(item.args, toolMeta, coinDetail, resolved?.id) : item.args;
+        const outTyped = (await client.callTool({ name: item.name, arguments: enrichedArgs })) as {
+          content?: { type: string; text?: string }[];
+          isError?: boolean;
+        };
+        let text = formatToolResult(outTyped);
+        if (!text) continue;
+        if (text.length > 8_000) {
+          text = `${text.slice(0, 8_000)}\n\n...(truncated)`;
+        }
+        chunks.push(`### MCP Tool: ${item.name}\n参数: ${JSON.stringify(enrichedArgs)}\n\n${text}`);
+        if (!outTyped.isError) {
+          successfulTools.push(item.name);
+          if (item.onchainLike) gotOnchainLike = true;
+        }
+      } catch (err) {
+        chunks.push(`### MCP Tool: ${item.name}\n调用失败: ${(err as Error).message}`);
+      }
     }
-      return {
-        ok: true,
-      report: `## Web3 专项数据（CoinGecko MCP）\n意图: ${intent}\n工具: ${pick.name}\n参数: ${JSON.stringify(
-        pick.args,
-      )}\n\n${text}`,
+    let text = chunks.join('\n\n');
+    if (text.length > 16_000) {
+      text = `${text.slice(0, 16_000)}\n\n...(truncated for downstream synthesis)`;
+    }
+    const reportSections: string[] = [];
+    if (coreSpot) {
+      reportSections.push('## 资产现货快照（强制）');
+      reportSections.push(coreSpot.report);
+    }
+    reportSections.push(`## Web3 专项数据（CoinGecko MCP）\n意图: ${intent}\n工具数: ${successfulTools.length || 0}`);
+    reportSections.push(text || 'MCP未返回可读内容。');
+    const missingData = [...(coreSpot?.missingData || [])];
+    if (intent === 'onchain_scan' && !gotOnchainLike) {
+      missingData.push('onchain_metrics_unavailable');
+    }
+    return {
+      ok: true,
+      report: reportSections.join('\n\n'),
       intent,
-        via: 'mcp',
-      resolvedId: resolved?.id,
-      spotPriceUsd: undefined,
-      resolver: resolved?.source,
-      assets: resolved ? [{ id: resolved.id, symbol: resolved.symbol, name: resolved.name }] : [],
-      market: {},
+      via: coreSpot ? 'hybrid' : 'mcp',
+      resolvedId: coreSpot?.resolvedId || resolved?.id,
+      spotPriceUsd: coreSpot?.spotPriceUsd,
+      resolver: coreSpot?.resolver || resolved?.source,
+      assets: coreSpot?.assets?.length
+        ? coreSpot.assets
+        : resolved
+          ? [{ id: resolved.id, symbol: resolved.symbol, name: resolved.name }]
+          : [],
+      market: coreSpot ? { spot: coreSpot.market?.spot || {} } : {},
       discovery: {},
-      onchain: intent === 'onchain_scan' ? { tool: pick.name } : {},
-      nft: intent === 'nft_scan' ? { tool: pick.name } : {},
-      logs: [`intent=${intent}`, `mcp_tool=${pick.name}`, `tool_catalog_size=${tools.length}`],
-      missingData: [],
+      onchain: intent === 'onchain_scan' ? { tools: successfulTools } : {},
+      nft: intent === 'nft_scan' ? { tools: successfulTools } : {},
+      logs: [
+        `intent=${intent}`,
+        `mcp_tools_success=${successfulTools.join(',') || 'none'}`,
+        `mcp_tools_attempted=${attemptedTools.join(',') || 'none'}`,
+        `tool_catalog_size=${tools.length}`,
+        ...(coreSpot ? ['forced_market_snapshot=true'] : []),
+      ],
+      missingData,
     };
   } catch (e) {
       return {
@@ -1119,7 +1541,13 @@ async function runWeb3Pipeline(query: string): Promise<Web3CliResult> {
   if (intent === 'market_scan') return runMarketScan(query);
   if (intent === 'multi_asset_compare') return runMultiAssetCompare(query);
   if (intent === 'category_scan') return runCategoryScan(query);
-  if (intent === 'token_quote') return runTokenQuote(query);
+  if (intent === 'token_quote') {
+    const deepDive = await runTokenDeepDive(query);
+    return {
+      ...deepDive,
+      logs: [...deepDive.logs, 'upgraded_from=token_quote'],
+    };
+  }
   if (intent === 'token_deep_dive') return runTokenDeepDive(query);
   return runLegacyMcpQuery(query, intent);
 }
