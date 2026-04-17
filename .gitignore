@@ -87,3 +87,5 @@ docs/NEED_FROM_YOU.md
 LamportID.pem
 **/.venv/
 **/venv/
+BUG_TRACKING.md
+.claude/

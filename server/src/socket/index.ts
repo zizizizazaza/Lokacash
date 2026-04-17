@@ -8,13 +8,20 @@ import { web3ResearchService, type Web3ResearchResult } from '../services/web3Re
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
+import { isCryptoSymbol, isAmbiguousSymbol, filterOutCryptoTickers } from '../constants/cryptoAssets.js';
 import {
   formatConsensusAgentLabel,
   runConsensusEngine,
   sortConsensusAgentEntries,
 } from '../services/consensus.service.js';
 import * as crypto from 'crypto';
-import { createModuleEmitter } from '../services/moduleEmitter.js';
+import {
+  createModuleEmitter,
+  startChatReplayBuffer,
+  finishChatReplayBuffer,
+  getChatReplayBuffer,
+  recordChatToolTraceStep,
+} from '../services/moduleEmitter.js';
 import {
   mergeSignalSources,
   sourcesFromSignalRadarLogLine,
@@ -823,6 +830,19 @@ Text: "${query}"`;
           callback({ ok: false });
           return;
         }
+        const chatBuffer = getChatReplayBuffer(sid);
+        if (chatBuffer) {
+          callback({
+            ok: true,
+            isRunning: chatBuffer.status === 'running',
+            steps: chatBuffer.toolTraceSteps,
+            modules: chatBuffer.modules,
+            mode: chatBuffer.mode,
+            report: chatBuffer.content || undefined,
+            status: chatBuffer.status,
+          } as any);
+          return;
+        }
         const buffer = stockAnalysisService.getSessionBuffer(sid);
         if (buffer) {
           callback({
@@ -947,6 +967,7 @@ Text: "${query}"`;
       };
 
       activeChatSessions.set(sessionId, 'running');
+      startChatReplayBuffer(sessionId, data.mode);
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
       const requestStartedAt = Date.now();
@@ -1105,7 +1126,54 @@ Text: "${query}"`;
         plan.capabilities.search.needed = true;
         plan.capabilities.search.query = plan.capabilities.search.query || data.content;
       }
-      
+
+      // ── Layer 1: strip known crypto symbols from analysis.tickers ──────────
+      if (plan.capabilities.analysis.needed && plan.capabilities.analysis.tickers?.length) {
+        const cryptoHits = plan.capabilities.analysis.tickers.filter(isCryptoSymbol);
+        if (cryptoHits.length > 0) {
+          const filtered = filterOutCryptoTickers(plan.capabilities.analysis.tickers);
+          console.log(`[routing:layer1] Stripped crypto tickers from analysis: [${cryptoHits.join(', ')}] → remaining: [${filtered.join(', ') || 'none'}]`);
+          if (filtered.length === 0) {
+            plan.capabilities.analysis.needed = false;
+          } else {
+            plan.capabilities.analysis.tickers = filtered;
+          }
+          // Auto-enable web3 if not already set
+          if (!plan.capabilities.web3?.needed) {
+            plan.capabilities.web3 = {
+              needed: true,
+              query: cryptoHits.map(t => t.toUpperCase()).join(' ') + ' ' + (plan.capabilities.search.query || userContent),
+            };
+            console.log(`[routing:layer1] Auto-enabled web3 for stripped crypto tickers: ${cryptoHits.join(', ')}`);
+          }
+        }
+      }
+
+      // ── Layer 3: ambiguous ticker → ask user to clarify (crypto vs stock) ──
+      const allMentionedTickers = [
+        ...(plan.capabilities.analysis.tickers || []),
+        ...(plan.capabilities.simulate?.tickers || []),
+      ];
+      const ambiguous = allMentionedTickers.find(t => isAmbiguousSymbol(t) && !plan.capabilities.web3?.needed);
+      if (ambiguous) {
+        const asset = ambiguous.toUpperCase();
+        const clarification = `I noticed you mentioned **${asset}** — did you mean the **${asset} cryptocurrency** or the **${asset} stock ticker**? Please clarify so I can route your query to the right tool.`;
+        console.log(`[routing:layer3] Ambiguous ticker detected: ${asset} → sending clarification`);
+        emitter.emitModule('search', 'active', { variant: 'data_providers', providers: [] });
+        emitter.emitProgress(clarification);
+        emitter.emitModule('done', 'completed', { duration: 0 });
+        emitter.emitStreamDone(clarification);
+        try {
+          await prisma.chatMessage.create({
+            data: { userId, sessionId, role: 'assistant', content: clarification, agentId: 'superagent' }
+          });
+        } catch (_) {}
+        activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
+        chatAbortControllers.delete(sessionId);
+        return;
+      }
+
       socket.emit('agent:chat:routed', { 
         sessionId, 
         mode: (!hasImages && data.mode === 'roundtable') ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
@@ -1172,6 +1240,7 @@ Text: "${query}"`;
           const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
           if (isAborted()) {
             activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
             chatAbortControllers.delete(sessionId);
             return;
           }
@@ -1190,6 +1259,7 @@ Text: "${query}"`;
           emitter.emitStreamDone('');
         }
         activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
       }
@@ -1417,6 +1487,7 @@ Text: "${query}"`;
               analysisSubSessionId,
               userId,
               (step: any) => {
+                recordChatToolTraceStep(sessionId, step);
                 emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step });
                 if (step.type === 'generating' && step.message === '[UI_METADATA]' && step.content) {
                   try {
@@ -1654,6 +1725,7 @@ Text: "${query}"`;
       if (isAborted()) {
         console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
         activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
       }
@@ -2539,7 +2611,7 @@ The HTML must:
         const htmlPrompt = queryType === 'guru-council'
           ? buildGuruCouncilHtmlPrompt(htmlInput)
           : buildWebReportPrompt(htmlInput);
-        const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 16384);
+        const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 8192);
         const htmlReader = htmlStream.getReader();
         const htmlDecoder = new TextDecoder();
         let htmlContent = '';
@@ -2606,16 +2678,26 @@ The HTML must:
         console.log(`[agent:chat:html] ✅ HTML report emitted for session ${sessionId}, msgIdx=${msgIdx}, length=${htmlContent.length}`);
       };
 
-      // ── Start parallel HTML generation for non-roundtable eligible queries ──
+      // ── Start REAL-PARALLEL HTML generation (runs concurrently with synthesis) ──
+      // Input is `contextString` (research data) instead of waiting for synthesis output.
+      // The resulting promise is awaited AFTER synthesis completes, so HTML is ready
+      // immediately (or near-immediately) rather than starting a fresh 148s round trip.
       const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
       const htmlReportEnabled = htmlEligible && !config.superAgentDisableHtmlReport;
       if (htmlEligible && config.superAgentDisableHtmlReport) {
         console.log('[agent:chat:html] Skipped (SUPERAGENT_DISABLE_HTML_REPORT is set)');
       }
+      const parallelHtmlStartedAt = Date.now();
       let parallelHtmlPromise: Promise<string> | null = null;
-      if (htmlReportEnabled && !isDeepResearch && contextString.length > 200) {
-        console.log(`[agent:chat:html] Starting PARALLEL HTML generation (queryType=${queryType}), contextString length=${contextString.length}`);
-        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 }); // msgIdx resolved later
+      // Enable parallel HTML for ALL eligible queries including roundtable.
+      // For roundtable, the parallel HTML uses contextString (raw research data)
+      // and gets overlapped with consensus + deep-research second pass. If the
+      // result quality is unacceptable, the sequential fallback using
+      // finalDbContent still runs after synthesis completes.
+      if (htmlReportEnabled && contextString.length > 200) {
+        const mode = isDeepResearch ? 'roundtable' : 'standard';
+        console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
+        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
         parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
           console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
           return '';
@@ -2760,6 +2842,7 @@ The HTML must:
         if (isAborted()) {
           console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
         }
@@ -2873,7 +2956,7 @@ Research context:\n${synFullContent}${langInstruction}`;
               [{ role: 'user', content: deepResearchFinalPrompt }],
               'superagent',
               undefined,
-              16384,
+              8192,
               synthesisModelOverride,
             );
             const deepReader = deepStream.getReader();
@@ -2978,31 +3061,50 @@ Research context:\n${synFullContent}${langInstruction}`;
         );
         emitter.emitStreamDone(finalDbContent, { sources: streamDoneSources });
 
-        // --- Async HTML report generation (non-blocking) ---
-        // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
-        // IMPORTANT: respect SUPERAGENT_DISABLE_HTML_REPORT here as well (sequential branch).
-        const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+        // --- HTML report emission: prefer parallel result, fall back to sequential ---
+        // Primary path: await the promise launched BEFORE synthesis (started at
+        // `parallelHtmlStartedAt`). It has been running concurrently with synthesis,
+        // so typically it resolves immediately or within a short margin — saving the
+        // full sequential round-trip that previously blocked ~148s.
         const htmlModeLabel = isDeepResearch ? 'roundtable' : 'standard';
         if (htmlEligible && config.superAgentDisableHtmlReport) {
-          console.log('[agent:chat:html] Skipped SEQUENTIAL generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
+          console.log('[agent:chat:html] Skipped HTML generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
         } else if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
-          // Emit generating signal immediately so frontend shows Web tab skeleton
-          const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
-          const genMsgIdx = pendingMsgCount - 1;
-          emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
-          const htmlSeqStartedAt = Date.now();
-          console.log(
-            `[agent:chat:html] Starting SEQUENTIAL HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
-          );
-          try {
-            const htmlContent = await runHtmlGeneration(finalDbContent);
-            await emitHtmlResult(htmlContent);
-            console.log(
-              `[agent:chat:timing] html_sequential_s=${asSeconds(Date.now() - htmlSeqStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
-            );
-          } catch (htmlErr: any) {
-            console.error(`[agent:chat:html] ❌ Sequential HTML generation failed (${htmlModeLabel}):`, htmlErr.message);
+          const htmlEmitStartedAt = Date.now();
+          let htmlContent = '';
+          if (parallelHtmlPromise) {
+            console.log(`[agent:chat:html] Awaiting REAL-PARALLEL HTML result (started ${asSeconds(Date.now() - parallelHtmlStartedAt)}s ago)`);
+            try {
+              htmlContent = await parallelHtmlPromise;
+            } catch (_) {
+              htmlContent = '';
+            }
+            if (htmlContent && htmlContent.length > 100) {
+              console.log(`[agent:chat:html] ✅ Using PARALLEL HTML result, length=${htmlContent.length}`);
+            } else {
+              console.log(`[agent:chat:html] ⚠️ Parallel HTML empty/short, falling back to sequential`);
+            }
           }
+          if (!htmlContent || htmlContent.length <= 100) {
+            const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
+            const genMsgIdx = pendingMsgCount - 1;
+            emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
+            console.log(
+              `[agent:chat:html] Starting SEQUENTIAL fallback HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
+            );
+            try {
+              htmlContent = await runHtmlGeneration(finalDbContent);
+            } catch (htmlErr: any) {
+              console.error(`[agent:chat:html] ❌ Sequential fallback HTML failed (${htmlModeLabel}):`, htmlErr.message);
+              htmlContent = '';
+            }
+          }
+          if (htmlContent && htmlContent.length > 100) {
+            try { await emitHtmlResult(htmlContent); } catch (_) {}
+          }
+          console.log(
+            `[agent:chat:timing] html_emit_s=${asSeconds(Date.now() - htmlEmitStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
+          );
         }
 
         console.log(
@@ -3013,6 +3115,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         if (isAborted()) {
           console.log(`[agent:chat] Aborted during synthesis error handling for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
         }
@@ -3069,6 +3172,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         );
       }
       activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
       chatAbortControllers.delete(sessionId);
     });
     socket.on('disconnect', () => {

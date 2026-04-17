@@ -29,8 +29,38 @@ export type Web3ResearchResult = {
   };
 };
 
+type Web3CacheEntry = {
+  value: Web3ResearchResult;
+  updatedAtMs: number;
+};
+
+const WEB3_RESULT_CACHE_TTL_MS = Math.max(5_000, Number(process.env.WEB3_RESULT_CACHE_TTL_MS || '30000'));
+const web3ResultCache = new Map<string, Web3CacheEntry>();
+
 function serverRootFromHere(): string {
   return path.join(__dirname, '../..');
+}
+
+function cacheKey(query: string): string {
+  return query.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function getCachedResult(query: string): Web3ResearchResult | null {
+  const key = cacheKey(query);
+  const entry = web3ResultCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.updatedAtMs > WEB3_RESULT_CACHE_TTL_MS) {
+    web3ResultCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedResult(query: string, value: Web3ResearchResult): void {
+  web3ResultCache.set(cacheKey(query), {
+    value,
+    updatedAtMs: Date.now(),
+  });
 }
 
 /**
@@ -125,7 +155,24 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
             200,
           )}" stderr="${clip(stderr, 400)}" stdout_tail="${clip(stdout, 400)}"`,
         );
-        reject(new Error(parsedCliError || stderr.trim() || stdoutLine || `web3 cli exited ${code}`));
+        const finalError = parsedCliError || stderr.trim() || stdoutLine || `web3 cli exited ${code}`;
+        if (/\bREST\s+429\b/i.test(finalError) || /\b429\b/.test(finalError)) {
+          const cached = getCachedResult(q);
+          if (cached) {
+            console.log(`[web3Research] serving cached result after 429 query="${clip(q, 120)}" ttl_ms=${WEB3_RESULT_CACHE_TTL_MS}`);
+            resolve({
+              report: `${cached.report}\n\n> 注：上游实时接口限流（429），当前结果来自 ${Math.floor(WEB3_RESULT_CACHE_TTL_MS / 1000)} 秒内缓存。`,
+              raw: {
+                ...cached.raw,
+                via: cached.raw.via || 'rest',
+                logs: [...(cached.raw.logs || []), 'served_from_cache_after_429'],
+                missingData: [...(cached.raw.missingData || []), 'live_rate_limited_used_cache'],
+              },
+            });
+            return;
+          }
+        }
+        reject(new Error(finalError));
         return;
       }
       let line = '';
@@ -172,6 +219,23 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
           console.log(`[web3Research:missing] ${parsed.missingData.join(',')}`);
         }
         resolve({
+          report: parsed.report || '',
+          raw: {
+            intent: parsed.intent,
+            via: parsed.via,
+            resolvedId: parsed.resolvedId,
+            spotPriceUsd: parsed.spotPriceUsd,
+            resolver: parsed.resolver,
+            assets: parsed.assets || [],
+            market: parsed.market || {},
+            discovery: parsed.discovery || {},
+            onchain: parsed.onchain || {},
+            nft: parsed.nft || {},
+            logs: parsed.logs || [],
+            missingData: parsed.missingData || [],
+          },
+        });
+        setCachedResult(q, {
           report: parsed.report || '',
           raw: {
             intent: parsed.intent,

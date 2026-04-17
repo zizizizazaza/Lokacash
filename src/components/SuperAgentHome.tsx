@@ -312,14 +312,40 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   // (content '' + images: 1) and creates a phantom session.
   const effectiveChatInitialImages = isNewChatReset ? [] : chatInitialImages;
 
+  // SuperAgentChat pushes the URL via window.history.replaceState (bypassing React Router),
+  // so when the sidebar calls navigate('/?session=xxx') for the session that is already
+  // active in this tab, React Router treats it as a new navigation and would remount
+  // SuperAgentChat — losing the in-progress stream and producing a blank page.
+  // Detect this case: if the sessionParam matches the session currently stored in
+  // sessionStorage (the live session), keep the existing SuperAgentChat instance.
+  const currentActiveSid = (() => { try { return sessionStorage.getItem('loka_superagent_sid'); } catch { return null; } })();
+  const isReturningToActiveSession = !!(
+    sessionParam &&
+    currentActiveSid &&
+    sessionParam === currentActiveSid &&
+    effectiveChatMessage !== null
+  );
+
   if (effectiveChatMessage !== null || sessionParam || effectiveChatInitialImages.length > 0) {
+    // Key: use sessionParam (= active session ID) when returning to the already-active session
+    // so the key stays stable across navigations and doesn't remount unnecessarily.
+    // For a brand-new send (no sessionParam yet), use the message text as key.
+    const chatKey = isReturningToActiveSession
+      ? sessionParam!                 // stable session-ID key; prevents phantom remount
+      : (sessionParam || effectiveChatMessage || (effectiveChatInitialImages.length > 0 ? 'with-images' : 'new'));
+    // CRITICAL: when returning to the active session always pass initialSessionId.
+    // Without it, the new instance reads SA_PENDING_KEY (streaming=true) → enters replay →
+    // emits a fresh agent:chat → backend aborts the in-flight run → duplicate requests.
+    const resolvedInitialSessionId = isReturningToActiveSession
+      ? currentActiveSid!
+      : (sessionParam || undefined);
     return (
       <SuperAgentChat
-        key={sessionParam || effectiveChatMessage || (effectiveChatInitialImages.length > 0 ? 'with-images' : 'new')}
+        key={chatKey}
         initialMessage={effectiveChatMessage || ''}
-        initialImages={sessionParam ? [] : effectiveChatInitialImages}
-        initialSessionId={sessionParam || undefined}
-        initialChatMode={sessionParam ? undefined : mode}
+        initialImages={resolvedInitialSessionId ? [] : effectiveChatInitialImages}
+        initialSessionId={resolvedInitialSessionId}
+        initialChatMode={resolvedInitialSessionId ? undefined : mode}
         selectedAgentId={selectedAgent || undefined}
         onBack={() => { setChatMessage(null); setChatInitialImages([]); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
       />

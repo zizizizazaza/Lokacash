@@ -183,6 +183,13 @@ const AnimStyles = () => (
       z-index: 1;
     }
 
+    /* ── Thinking ticker ── */
+    @keyframes ticker-in {
+      from { opacity: 0; transform: translateY(5px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .ticker-in { animation: ticker-in 0.22s ease-out both; }
+
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
