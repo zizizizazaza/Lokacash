@@ -45,7 +45,6 @@ const UserMenu: React.FC<{
   const items: (null | { icon: React.FC; label: string; action: () => void; danger?: boolean })[] = [
     { icon: I.UserIcon, label: 'Profile', action: () => { menuNav('/portfolio'); onClose(); } },
     { icon: I.Crown, label: 'Plan', action: () => { menuNav('/settings'); onClose(); } },
-    { icon: I.Building, label: 'Enterprise', action: () => { menuNav('/enterprise'); onClose(); } },
     null,
     { icon: I.LogOut, label: 'Log out', action: () => { if (onLogout) onLogout(); onClose(); }, danger: true },
   ];
