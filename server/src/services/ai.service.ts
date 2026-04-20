@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { CRYPTO_SYMBOLS_FOR_PROMPT } from '../constants/cryptoAssets.js';
 
 export function getGlobalTimeContext(): string {
   const now = new Date();
@@ -582,7 +583,8 @@ RULES:
 3. "search": Deep Web/Social Search — for ANY question needing real-world information: sentiment, news, market research, competitive landscape, industry trends, business analysis. Set search.showXAccountProfile=true when the intent is explicitly or strongly about understanding a project/brand/person *as seen on Twitter/X* (including any language).
 4. "simulate": AI Hedge Fund Simulation — only when user asks for forecasting or simulating scenarios.
 5. "web3": Crypto / on-chain market data (CoinGecko). Use for BTC/ETH/SOL price, altcoins, DeFi tokens, DEX, gas, NFT collections, trending crypto. Provide a concise English "query" echoing user intent (e.g. "current Bitcoin BTC spot price USD").
-6. A user can trigger multiple! "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
+6. A user can trigger multiple!
+8. **CRYPTO vs STOCK (CRITICAL)**: The following are known cryptocurrency tokens — NEVER put them in analysis.tickers. Always use web3 for them instead: ${CRYPTO_SYMBOLS_FOR_PROMPT}. Example: "analyze SOL risk-reward" → web3.needed=true, analysis.needed=false (SOL is Solana crypto, NOT a stock). "BNB price" → web3 only. "XRP buy or sell" → web3 only. Only set analysis.needed=true for traditional equities (AAPL, TSLA, NVDA, BABA, etc.). "分析苹果基本面，并且看看最近舆论" -> analysis (AAPL) + search (Apple sentiment). Both true.
 7. **MULTI-TURN — LATEST MESSAGE ONLY (CRITICAL)**: If the input has 【Conversation Context】 plus 【Latest User Message】, you MUST set queryType and ALL capability fields (**analysis.tickers**, **search.query**, **simulate.tickers**, **web3.query**) from **【Latest User Message】 alone**. Use prior turns ONLY when the latest message clearly continues the same subject (e.g. "继续上面的", "same as before", "那它呢", "还是这个币"). If the user **switches** asset or topic (e.g. chat was about RAVE, latest asks about **hype / HYPE / 多空 / 开多开空** in crypto), **never** carry over old tickers or old entity names into this JSON — refresh everything for the new intent. Note: Chinese **"hype"** in trading context usually means **Hyperliquid (HYPE)**, not a prior unrelated token.
 
 Examples:
@@ -600,6 +602,7 @@ Query: "深度分析一下阿里和腾讯的投资价值" -> {"isSimpleChat":fal
 Query: "巴菲特最近买了什么股票" -> {"isSimpleChat":false,"queryType":"research","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Warren Buffett recent stock purchases portfolio"},"simulate":{"needed":false}}}
 Query: "模拟：如果第三季度降息50个基点对科技股有什么影响" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":true,"tickers":["QQQ"]},"search":{"needed":true,"query":"Fed 50bps rate cut impact on tech sector"},"simulate":{"needed":true,"tickers":["QQQ"]}}}
 Multi-turn: [User]: ...RAVE token... [Assistant]: ... [User]: "hype现在适合开多还是开空？" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Hyperliquid HYPE perpetual long short sentiment funding"},"simulate":{"needed":false},"web3":{"needed":true,"query":"Hyperliquid HYPE token price funding rate"}}}  // do NOT output RAVE from prior turn
+Query: "Analyze the risk-reward of buying SOL at current price" -> {"isSimpleChat":false,"queryType":"investment-analysis","capabilities":{"analysis":{"needed":false},"search":{"needed":true,"query":"Solana SOL risk reward analysis current price"},"simulate":{"needed":false},"web3":{"needed":true,"query":"Solana SOL current price market cap risk reward"}}}  // SOL is crypto → web3 only, analysis=false
 
 Query: "${query}"`;
     const compactRouterPrompt = `You are the routing coordinator for a Super Agent.

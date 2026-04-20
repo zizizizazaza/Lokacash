@@ -4,17 +4,24 @@ import { config } from '../config.js';
 import { verifyToken } from '../middleware/auth.js';
 import prisma from '../db.js';
 import { researchService, type XProfileSnapshot } from '../services/research.service.js';
-import { web3ResearchService } from '../services/web3Research.service.js';
+import { web3ResearchService, type Web3ResearchResult } from '../services/web3Research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
+import { isCryptoSymbol, isAmbiguousSymbol, filterOutCryptoTickers } from '../constants/cryptoAssets.js';
 import {
   formatConsensusAgentLabel,
   runConsensusEngine,
   sortConsensusAgentEntries,
 } from '../services/consensus.service.js';
 import * as crypto from 'crypto';
-import { createModuleEmitter } from '../services/moduleEmitter.js';
+import {
+  createModuleEmitter,
+  startChatReplayBuffer,
+  finishChatReplayBuffer,
+  getChatReplayBuffer,
+  recordChatToolTraceStep,
+} from '../services/moduleEmitter.js';
 import {
   mergeSignalSources,
   sourcesFromSignalRadarLogLine,
@@ -122,6 +129,202 @@ function pickXProfileForUser(profiles: XProfileSnapshot[], userContent: string):
   if (!softMatches.length) return null;
   softMatches.sort((a, b) => b.followers - a.followers);
   return softMatches[0].profile;
+}
+
+const MARKET_HEAVY_WEB3_INTENTS = new Set([
+  'token_quote',
+  'multi_asset_compare',
+  'market_scan',
+  'category_scan',
+]);
+
+function isMarketHeavyWeb3Intent(intent?: string): boolean {
+  return typeof intent === 'string' && MARKET_HEAVY_WEB3_INTENTS.has(intent);
+}
+
+function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): SignalSearchSource[] {
+  if (!raw) return [];
+  const assets = (raw.assets || []).filter((a) => a && (a.name || a.id));
+  const assetLabel = assets
+    .slice(0, 4)
+    .map((a) => a.symbol ? `${a.name || a.id} (${String(a.symbol).toUpperCase()})` : (a.name || a.id || ''))
+    .filter(Boolean)
+    .join(', ');
+  const intent = raw.intent || 'web3';
+  const intentLabelMap: Record<string, string> = {
+    token_quote: 'CoinGecko Market Data',
+    multi_asset_compare: 'CoinGecko Compare Data',
+    market_scan: 'CoinGecko Market Scanner',
+    category_scan: 'CoinGecko Category Data',
+    token_deep_dive: 'CoinGecko Asset Data',
+    onchain_scan: 'CoinGecko / GeckoTerminal',
+    nft_scan: 'CoinGecko NFT Data',
+  };
+  const snippetBase = assetLabel
+    ? `Structured ${intent.replace(/_/g, ' ')} data for ${assetLabel}.`
+    : `Structured ${intent.replace(/_/g, ' ')} data returned by CoinGecko.`;
+  const out: SignalSearchSource[] = [
+    {
+      favicon: 'web',
+      title: intentLabelMap[intent] || 'CoinGecko Data',
+      domain: 'coingecko.com',
+      url: 'https://www.coingecko.com/en/api/documentation',
+      snippet: snippetBase,
+    },
+  ];
+  if (raw.via === 'rest') {
+    out.push({
+      favicon: 'web',
+      title: 'CoinGecko REST API',
+      domain: 'api.coingecko.com',
+      url: 'https://www.coingecko.com/en/api/documentation',
+      snippet: 'REST market snapshot used by the Web3 pipeline for deterministic filtering and comparison.',
+    });
+  }
+  return out;
+}
+
+function web3FocusTokens(raw: Web3ResearchResult['raw'] | undefined): string[] {
+  const tokens = new Set<string>();
+  for (const asset of raw?.assets || []) {
+    const id = String(asset.id || '').trim().toLowerCase();
+    const symbol = String(asset.symbol || '').trim().toLowerCase();
+    const name = String(asset.name || '').trim().toLowerCase();
+    if (id) tokens.add(id);
+    if (symbol) tokens.add(symbol);
+    if (name) {
+      name.split(/\s+/).filter(Boolean).forEach((part) => tokens.add(part.toLowerCase()));
+      tokens.add(name);
+    }
+  }
+  return Array.from(tokens).filter((t) => /^[a-z0-9][a-z0-9\s_-]{1,30}$/.test(t));
+}
+
+function xAuthorFromSource(source: SignalSearchSource): string {
+  const url = (source.url || '').trim();
+  const m = url.match(/^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]{1,15})\//i);
+  return m?.[1]?.toLowerCase() || '';
+}
+
+function tokenizeSourceText(source: SignalSearchSource): string[] {
+  return `${source.title || ''} ${source.snippet || ''}`
+    .toLowerCase()
+    .match(/\b[a-z][a-z0-9_]{1,20}\b/g) || [];
+}
+
+function xSourceTemplateFamily(source: SignalSearchSource): string {
+  if ((source.domain || '').toLowerCase() !== 'x.com') return '';
+  const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+  if (/crypto prices? update|current cryptocurrency prices?|crypto prices?\s+\|/.test(text)) return 'price_update';
+  if (/fear\s*&\s*greed|btc dom|market movements|market snapshot/.test(text)) return 'market_snapshot';
+  if (/trending:|top gainers|top losers|most volatile/.test(text)) return 'trending_board';
+  if (/etf|netflow|net flow/.test(text)) return 'etf_flow';
+  return '';
+}
+
+function sourceMentionsCount(source: SignalSearchSource, focusTokens: string[]): number {
+  if (!focusTokens.length) return 0;
+  const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+  return focusTokens.filter((token) => token && new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)).length;
+}
+
+function looksLikeLowValuePriceBotSource(source: SignalSearchSource): boolean {
+  if ((source.domain || '').toLowerCase() !== 'x.com') return false;
+  const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+  const boilerplatePatterns = [
+    /crypto prices? update/,
+    /current cryptocurrency prices?/,
+    /fear\s*&\s*greed/,
+    /trending:/,
+    /\b\d{1,2}:\d{2}\s*(am|pm)\b/,
+    /% Δ/,
+  ];
+  const distinctTickers = new Set(
+    (text.match(/\b(btc|eth|sol|xrp|bnb|dot|mog|pepe|doge|ada|trx|link|usdc|usdt|ordi|based|rave)\b/g) || [])
+      .map((m) => m.toLowerCase()),
+  ).size;
+  return boilerplatePatterns.some((pattern) => pattern.test(text)) || distinctTickers >= 4;
+}
+
+function rankAndLimitSources(
+  sources: SignalSearchSource[],
+  options: { web3Intent?: string; max?: number; focusTokens?: string[] } = {},
+): SignalSearchSource[] {
+  const max = options.max || 20;
+  const marketHeavy = isMarketHeavyWeb3Intent(options.web3Intent);
+  const seen = new Set<string>();
+  const domainCounts = new Map<string, number>();
+  const authorCounts = new Map<string, number>();
+  const templateCounts = new Map<string, number>();
+  const focusTokens = Array.from(new Set((options.focusTokens || []).map((t) => t.toLowerCase()).filter(Boolean)));
+  const ranked = [...sources]
+    .map((source, idx) => {
+      const domain = (source.domain || '').toLowerCase();
+      const text = `${source.title || ''} ${source.snippet || ''}`.toLowerCase();
+      const author = xAuthorFromSource(source);
+      const templateFamily = xSourceTemplateFamily(source);
+      const tokenList = tokenizeSourceText(source);
+      const distinctTickers = new Set(
+        tokenList.filter((m) => /^(btc|bitcoin|eth|ethereum|sol|solana|xrp|bnb|dot|mog|pepe|doge|ada|trx|link|usdc|usdt|ordi|based|rave|siren)$/i.test(m)),
+      ).size;
+      const focusHits = sourceMentionsCount(source, focusTokens);
+      let score = 0;
+      if (domain === 'coingecko.com' || domain === 'api.coingecko.com') score += 120;
+      if (/coinmarketcap|kraken|okx|binance|coindesk|theblock|cointelegraph|decrypt|blockworks/.test(domain)) score += 60;
+      if (domain === 'exa.ai') score -= 10;
+      if (marketHeavy && domain === 'x.com') score -= 35;
+      if (marketHeavy && looksLikeLowValuePriceBotSource(source)) score -= 35;
+      if (marketHeavy && templateFamily) score -= 20;
+      if (marketHeavy && distinctTickers >= 5) score -= 20;
+      if (marketHeavy && focusTokens.length > 0) {
+        if (focusHits === 0) score -= 30;
+        else score += Math.min(18, focusHits * 6);
+        if (distinctTickers > Math.max(3, focusHits + 1)) score -= 15;
+      }
+      if (marketHeavy && /price|market cap|24h|compare|comparison|scanner|structured/i.test(text)) score += 12;
+      if (!marketHeavy && domain === 'x.com') score += 15;
+      return { source, idx, score, author, templateFamily };
+    })
+    .sort((a, b) => b.score - a.score || a.idx - b.idx);
+
+  const out: SignalSearchSource[] = [];
+  for (const entry of ranked) {
+    const source = entry.source;
+    const key = `${source.domain}|${source.url || source.title}`;
+    if (seen.has(key)) continue;
+    const domain = (source.domain || '').toLowerCase();
+    const count = domainCounts.get(domain) || 0;
+    const domainLimit = marketHeavy
+      ? (domain === 'x.com' ? 2 : domain === 'exa.ai' ? 1 : 4)
+      : (domain === 'x.com' ? 6 : 4);
+    if (count >= domainLimit) continue;
+    if (marketHeavy && domain === 'x.com') {
+      if (entry.author) {
+        const authorCount = authorCounts.get(entry.author) || 0;
+        if (authorCount >= 1) continue;
+        authorCounts.set(entry.author, authorCount + 1);
+      }
+      if (entry.templateFamily) {
+        const templateCount = templateCounts.get(entry.templateFamily) || 0;
+        if (templateCount >= 1) continue;
+        templateCounts.set(entry.templateFamily, templateCount + 1);
+      }
+    }
+    seen.add(key);
+    domainCounts.set(domain, count + 1);
+    out.push(source);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function combinePreferredSources(
+  searchSources: SignalSearchSource[],
+  web3Sources: SignalSearchSource[],
+  options: { web3Intent?: string; max?: number; focusTokens?: string[] } = {},
+): SignalSearchSource[] {
+  const merged = mergeSignalSources(web3Sources, searchSources, Math.max(options.max || 20, 30));
+  return rankAndLimitSources(merged, options);
 }
 
 function normalizeIncomingImages(images: unknown): AgentChatImage[] {
@@ -627,6 +830,19 @@ Text: "${query}"`;
           callback({ ok: false });
           return;
         }
+        const chatBuffer = getChatReplayBuffer(sid);
+        if (chatBuffer) {
+          callback({
+            ok: true,
+            isRunning: chatBuffer.status === 'running',
+            steps: chatBuffer.toolTraceSteps,
+            modules: chatBuffer.modules,
+            mode: chatBuffer.mode,
+            report: chatBuffer.content || undefined,
+            status: chatBuffer.status,
+          } as any);
+          return;
+        }
         const buffer = stockAnalysisService.getSessionBuffer(sid);
         if (buffer) {
           callback({
@@ -751,6 +967,7 @@ Text: "${query}"`;
       };
 
       activeChatSessions.set(sessionId, 'running');
+      startChatReplayBuffer(sessionId, data.mode);
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
       const requestStartedAt = Date.now();
@@ -909,7 +1126,54 @@ Text: "${query}"`;
         plan.capabilities.search.needed = true;
         plan.capabilities.search.query = plan.capabilities.search.query || data.content;
       }
-      
+
+      // ── Layer 1: strip known crypto symbols from analysis.tickers ──────────
+      if (plan.capabilities.analysis.needed && plan.capabilities.analysis.tickers?.length) {
+        const cryptoHits = plan.capabilities.analysis.tickers.filter(isCryptoSymbol);
+        if (cryptoHits.length > 0) {
+          const filtered = filterOutCryptoTickers(plan.capabilities.analysis.tickers);
+          console.log(`[routing:layer1] Stripped crypto tickers from analysis: [${cryptoHits.join(', ')}] → remaining: [${filtered.join(', ') || 'none'}]`);
+          if (filtered.length === 0) {
+            plan.capabilities.analysis.needed = false;
+          } else {
+            plan.capabilities.analysis.tickers = filtered;
+          }
+          // Auto-enable web3 if not already set
+          if (!plan.capabilities.web3?.needed) {
+            plan.capabilities.web3 = {
+              needed: true,
+              query: cryptoHits.map((t: string) => t.toUpperCase()).join(' ') + ' ' + (plan.capabilities.search.query || userContent),
+            };
+            console.log(`[routing:layer1] Auto-enabled web3 for stripped crypto tickers: ${cryptoHits.join(', ')}`);
+          }
+        }
+      }
+
+      // ── Layer 3: ambiguous ticker → ask user to clarify (crypto vs stock) ──
+      const allMentionedTickers = [
+        ...(plan.capabilities.analysis.tickers || []),
+        ...(plan.capabilities.simulate?.tickers || []),
+      ];
+      const ambiguous = allMentionedTickers.find(t => isAmbiguousSymbol(t) && !plan.capabilities.web3?.needed);
+      if (ambiguous) {
+        const asset = ambiguous.toUpperCase();
+        const clarification = `I noticed you mentioned **${asset}** — did you mean the **${asset} cryptocurrency** or the **${asset} stock ticker**? Please clarify so I can route your query to the right tool.`;
+        console.log(`[routing:layer3] Ambiguous ticker detected: ${asset} → sending clarification`);
+        emitter.emitModule('search', 'active', { variant: 'data_providers', providers: [] });
+        emitter.emitProgress(clarification);
+        emitter.emitModule('done', 'completed', { duration: 0 });
+        emitter.emitStreamDone(clarification);
+        try {
+          await prisma.chatMessage.create({
+            data: { userId, sessionId, role: 'assistant', content: clarification, agentId: 'superagent' }
+          });
+        } catch (_) {}
+        activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
+        chatAbortControllers.delete(sessionId);
+        return;
+      }
+
       socket.emit('agent:chat:routed', { 
         sessionId, 
         mode: (!hasImages && data.mode === 'roundtable') ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
@@ -976,6 +1240,7 @@ Text: "${query}"`;
           const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
           if (isAborted()) {
             activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
             chatAbortControllers.delete(sessionId);
             return;
           }
@@ -994,6 +1259,7 @@ Text: "${query}"`;
           emitter.emitStreamDone('');
         }
         activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
       }
@@ -1002,7 +1268,10 @@ Text: "${query}"`;
       const startTime = Date.now();
       const toolDispatchStartedAt = Date.now();
 
-      let finalSocialSources: any[] = [];
+      let finalSocialSources: SignalSearchSource[] = [];
+      let finalSearchSourcesRaw: SignalSearchSource[] = [];
+      let finalWeb3Sources: SignalSearchSource[] = [];
+      let finalWeb3Intent: string | undefined;
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
@@ -1074,22 +1343,27 @@ Text: "${query}"`;
             }
             // Fallback: log-based platform hints
             if (socialSources.length === 0) socialSources = mergeSignalSources([], logHintSources, PANEL_MAX);
-            const sourceDomains = Array.from(new Set((socialSources || []).map((s) => s.domain).filter(Boolean)));
-            const sourcePreview = (socialSources || [])
+            finalSearchSourcesRaw = socialSources;
+            const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
+              web3Intent: finalWeb3Intent,
+              max: PANEL_MAX,
+            });
+            const sourceDomains = Array.from(new Set((preferredSources || []).map((s) => s.domain).filter(Boolean)));
+            const sourcePreview = (preferredSources || [])
               .slice(0, 3)
               .map((s) => `${s.domain || 'unknown'}|${(s.title || '').slice(0, 60)}|${s.url || ''}`)
               .join(' || ');
             console.log(
-              `[sources] final extraction: count=${socialSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
+              `[sources] final extraction: raw_count=${socialSources.length} preferred_count=${preferredSources.length} unique_domains=${sourceDomains.length} domains=${sourceDomains.join(',') || 'none'}`,
             );
             if (sourcePreview) {
               console.log(`[sources] final extraction preview: ${sourcePreview}`);
             }
 
-            finalSocialSources = socialSources;
+            finalSocialSources = preferredSources;
             emitter.emitModule('search', 'completed', {
               variant: 'social',
-              sources: socialSources,
+              sources: preferredSources,
               providers: [
                 { name: 'Yahoo Finance' }, { name: 'Bloomberg API' }, { name: 'Alpha Vantage' },
                 { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
@@ -1123,7 +1397,7 @@ Text: "${query}"`;
                 );
               }
             }
-            return { type: 'SEARCH', data: res.summary, sources: socialSources };
+              return { type: 'SEARCH', data: res.summary, sources: preferredSources };
           }).catch(e => {
             emitter.emitModule('search', 'completed', {});
             return { type: 'SEARCH', data: 'Error: ' + e.message };
@@ -1145,11 +1419,49 @@ Text: "${query}"`;
         promises.push(
           web3ResearchService
             .runQuery(web3Q)
-            .then((report) => {
-              emitter.emitModule('web3', 'completed', { variant: 'coingecko_mcp' });
-              return { type: 'WEB3', data: report };
+            .then((result) => {
+              finalWeb3Intent = result.raw.intent || undefined;
+              finalWeb3Sources = buildWeb3ProviderSources(result.raw);
+              const focusTokens = web3FocusTokens(result.raw);
+              if (plan.capabilities.search.needed) {
+                const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
+                  web3Intent: finalWeb3Intent,
+                  max: 20,
+                  focusTokens,
+                });
+                if (preferredSources.length > 0) {
+                  finalSocialSources = preferredSources;
+                  emitter.emitModule('search', 'completed', {
+                    variant: 'social',
+                    sources: preferredSources,
+                    providers: [
+                      { name: 'Yahoo Finance' }, { name: 'Bloomberg API' }, { name: 'Alpha Vantage' },
+                      { name: 'Polygon.io' }, { name: 'CoinGecko' }, { name: 'TradingView' }
+                    ]
+                  });
+                }
+              } else if (finalWeb3Sources.length > 0) {
+                finalSocialSources = combinePreferredSources([], finalWeb3Sources, {
+                  web3Intent: finalWeb3Intent,
+                  max: 20,
+                  focusTokens,
+                });
+              }
+              console.log(
+                `[web3Sources] injected=${finalWeb3Sources.length} intent=${finalWeb3Intent || 'n/a'} final_sources=${finalSocialSources.length}`,
+              );
+              emitter.emitModule('web3', 'completed', {
+                variant: 'coingecko_mcp',
+                intent: result.raw.intent || 'unknown',
+                assets: result.raw.assets?.length || 0,
+                via: result.raw.via || 'n/a',
+              });
+              return { type: 'WEB3', data: result.report };
             })
             .catch((e) => {
+              console.warn(
+                `[web3Research] failed sessionId=${sessionId} err=${(e as Error).message}`,
+              );
               emitter.emitModule('web3', 'completed', {});
               return { type: 'WEB3', data: 'Error: ' + (e as Error).message };
             }),
@@ -1175,6 +1487,7 @@ Text: "${query}"`;
               analysisSubSessionId,
               userId,
               (step: any) => {
+                recordChatToolTraceStep(sessionId, step);
                 emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step });
                 if (step.type === 'generating' && step.message === '[UI_METADATA]' && step.content) {
                   try {
@@ -1412,6 +1725,7 @@ Text: "${query}"`;
       if (isAborted()) {
         console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
         activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
       }
@@ -1617,7 +1931,7 @@ Key Monitoring Dashboard (THIS MUST BE THE VERY LAST SECTION)
 2. Section titles MUST be specific and analytical — not generic. Create proper research section titles (e.g. "收入放缓与利润弹性的博弈", "估值锚定：DCF vs 可比公司的分歧").
 3. Synthesize evidence across ALL data sources. Highlight where different data dimensions agree (conviction) and where they conflict (uncertainty).
 4. Never fabricate data. If exact numbers aren't available, state the directional finding and name the missing metric.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
+5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs in a separate references section. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text, metrics. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 3000-6000 words. This is a deep research product — completeness and depth are expected. But every sentence must add analytical value. No filler.
 8. End with "Key Monitoring Dashboard" — this MUST be the absolute last section. Nothing after it.
@@ -1743,7 +2057,9 @@ Tags (translate to user's language)
 Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 - Translate heading to user's language (e.g. "值得关注的问题：")
 - Format as **bold heading** followed by 3-5 bullet points
-- Each bullet: forward-looking question tied to a specific data point or event with a time horizon
+- Each bullet: ONE standalone question only — a single interrogative sentence ending with ? (English) or ？ (Chinese). Embed the metric or time horizon inside the question wording if needed.
+- Do NOT add answers, explanations, "If… then…" clauses, second sentences, or any text after the question mark.
+- Do NOT put markdown links, bare URLs, or [Source](url) in this section (no citations here).
 - CRITICAL: No text, tags, or sections may appear after this list
 
 ═══ ABSOLUTE RULES ═══
@@ -1751,10 +2067,10 @@ Questions to watch (THIS MUST BE THE VERY LAST SECTION — nothing after it)
 2. Section titles MUST be unique and topic-specific. NEVER use generic titles like "Fundamental Analysis", "Valuation", "Financial Health", "Signal vs Noise", "Positioning", "Stress Test" etc. — these are internal labels, not output headings. Create engaging, specific headings (e.g. "广告引擎点火，但游戏拖了后腿", "23倍PE：贵还是便宜？", "多空交锋：谁在买？谁在跑？").
 3. Synthesize, do not concatenate. Surface agreements, contradictions, and emergent insights across agents.
 4. Never fabricate data. Only use information present in the raw reports. If a quantitative threshold is useful but not in the data, name the metric and explain its importance without inventing numbers.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence or paragraph. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
+5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs in a separate references section. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 6. LANGUAGE CONSISTENCY (CRITICAL): If user wrote in Chinese, ENTIRE output in Chinese — all headings, labels, table headers, body text. No English mixed in. Vice versa for English. Non-negotiable.
 7. Length: 1500-3500 words. Depth over brevity, but no padding. Every sentence must earn its place. Cover ALL analysis dimensions — fundamental, valuation, financial, technical, and actionable trade setup.
-8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers.
+8. End with "Questions to watch" — 3-5 forward-looking questions with specific data triggers; each bullet question-only (one sentence, ? or ？), no follow-on prose and no links.
 9. REDUCE qualitative statements, INCREASE quantitative data. "Margins are important" is worthless. "Margin below 72% = thesis broken" is actionable.
 10. SECTION FLEXIBILITY: For non-stock topics (macro, crypto, general questions), adapt sections naturally — skip stock-specific sections like Quote Snapshot, Valuation, Financial Health. Focus on sections that fit the topic.
 
@@ -1823,13 +2139,14 @@ Conclusion & Recommendations — Clear, actionable takeaways. What should the re
 
 Questions to Watch (LAST SECTION)
 - 3-5 forward-looking questions with specific triggers or data points to monitor.
+- Each bullet: one question sentence only (? or ？). No explanations, answers, or markdown links/URLs in this section.
 
 ═══ ABSOLUTE RULES ═══
 1. HEADING LEVELS: # for title only. ## for sections. Use **bold** for subsections and key terms, figures, and conclusions throughout the text. NEVER prefix headings with numbers like "1.", "2.", "3." — the frontend auto-generates numbering in the Table of Contents.
 2. Section titles MUST be specific and engaging, not generic labels.
 3. Synthesize across sources. Surface contradictions and emergent patterns.
 4. Never fabricate data. Use qualitative discussion when numbers are unavailable.
-5. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...)). Place inline after the relevant sentence or paragraph.
+5. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end.
 6. LANGUAGE: Match user's language entirely. Chinese query = all Chinese. English = all English.
 7. Length: 1500-3000 words. Depth over breadth.
 8. Tables for comparisons, bullet lists for key points, narrative for analysis.
@@ -1928,6 +2245,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 
 ## Questions to Watch
 - 3-5 forward-looking questions with specific data triggers and time horizons
+- Each line: one interrogative sentence only; no answers or citations (no [Name](url), no URLs) in this section
 
 ═══ RULES ═══
 1. Each guru MUST use their actual known framework — not generic "analysis". Buffett talks about moats and margin of safety. Lynch talks about PEG and growth categories. Burry talks about asymmetric bets and overlooked data.
@@ -1935,7 +2253,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 3. LANGUAGE: Match user's language entirely. Chinese query = all Chinese.
 4. Use actual data from context. Integrate search results + simulation signals + any financial data.
 5. Gurus can and should DISAGREE. Don't force consensus where data doesn't support it.
-6. INLINE CITATIONS: After key claims or data points, insert a citation tag linking to the source. Format: [Source Name](url) — use the actual source/publication name (e.g. [Morningstar](https://...), [Bloomberg](https://...), [Reuters](https://...)). Place citations inline right after the relevant sentence. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源" — just place the bare [Name](url) tag directly in the text.
+6. END-OF-PARAGRAPH CITATIONS: After a paragraph or sentence with key claims/data, place citation tags at the END of that paragraph or line, never in the middle of a sentence. Format: [Source Name](url). If multiple sources support the same paragraph, group them together at the paragraph end like: [Bloomberg](...) [Reuters](...). Do NOT place citation tags between words. Do NOT list source URLs separately at the end. NEVER wrap citations in parentheses or add words like "数据"/"来源".
 7. Length: 2000-4000 words. Each guru section should be substantial (150-300 words).
 8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
 `;
@@ -2293,7 +2611,7 @@ The HTML must:
         const htmlPrompt = queryType === 'guru-council'
           ? buildGuruCouncilHtmlPrompt(htmlInput)
           : buildWebReportPrompt(htmlInput);
-        const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 16384);
+        const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 8192);
         const htmlReader = htmlStream.getReader();
         const htmlDecoder = new TextDecoder();
         let htmlContent = '';
@@ -2360,16 +2678,26 @@ The HTML must:
         console.log(`[agent:chat:html] ✅ HTML report emitted for session ${sessionId}, msgIdx=${msgIdx}, length=${htmlContent.length}`);
       };
 
-      // ── Start parallel HTML generation for non-roundtable eligible queries ──
+      // ── Start REAL-PARALLEL HTML generation (runs concurrently with synthesis) ──
+      // Input is `contextString` (research data) instead of waiting for synthesis output.
+      // The resulting promise is awaited AFTER synthesis completes, so HTML is ready
+      // immediately (or near-immediately) rather than starting a fresh 148s round trip.
       const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
       const htmlReportEnabled = htmlEligible && !config.superAgentDisableHtmlReport;
       if (htmlEligible && config.superAgentDisableHtmlReport) {
         console.log('[agent:chat:html] Skipped (SUPERAGENT_DISABLE_HTML_REPORT is set)');
       }
+      const parallelHtmlStartedAt = Date.now();
       let parallelHtmlPromise: Promise<string> | null = null;
-      if (htmlReportEnabled && !isDeepResearch && contextString.length > 200) {
-        console.log(`[agent:chat:html] Starting PARALLEL HTML generation (queryType=${queryType}), contextString length=${contextString.length}`);
-        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 }); // msgIdx resolved later
+      // Enable parallel HTML for ALL eligible queries including roundtable.
+      // For roundtable, the parallel HTML uses contextString (raw research data)
+      // and gets overlapped with consensus + deep-research second pass. If the
+      // result quality is unacceptable, the sequential fallback using
+      // finalDbContent still runs after synthesis completes.
+      if (htmlReportEnabled && contextString.length > 200) {
+        const mode = isDeepResearch ? 'roundtable' : 'standard';
+        console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
+        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
         parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
           console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
           return '';
@@ -2514,6 +2842,7 @@ The HTML must:
         if (isAborted()) {
           console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
         }
@@ -2627,7 +2956,7 @@ Research context:\n${synFullContent}${langInstruction}`;
               [{ role: 'user', content: deepResearchFinalPrompt }],
               'superagent',
               undefined,
-              16384,
+              8192,
               synthesisModelOverride,
             );
             const deepReader = deepStream.getReader();
@@ -2713,7 +3042,8 @@ Research context:\n${synFullContent}${langInstruction}`;
               thinkingFlow: {
                 modules: flowModules,
                 isActive: false,
-                route: 'Super Agent Orchestrator'
+                route: 'Super Agent Orchestrator',
+                ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
               },
               consensusResult: savedConsensusResult ?? undefined,
               quoteCard: savedQuoteCard ?? undefined,
@@ -2731,31 +3061,50 @@ Research context:\n${synFullContent}${langInstruction}`;
         );
         emitter.emitStreamDone(finalDbContent, { sources: streamDoneSources });
 
-        // --- Async HTML report generation (non-blocking) ---
-        // Generate HTML for investment-analysis, guru-council, and roundtable (deep research)
-        // IMPORTANT: respect SUPERAGENT_DISABLE_HTML_REPORT here as well (sequential branch).
-        const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+        // --- HTML report emission: prefer parallel result, fall back to sequential ---
+        // Primary path: await the promise launched BEFORE synthesis (started at
+        // `parallelHtmlStartedAt`). It has been running concurrently with synthesis,
+        // so typically it resolves immediately or within a short margin — saving the
+        // full sequential round-trip that previously blocked ~148s.
         const htmlModeLabel = isDeepResearch ? 'roundtable' : 'standard';
         if (htmlEligible && config.superAgentDisableHtmlReport) {
-          console.log('[agent:chat:html] Skipped SEQUENTIAL generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
+          console.log('[agent:chat:html] Skipped HTML generation (SUPERAGENT_DISABLE_HTML_REPORT is set)');
         } else if (htmlEligible && finalDbContent && finalDbContent.length > 200) {
-          // Emit generating signal immediately so frontend shows Web tab skeleton
-          const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
-          const genMsgIdx = pendingMsgCount - 1;
-          emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
-          const htmlSeqStartedAt = Date.now();
-          console.log(
-            `[agent:chat:html] Starting SEQUENTIAL HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
-          );
-          try {
-            const htmlContent = await runHtmlGeneration(finalDbContent);
-            await emitHtmlResult(htmlContent);
-            console.log(
-              `[agent:chat:timing] html_sequential_s=${asSeconds(Date.now() - htmlSeqStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
-            );
-          } catch (htmlErr: any) {
-            console.error(`[agent:chat:html] ❌ Sequential HTML generation failed (${htmlModeLabel}):`, htmlErr.message);
+          const htmlEmitStartedAt = Date.now();
+          let htmlContent = '';
+          if (parallelHtmlPromise) {
+            console.log(`[agent:chat:html] Awaiting REAL-PARALLEL HTML result (started ${asSeconds(Date.now() - parallelHtmlStartedAt)}s ago)`);
+            try {
+              htmlContent = await parallelHtmlPromise;
+            } catch (_) {
+              htmlContent = '';
+            }
+            if (htmlContent && htmlContent.length > 100) {
+              console.log(`[agent:chat:html] ✅ Using PARALLEL HTML result, length=${htmlContent.length}`);
+            } else {
+              console.log(`[agent:chat:html] ⚠️ Parallel HTML empty/short, falling back to sequential`);
+            }
           }
+          if (!htmlContent || htmlContent.length <= 100) {
+            const pendingMsgCount = await prisma.chatMessage.count({ where: { sessionId } });
+            const genMsgIdx = pendingMsgCount - 1;
+            emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: genMsgIdx });
+            console.log(
+              `[agent:chat:html] Starting SEQUENTIAL fallback HTML generation (${htmlModeLabel}), input length=${finalDbContent.length}`,
+            );
+            try {
+              htmlContent = await runHtmlGeneration(finalDbContent);
+            } catch (htmlErr: any) {
+              console.error(`[agent:chat:html] ❌ Sequential fallback HTML failed (${htmlModeLabel}):`, htmlErr.message);
+              htmlContent = '';
+            }
+          }
+          if (htmlContent && htmlContent.length > 100) {
+            try { await emitHtmlResult(htmlContent); } catch (_) {}
+          }
+          console.log(
+            `[agent:chat:timing] html_emit_s=${asSeconds(Date.now() - htmlEmitStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId} mode=${htmlModeLabel}`,
+          );
         }
 
         console.log(
@@ -2766,6 +3115,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         if (isAborted()) {
           console.log(`[agent:chat] Aborted during synthesis error handling for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
         }
@@ -2822,6 +3172,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         );
       }
       activeChatSessions.delete(sessionId);
+        finishChatReplayBuffer(sessionId);
       chatAbortControllers.delete(sessionId);
     });
     socket.on('disconnect', () => {
