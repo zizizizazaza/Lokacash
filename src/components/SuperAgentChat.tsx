@@ -6,7 +6,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffe
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings, SourcesProvider } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCompression';
@@ -253,10 +253,76 @@ interface RtConsensusResult {
     finalConfidence?: number;
 }
 
+interface Web3OkxSnapshot {
+    baseCcy: string;
+    spotInstId: string | null;
+    swapInstId: string | null;
+    spot: {
+        last: number;
+        open24h: number;
+        high24h: number;
+        low24h: number;
+        change24hPct: number;
+        volume24hBase: number;
+        volume24hQuote: number;
+        ts: number;
+    } | null;
+    derivatives: {
+        fundingRate: number | null;
+        nextFundingTs: number | null;
+        openInterest: number | null;
+        openInterestUsd: number | null;
+        ts: number | null;
+    } | null;
+    candles?: Array<[ts: number, o: number, h: number, l: number, c: number]>;
+    orderbookDepthUsd?: number | null;
+}
+
+interface Web3OkxNewsItem {
+    id?: string;
+    title?: string;
+    summary?: string;
+    url?: string;
+    publishedAt?: string;
+    source?: string;
+    importance?: string;
+    sentiment?: string;
+    coins?: string[];
+}
+
+interface Web3OkxSentiment {
+    baseCcy: string;
+    label?: string;
+    bullishRatio?: number | null;
+    bearishRatio?: number | null;
+    neutralRatio?: number | null;
+    hotness?: number | null;
+    newsMentionCnt?: number | null;
+    xMentionCnt?: number | null;
+    ts?: number;
+}
+
+interface Web3OkxNewsBundle {
+    baseCcy: string;
+    latestNews: Web3OkxNewsItem[];
+    sentiment: Web3OkxSentiment | null;
+}
+
+interface Web3ModuleData {
+    label?: string;
+    intent?: string;
+    via?: string;
+    assets?: number;
+    okx?: Web3OkxSnapshot[];
+    okxNews?: Web3OkxNewsBundle[];
+    providers?: string[];
+    duration?: number;
+}
+
 interface ThinkingModule {
     type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'web3' | 'done';
     status: 'pending' | 'active' | 'completed';
-    data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | { duration?: number };
+    data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | Web3ModuleData | { duration?: number };
 }
 
 interface ToolTraceItem {
@@ -573,6 +639,37 @@ const deriveRtDataSearchFromModules = (modules: ThinkingModule[]): RtDataCategor
     }
     const analysisStatus = mapModuleStatus(analysisMod?.status);
 
+    const web3Mod = modules.find(m => m.type === 'web3');
+    const web3Data = web3Mod?.data as Web3ModuleData | undefined;
+    const okxSnaps = web3Data?.okx || [];
+    const fmtUsd = (v: number | null | undefined) => {
+        if (v == null || !Number.isFinite(v)) return 'n/a';
+        const abs = Math.abs(v);
+        if (abs >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+        if (abs >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+        if (abs >= 1e3) return `$${(v / 1e3).toFixed(2)}K`;
+        return `$${v.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+    };
+    const derivativesItems: string[] = [];
+    for (const snap of okxSnaps) {
+        const base = snap.baseCcy;
+        if (snap.derivatives?.fundingRate != null) {
+            const fr = snap.derivatives.fundingRate;
+            derivativesItems.push(`${base} Funding ${(fr * 100).toFixed(4)}%/8h`);
+        }
+        if (snap.derivatives?.openInterestUsd != null) {
+            derivativesItems.push(`${base} OI ${fmtUsd(snap.derivatives.openInterestUsd)}`);
+        }
+        if (snap.orderbookDepthUsd != null) {
+            derivativesItems.push(`${base} Depth±10 ${fmtUsd(snap.orderbookDepthUsd)}`);
+        }
+        if (snap.spot?.change24hPct != null && Number.isFinite(snap.spot.change24hPct)) {
+            const pct = snap.spot.change24hPct;
+            derivativesItems.push(`${base} 24h ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`);
+        }
+    }
+    const web3Status = mapModuleStatus(web3Mod?.status);
+
     const categories: RtDataCategory[] = [];
     // Only include Market Indicators when there is real analysis data (omit for crypto-only queries).
     if (analysisMod) {
@@ -584,6 +681,18 @@ const deriveRtDataSearchFromModules = (modules: ThinkingModule[]): RtDataCategor
             status: indicatorItems.length > 0 ? 'done' : analysisStatus,
             count: indicatorItems.length || undefined,
             ...(indicatorItems.length > 0 ? { items: indicatorItems } : {}),
+        });
+    }
+    // OKX Derivatives — shown when web3 module returned OKX snapshots (crypto path)
+    if (okxSnaps.length > 0 || web3Mod) {
+        categories.push({
+            id: 'derivatives',
+            label: 'Derivatives',
+            labelCN: '衍生品',
+            icon: 'derivatives',
+            status: derivativesItems.length > 0 ? 'done' : web3Status,
+            count: derivativesItems.length || undefined,
+            ...(derivativesItems.length > 0 ? { items: derivativesItems } : {}),
         });
     }
     categories.push({
@@ -678,30 +787,38 @@ const reconstructRtFieldsFromConsensus = (
     const consensusReached = consensus.consensusReached !== false;
     const finalText = consensus.finalAnswer || '';
     const verdictMatch = finalText.match(/\*\*Verdict:\*\*\s*([^\n*]+)/i);
-    const finalVerdict = verdictMatch ? verdictMatch[1].trim() : (consensusReached ? 'Bullish' : 'Neutral');
 
     const allAgents = rtRounds.length > 0 ? rtRounds[rtRounds.length - 1].agents : [];
-    // Compute conflictRate from real agent verdicts (last round).
-    // Definition: proportion of agents whose verdict differs from the majority.
-    // Example: 4 agents with 3 Bullish + 1 Bearish → 1/4 = 25%. Full agreement → 0%.
+    // Normalize agent verdicts to Bullish/Bearish/Neutral for majority counting.
     const normVerdict = (v?: string): string => {
         const s = (v || 'Neutral').toLowerCase();
         if (s.includes('bull') || s.includes('positive') || s.includes('long')) return 'Bullish';
         if (s.includes('bear') || s.includes('negative') || s.includes('short')) return 'Bearish';
         return 'Neutral';
     };
+    // Tally agent verdicts (last round) — used for both conflictRate and finalVerdict fallback.
+    const verdictCounts = allAgents.reduce<Record<string, number>>((acc, a) => {
+        const v = normVerdict(a.verdict);
+        acc[v] = (acc[v] || 0) + 1;
+        return acc;
+    }, {});
+    const majorityEntry = Object.entries(verdictCounts).sort(([, a], [, b]) => b - a)[0];
+    const majorityVerdict = majorityEntry ? majorityEntry[0] : 'Neutral';
+
     let conflictRate = 0;
     if (allAgents.length > 1) {
-        const counts = allAgents.reduce<Record<string, number>>((acc, a) => {
-            const v = normVerdict(a.verdict);
-            acc[v] = (acc[v] || 0) + 1;
-            return acc;
-        }, {});
-        const majority = Math.max(...Object.values(counts));
-        conflictRate = Math.round(((allAgents.length - majority) / allAgents.length) * 100);
+        const majorityCount = majorityEntry ? majorityEntry[1] : allAgents.length;
+        conflictRate = Math.round(((allAgents.length - majorityCount) / allAgents.length) * 100);
     } else if (!consensusReached) {
-        conflictRate = 50; // single-agent fallback when consensus flag is negative
+        conflictRate = 50;
     }
+
+    // Final verdict: prefer explicit markup in finalAnswer, otherwise fall back to
+    // the majority of agents (NOT a hardcoded 'Bullish'). Matches what the panel
+    // actually shows in the agent list so the Final Verdict reflects real consensus.
+    const finalVerdict = verdictMatch
+        ? verdictMatch[1].trim()
+        : majorityVerdict;
 
     const rtConsensus: RtConsensusResult = {
         status: 'done',
@@ -1218,6 +1335,81 @@ const SummonCharactersView: React.FC<{
     );
 };
 
+// ─── Grok-style thinking messages (canned rotation for busy-looking UX) ──
+// Used as fallback when backend emits no tool_trace events (e.g. crypto/web3 path).
+// English only — keeps a single consistent voice across queries regardless of
+// whether the user wrote in zh or en.
+const CANNED_THINKING_MESSAGES: Record<string, string[]> = {
+    search: [
+        'Scanning X posts',
+        'Reading news digest',
+        'Searching community threads',
+        'Fetching latest prices',
+        'Cross-referencing sources',
+        'Deduplicating noise',
+        'Parsing headlines',
+        'Checking Reddit threads',
+        'Scanning crypto Twitter',
+        'Sampling sentiment on social',
+        'Collecting analyst takes',
+        'Verifying source credibility',
+    ],
+    web3: [
+        'Querying CoinGecko market data',
+        'Pulling OKX perps funding',
+        'Reading on-chain signals',
+        'Aggregating sentiment indicators',
+        'Verifying coin identity',
+        'Merging dual-route data',
+        'Fetching order book depth',
+        'Computing 7D / 30D ranges',
+        'Checking open interest',
+        'Resolving contract address',
+        'Matching base currency',
+        'Summarizing derivatives snapshot',
+    ],
+    analysis: [
+        'Analyzing fundamentals',
+        'Computing technical indicators',
+        'Comparing valuations',
+        'Backtesting price action',
+        'Checking risk factors',
+        'Running RSI / MACD / Bollinger',
+        'Evaluating DCF inputs',
+        'Stress-testing assumptions',
+        'Ranking peer comparables',
+        'Assessing margin trends',
+        'Inspecting insider activity',
+    ],
+    simulation: [
+        'Building scenarios',
+        'Modeling risk exposure',
+        'Running Monte Carlo',
+        'Generating bull / base / bear paths',
+        'Computing confidence intervals',
+        'Stress-testing tail risk',
+    ],
+    consensus: [
+        'Gathering agent opinions',
+        'Running debate rounds',
+        'Tallying bull / bear views',
+        'Converging on verdict',
+        'Weighting agent confidence',
+        'Cross-checking agent reasoning',
+        'Distilling minority dissent',
+        'Calibrating final confidence',
+    ],
+    default: [
+        'Synthesizing',
+        'Thinking through this',
+        'Distilling key points',
+        'Drafting response',
+        'Connecting the dots',
+        'Organizing findings',
+        'Structuring the argument',
+    ],
+};
+
 // ─── ThinkingInlineTrigger (Grok-style with staged progress rows) ──────
 const ThinkingInlineTrigger: React.FC<{
     thinking: ThinkingFlow;
@@ -1230,7 +1422,18 @@ const ThinkingInlineTrigger: React.FC<{
     const activeModule = thinking.modules.find(m => m.status === 'active');
     const trace = thinking.toolTrace || [];
 
-    // ── Line 1: summary title ──
+    // ── Live elapsed counter (updates every 1s while active, Grok/SurfAI style) ──
+    const [nowMs, setNowMs] = useState(Date.now());
+    useEffect(() => {
+        if (!thinking.isActive) return;
+        const id = setInterval(() => setNowMs(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, [thinking.isActive]);
+    const elapsedSec = thinking.isActive && thinking.startTime
+        ? Math.max(0, Math.floor((nowMs - thinking.startTime) / 1000))
+        : 0;
+
+    // ── Line 1: summary title (English only) ──
     const phaseLabel = useMemo(() => {
         if (!thinking.isActive) return `Loka completed in ${durLabel}s`;
         const type = activeModule?.type || 'search';
@@ -1239,13 +1442,17 @@ const ThinkingInlineTrigger: React.FC<{
             analysis: 'Analyzing data',
             simulation: 'Running simulations',
             consensus: 'Reaching consensus',
+            web3: 'Querying market data',
         };
         return labels[type] || 'Thinking';
     }, [thinking.isActive, activeModule, durLabel]);
 
-    // ── Ticker: collect all trace items (deduplicated) for single-item rotation ──
+    // ── Ticker: blend real trace items + canned busy messages for a rich
+    // rotation across all modes (stock / research / web3 / simulation / roundtable).
+    // Real events show authentic tool names; canned messages fill gaps so the
+    // ticker always feels "busy" regardless of backend emission pattern.
     const allTickerItems = useMemo(() => {
-        if (!thinking.isActive || trace.length === 0) return [];
+        if (!thinking.isActive) return [];
         const items: string[] = [];
         const seen = new Set<string>();
         for (const t of trace) {
@@ -1260,8 +1467,18 @@ const ThinkingInlineTrigger: React.FC<{
                 items.push(d);
             }
         }
+        // Always interleave with canned messages for the active phase, so every
+        // mode — not just stock — gets the Grok-style busy-ticker feel.
+        const activeType = activeModule?.type || 'default';
+        const canned = CANNED_THINKING_MESSAGES[activeType] || CANNED_THINKING_MESSAGES.default;
+        for (const c of canned) {
+            if (!seen.has(c)) {
+                seen.add(c);
+                items.push(c);
+            }
+        }
         return items;
-    }, [trace, thinking.isActive]);
+    }, [trace, thinking.isActive, activeModule]);
 
     const [tickerIdx, setTickerIdx] = useState(0);
 
@@ -1287,6 +1504,9 @@ const ThinkingInlineTrigger: React.FC<{
                     <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
                 )}
                 <span className="text-[13px] font-medium text-gray-400">{phaseLabel}</span>
+                {thinking.isActive && elapsedSec > 0 && (
+                    <span className="text-[12px] font-semibold text-gray-500 tabular-nums">{elapsedSec}s</span>
+                )}
             </div>
         );
     }
@@ -1294,7 +1514,7 @@ const ThinkingInlineTrigger: React.FC<{
     // Full mode — arrow stays aligned to line 1 (items-center on the top row)
     return (
         <button onClick={onOpen} className="group py-1.5 mb-2 hover:opacity-80 transition-opacity text-left">
-            {/* Top row: spinner/check + title + arrow — fixed alignment */}
+            {/* Top row: spinner/check + title + elapsed + arrow */}
             <div className="inline-flex items-center gap-2">
                 {thinking.isActive ? (
                     <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
@@ -1302,6 +1522,9 @@ const ThinkingInlineTrigger: React.FC<{
                     <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
                 )}
                 <span className="text-[13px] font-medium text-gray-500">{phaseLabel}</span>
+                {thinking.isActive && elapsedSec > 0 && (
+                    <span className="text-[12px] font-semibold text-gray-700 tabular-nums">{elapsedSec}s</span>
+                )}
                 <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-500 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
             </div>
             {/* Ticker row: one item at a time, cycling with slide-in animation */}
@@ -1386,6 +1609,39 @@ const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
     );
 };
 
+// ─── OKX Derivatives Card (inline above answer) ─────────
+const okxFmtUsdCompact = (v: number | null | undefined, digits = 2): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    const abs = Math.abs(v);
+    if (abs >= 1e12) return `$${(v / 1e12).toFixed(digits)}T`;
+    if (abs >= 1e9) return `$${(v / 1e9).toFixed(digits)}B`;
+    if (abs >= 1e6) return `$${(v / 1e6).toFixed(digits)}M`;
+    if (abs >= 1e3) return `$${(v / 1e3).toFixed(digits)}K`;
+    return `$${v.toLocaleString('en-US', { maximumFractionDigits: v >= 100 ? 2 : 6 })}`;
+};
+const okxFmtPctSigned = (v: number | null | undefined): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+};
+const okxSummarizeWindow = (
+    candles: Array<[number, number, number, number, number]> | undefined,
+    n: number,
+): { high: number; low: number; pct: number } | null => {
+    if (!candles || !candles.length) return null;
+    const rows = [...candles].sort((a, b) => b[0] - a[0]);
+    const window = rows.slice(0, Math.min(n, rows.length));
+    if (!window.length) return null;
+    const latestClose = rows[0][4];
+    let high = -Infinity;
+    let low = Infinity;
+    for (const r of window) {
+        if (r[2] > high) high = r[2];
+        if (r[3] < low) low = r[3];
+    }
+    const oldestOpen = window[window.length - 1][1];
+    const pct = oldestOpen > 0 ? ((latestClose - oldestOpen) / oldestOpen) * 100 : NaN;
+    return { high, low, pct };
+};
 // ─── ThinkingProcessSidePanel (modular right panel) ─────────
 const ThinkingProcessSidePanel: React.FC<{
     thinking: ThinkingFlow;
@@ -1732,6 +1988,8 @@ const ThinkingProcessSidePanel: React.FC<{
                 return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" /></svg>;
             case 'social':
                 return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>;
+            case 'derivatives':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6M14 8h4v4" /></svg>;
             default:
                 return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m5.231 13.481L15 17.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v16.5c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9zm3.75 11.625a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>;
         }
@@ -4422,6 +4680,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                     const liveXProfile = xProfileCards[i];
                                                     const showWebView = msgViewMode[i] === 'web' && htmlReports[i];
                                                     const showWebSkeleton = msgViewMode[i] === 'web' && htmlGenerating[i] && !htmlReports[i];
+                                                    const web3Mod = thinkingProcesses[i]?.modules?.find((m) => m.type === 'web3');
+                                                    const web3ModData = web3Mod?.data as Web3ModuleData | undefined;
+                                                    const okxSnapshots = web3ModData?.okx || [];
+                                                    const okxNewsBundles = web3ModData?.okxNews || [];
                                                     return (
                                                         <>
                                                             {/* Live stock quote card from real-time data */}
@@ -4439,6 +4701,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                     : isDown
                                                                     ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
                                                                     : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
+                                                                // Match OKX snapshot by base currency (symbol or name contains it)
+                                                                const lqSym = (liveQuote.symbol || '').toUpperCase();
+                                                                const lqName = (liveQuote.name || '').toUpperCase();
+                                                                const matchBase = (base: string) =>
+                                                                    base === lqSym || base === lqName || lqSym.includes(base) || lqName.includes(base);
+                                                                const matchingOkx = okxSnapshots.find((s) => matchBase(s.baseCcy.toUpperCase()));
+                                                                const matchingOkxNews = okxNewsBundles.find((b) => matchBase(b.baseCcy.toUpperCase()));
                                                                 const mktStyles: Record<string, string> = {
                                                                     '美股': 'bg-blue-500/10 text-blue-600', '港股': 'bg-amber-500/10 text-amber-600', 'A股': 'bg-red-500/10 text-red-600',
                                                                     'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
@@ -4501,11 +4770,101 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                                 </div>
                                                                             </div>
                                                                         )}
+                                                                        {/* OKX News & Sentiment — merged section inside quote card */}
+                                                                        {matchingOkxNews && <OkxQuoteNews bundle={matchingOkxNews} lang={liveQuote.lang === 'en' ? 'en' : 'zh'} />}
+                                                                        {/* OKX Derivatives — merged section inside quote card */}
+                                                                        {matchingOkx && (() => {
+                                                                            const fr = matchingOkx.derivatives?.fundingRate;
+                                                                            const frAnnual = fr != null ? fr * 3 * 365 * 100 : null;
+                                                                            const fundingColor = fr != null
+                                                                                ? (fr >= 0 ? 'text-emerald-600' : 'text-red-500')
+                                                                                : 'text-gray-400';
+                                                                            const range7 = okxSummarizeWindow(matchingOkx.candles, 7);
+                                                                            const range30 = okxSummarizeWindow(matchingOkx.candles, 30);
+                                                                            const derivStats: { label: string; value: React.ReactNode }[] = [];
+                                                                            if (fr != null) {
+                                                                                derivStats.push({
+                                                                                    label: 'Funding / 8h',
+                                                                                    value: (
+                                                                                        <span className={fundingColor}>
+                                                                                            {(fr * 100).toFixed(4)}%
+                                                                                            {frAnnual != null && (
+                                                                                                <span className="text-gray-400 font-normal ml-1">({frAnnual >= 0 ? '+' : ''}{frAnnual.toFixed(1)}% APR)</span>
+                                                                                            )}
+                                                                                        </span>
+                                                                                    ),
+                                                                                });
+                                                                            }
+                                                                            if (matchingOkx.derivatives?.openInterestUsd != null) {
+                                                                                derivStats.push({ label: 'Open Interest', value: okxFmtUsdCompact(matchingOkx.derivatives.openInterestUsd) });
+                                                                            }
+                                                                            if (matchingOkx.orderbookDepthUsd != null) {
+                                                                                derivStats.push({ label: 'Depth ±10', value: okxFmtUsdCompact(matchingOkx.orderbookDepthUsd) });
+                                                                            }
+                                                                            if (derivStats.length === 0 && !range7 && !range30) return null;
+                                                                            return (
+                                                                                <>
+                                                                                    <div className="mx-5 h-px bg-gradient-to-r from-transparent via-amber-200/60 to-transparent" />
+                                                                                    <div className="px-5 py-3.5 space-y-2.5">
+                                                                                        <div className="flex items-center gap-1.5">
+                                                                                            <svg className="w-3 h-3 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
+                                                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6" />
+                                                                                            </svg>
+                                                                                            <span className="text-[9px] uppercase tracking-[0.08em] text-amber-600 font-semibold leading-none">{liveQuote.lang === 'en' ? 'Derivatives' : '衍生品'}</span>
+                                                                                            {matchingOkx.swapInstId && (
+                                                                                                <span className="text-[9px] text-gray-400 font-mono">{matchingOkx.swapInstId}</span>
+                                                                                            )}
+                                                                                        </div>
+                                                                                        {derivStats.length > 0 && (
+                                                                                            <div className="grid grid-cols-3 gap-x-4 gap-y-3">
+                                                                                                {derivStats.map((s, si) => (
+                                                                                                    <div key={si} className="min-w-0">
+                                                                                                        <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
+                                                                                                        <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
+                                                                                                    </div>
+                                                                                                ))}
+                                                                                            </div>
+                                                                                        )}
+                                                                                        {(range7 || range30) && (
+                                                                                            <div className="text-[11.5px] text-gray-600 pt-1">
+                                                                                                {range7 && (
+                                                                                                    <>
+                                                                                                        <span className="text-gray-400">7D </span>
+                                                                                                        <span className="font-medium text-gray-700 tabular-nums">{okxFmtUsdCompact(range7.low)} — {okxFmtUsdCompact(range7.high)}</span>
+                                                                                                        <span className={`ml-1 font-medium ${range7.pct >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{okxFmtPctSigned(range7.pct)}</span>
+                                                                                                    </>
+                                                                                                )}
+                                                                                                {range7 && range30 && <span className="text-gray-300 mx-2">·</span>}
+                                                                                                {range30 && (
+                                                                                                    <>
+                                                                                                        <span className="text-gray-400">30D </span>
+                                                                                                        <span className={`font-medium ${range30.pct >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{okxFmtPctSigned(range30.pct)}</span>
+                                                                                                    </>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </>
+                                                                            );
+                                                                        })()}
                                                                     </div>
                                                                 );
                                                             })()}
-                                                            {/* Fallback: markdown-parsed quote card */}
-                                                            {!liveQuote && quote && <QuoteCard quote={quote} />}
+                                                            {/* Fallback: markdown-parsed quote card (merged with OKX when matching) */}
+                                                            {!liveQuote && quote && (() => {
+                                                                const qSym = (quote.symbol || '').toUpperCase();
+                                                                const qName = (quote.name || '').toUpperCase();
+                                                                const matchBaseMd = (base: string) =>
+                                                                    base === qSym || base === qName || qSym.includes(base) || qName.includes(base);
+                                                                const matchingOkxForMd = okxSnapshots.find((s) => matchBaseMd(s.baseCcy.toUpperCase()));
+                                                                const matchingOkxNewsForMd = okxNewsBundles.find((b) => matchBaseMd(b.baseCcy.toUpperCase()));
+                                                                // Derive lang from user's prior message so QuoteCard renders labels
+                                                                // (情绪与新闻 / 新闻 / 多/空/中 / 重要) in the matching language.
+                                                                const prevUserForCard = messages.slice(0, i).reverse().find((m) => m.role === 'user');
+                                                                const cardLang: 'zh' | 'en' = prevUserForCard && /[\u4e00-\u9fff]/.test(prevUserForCard.content) ? 'zh' : 'en';
+                                                                const quoteWithLang = { ...quote, lang: quote.lang || cardLang };
+                                                                return <QuoteCard quote={quoteWithLang} okxSnap={matchingOkxForMd} okxNews={matchingOkxNewsForMd} />;
+                                                            })()}
                                                             {liveXProfile && (() => {
                                                                 const fmtN = (n?: number) => {
                                                                     if (n == null || Number.isNaN(n)) return '—';
@@ -4556,6 +4915,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                             </div>
                                                                         </div>
                                                                     </a>
+                                                                );
+                                                            })()}
+                                                            {/* OKX standalone fallback when no QuoteCard renders — reuses the same
+                                                                OkxQuoteDerivatives + OkxQuoteNews as the merged path, wrapped in a
+                                                                header. Surfaces derivatives AND news, bilingual label. */}
+                                                            {!liveQuote && !quote && (okxSnapshots.length > 0 || okxNewsBundles.length > 0) && !msg.isStreaming && (() => {
+                                                                const prevUser = messages.slice(0, i).reverse().find((m) => m.role === 'user');
+                                                                const isZh = !!prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
+                                                                return (
+                                                                    <div className="mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] bg-gradient-to-br from-amber-50/50 via-white to-white">
+                                                                        <div className="px-5 pt-4 pb-2 flex items-center gap-2">
+                                                                            <svg className="w-4 h-4 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6" />
+                                                                            </svg>
+                                                                            <span className="text-[13px] font-bold text-gray-900 tracking-tight">
+                                                                                {isZh ? '市场信号' : 'Market Signals'}
+                                                                            </span>
+                                                                            <span className="text-[10.5px] text-amber-600/80 font-medium">
+                                                                                {isZh ? '· 衍生品 · 情绪 · 新闻' : '· Derivatives · Sentiment · News'}
+                                                                            </span>
+                                                                        </div>
+                                                                        {okxSnapshots.map((snap, idx) => (
+                                                                            <OkxQuoteDerivatives key={`d-${idx}`} okx={snap} />
+                                                                        ))}
+                                                                        {okxNewsBundles.map((bundle, idx) => (
+                                                                            <OkxQuoteNews key={`n-${idx}`} bundle={bundle} lang={isZh ? 'zh' : 'en'} />
+                                                                        ))}
+                                                                    </div>
                                                                 );
                                                             })()}
                                                             {showWebView ? (
