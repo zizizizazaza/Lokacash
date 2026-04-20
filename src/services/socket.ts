@@ -149,8 +149,7 @@ class SocketClient {
         console.log(LOG, 'reconnectWithToken: same token, no socket → connect()');
         this.connect();
       } else {
-        console.log(LOG, 'reconnectWithToken: same token, socket exists but not connected → socket.connect()');
-        this.socket.connect();
+        console.log(LOG, 'reconnectWithToken: same token, socket exists but not connected (wait reconnect)');
       }
       return;
     }
@@ -196,15 +195,6 @@ class SocketClient {
           ? { mode: (args[0] as { mode?: string }).mode, sessionId: (args[0] as { sessionId?: string }).sessionId }
           : undefined;
       console.warn(LOG, 'emit QUEUED (offline)', event, preview ?? '', 'queueLen=', this.emitQueue.length);
-      if (this.token) {
-        if (!this.socket) {
-          console.warn(LOG, 'emit offline → no socket instance, triggering connect()');
-          this.connect();
-        } else {
-          console.warn(LOG, 'emit offline → socket exists, triggering socket.connect()');
-          this.socket.connect();
-        }
-      }
       return;
     }
     const preview =
