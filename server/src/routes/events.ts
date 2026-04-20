@@ -122,7 +122,8 @@ async function fetchCgTrending(): Promise<NewCoinItem[]> {
   return rows;
 }
 
-async function getListings(): Promise<NewCoinItem[]> {
+export type { NewCoinItem, UpcomingEvent };
+export async function getListings(): Promise<NewCoinItem[]> {
   if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) return cache.items;
   if (inflight) return inflight;
   inflight = (async () => {
@@ -244,7 +245,7 @@ async function fetchCmcEvents(): Promise<UpcomingEvent[]> {
   return events;
 }
 
-async function getUpcomingEvents(): Promise<UpcomingEvent[]> {
+export async function getUpcomingEvents(): Promise<UpcomingEvent[]> {
   if (cmcCache && Date.now() - cmcCache.loadedAt < CMC_TTL_MS) return cmcCache.items;
   if (cmcInflight) return cmcInflight;
   cmcInflight = fetchCmcEvents()

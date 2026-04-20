@@ -226,7 +226,9 @@ function getServerRoot(): string {
   return path.join(__dirname, '../..');
 }
 
-function runOkxCli(
+/** Invoke the OKX subtool as a child process. Exported for skill endpoints
+ * that need direct OKX intent dispatch without going through the full router. */
+export function runOkxCli(
   payload: object,
   timeoutMs = OKX_TIMEOUT_MS,
 ): Promise<{ ok: boolean; report?: string; payload?: unknown; error?: string }> {
