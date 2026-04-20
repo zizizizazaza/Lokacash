@@ -439,21 +439,40 @@ Founder 可以将公司上架到 Loka，获得曝光。
 | 有剩余 | `bg-green-50` | `text-green-600` | `8 left` |
 | 已耗尽 | `bg-gray-100` | `text-gray-400` | `0 left` |
 
-### 7.5 Upgrade 入口
+### 7.5 Upgrade 入口（按订阅档位分状态）
 
-Upgrade 按钮出现在以下位置，引导用户进入 Settings 页面的订阅计划区：
+同样的位置根据当前用户的订阅档位（Free / Pro / Max）渲染不同的形态。核心原则：**已付费用户不应被当作"未付费"反复催促升级**，但仍保留可感知、不打扰的 upsell 入口。
 
-| 位置 | 触发条件 | 说明 |
-|------|----------|------|
-| **侧边栏用户区**（移动端抽屉 / 收起态 / 展开态，共 3 处） | 始终显示 | 带皇冠图标，灰色描边 + 渐变文字 |
-| **首页右上角**（仅桌面端） | 始终显示 | 同上 |
-| **聊天页 Header** | 始终显示 | 同上 |
+**入口位置**：侧边栏用户区（3 处：移动抽屉 / 收起态 / 展开态）、首页右上角（桌面端）、聊天页 Header。
 
-**Upgrade 按钮视觉规范：**
+**按订阅档位的状态矩阵：**
+
+| 档位 | 首页右上角 / 聊天页 Header | 侧边栏用户区 | 点击行为 |
+|------|---------------------------|--------------|----------|
+| **Free** | 主位按钮 `Upgrade Plan`（皇冠 + 描边呼吸动画 + 渐变文字） | 同上 | → Settings |
+| **Pro** | 次级链接按钮 `Go Max →`（弱化样式，去掉呼吸动画，文字降为中性灰） | Plan 徽章 `Crown · Pro`（无呼吸动效，点击进入 Settings 查看用量 / 升级入口） | → Settings |
+| **Max** | 不显示 CTA，改为展示 Plan 徽章 `Crown · Max`（金色） | 同上 | → Settings（查看用量，不再有升级文案） |
+
+**视觉规范（Free 档 Upgrade 按钮 — 最强势）：**
 - 边框：`border border-gray-300`，带呼吸动画（`upgrade-shimmer-outline`，在 `#e5e7eb` 和 `#d1d5db` 之间交替）
 - 文字：渐变色（`linear-gradient(135deg, #f59e0b, #ef4444, #f59e0b)`），带平移动画
 - 图标（皇冠 SVG）：`#e67e22`
-- 整体风格：低调但可识别，不打断用户操作流
+
+**视觉规范（Pro 档 `Go Max →` — 次级）：**
+- 边框：`border border-gray-200`，**无**呼吸动画
+- 文字：`text-gray-600` 单色，`font-medium`（非渐变）
+- 尺寸比 Free 档 Upgrade 按钮小一号
+- 整体风格：承认用户已付费身份，不喊"升级"，仅提示下一档存在
+
+**视觉规范（Plan 徽章 — Pro / Max 状态）：**
+- Pro 徽章：`Crown(#6366f1)` + 文字 `Pro`（靛蓝色）
+- Max 徽章：`Crown(#f59e0b)` + 文字 `Max`（金色），轻微光泽感（subtle shine）
+- 形态：小圆角胶囊，`border border-gray-200 bg-white`
+- 点击可进入 Settings（不作为主要操作，是附加信息展示）
+
+**兜底逻辑：**
+- 获取 `plan` 前（loading 或 API 失败）统一按 Free 渲染，避免已付费用户短暂看到错误状态
+- 所有入口共用同一个 `plan` 状态源，避免首页 / 侧边栏不一致
 
 ### 7.6 Settings 页面（Plan 管理）
 
@@ -468,7 +487,9 @@ Settings 页面包含：
 2. **三个计划卡片并排**
    - 每个卡片展示：计划名、月付/年付价格、Fast/Roundtable 配额、附加权益列表
    - 当前计划标记为 `Current Plan`
-   - 其他计划显示 `Upgrade to Pro` / `Upgrade to Max` 按钮
+   - **低于**当前档的计划显示 `Downgrade`（次级样式，或直接置灰"Included in your plan"）
+   - **高于**当前档的计划显示 `Upgrade to Pro` / `Upgrade to Max` 按钮
+   - 若用户已是 Max：只有"Current Plan"状态，不显示任何 Upgrade CTA
 
 3. **付费周期切换**
    - Monthly / Annual 切换器，Annual 旁显示 `Save 17%` 标签
@@ -510,7 +531,7 @@ Settings 页面包含：
 |---------|------|--------|----------|------|
 | SUB-01 | Settings 页面计划展示 | P0 | ✅ 前端已实现 | 三个计划卡片 + 用量进度条 |
 | SUB-02 | 模式选择器配额显示 | P0 | ✅ 前端已实现 | 绿色/灰色标签 + 耗尽禁用 |
-| SUB-03 | Upgrade 入口（侧边栏 + 首页 + 聊天页） | P0 | ✅ 前端已实现 | 5 处入口，统一跳转 Settings |
+| SUB-03 | Upgrade 入口（侧边栏 + 首页 + 聊天页） | P0 | ⚠️ 部分实现 | 5 处入口，按 plan 分三态：Free=主位 Upgrade / Pro=次级 Go Max / Max=Plan 徽章 |
 | SUB-04 | 后端配额查询 API | P0 | ❌ 待实现 | GET /api/subscription/quota |
 | SUB-05 | 后端配额消耗记录 | P0 | ❌ 待实现 | 每次请求递增 used |
 | SUB-06 | 配额重置定时任务 | P1 | ❌ 待实现 | Free 每周 / Pro+Max 每月重置 |
