@@ -18,6 +18,259 @@ export function SourcesProvider({ sources, children }: { sources: CitationSource
 
 // ─── Quote Snapshot Card ────────────────────────────────────────
 
+export interface QuoteOkxSnapshot {
+  baseCcy: string;
+  spotInstId: string | null;
+  swapInstId: string | null;
+  spot: {
+    last: number;
+    open24h: number;
+    high24h: number;
+    low24h: number;
+    change24hPct: number;
+    volume24hBase: number;
+    volume24hQuote: number;
+    ts: number;
+  } | null;
+  derivatives: {
+    fundingRate: number | null;
+    nextFundingTs: number | null;
+    openInterest: number | null;
+    openInterestUsd: number | null;
+    ts: number | null;
+  } | null;
+  candles?: Array<[ts: number, o: number, h: number, l: number, c: number]>;
+  orderbookDepthUsd?: number | null;
+}
+
+function okxFmtUsdCompact(v: number | null | undefined, digits = 2): string {
+  if (v == null || !Number.isFinite(v)) return 'n/a';
+  const abs = Math.abs(v);
+  if (abs >= 1e12) return `$${(v / 1e12).toFixed(digits)}T`;
+  if (abs >= 1e9) return `$${(v / 1e9).toFixed(digits)}B`;
+  if (abs >= 1e6) return `$${(v / 1e6).toFixed(digits)}M`;
+  if (abs >= 1e3) return `$${(v / 1e3).toFixed(digits)}K`;
+  return `$${v.toLocaleString('en-US', { maximumFractionDigits: v >= 100 ? 2 : 6 })}`;
+}
+function okxFmtPctSigned(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return 'n/a';
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+}
+function okxSummarizeWindow(
+  candles: Array<[number, number, number, number, number]> | undefined,
+  n: number,
+): { high: number; low: number; pct: number } | null {
+  if (!candles || !candles.length) return null;
+  const rows = [...candles].sort((a, b) => b[0] - a[0]);
+  const window = rows.slice(0, Math.min(n, rows.length));
+  if (!window.length) return null;
+  const latestClose = rows[0][4];
+  let high = -Infinity;
+  let low = Infinity;
+  for (const r of window) {
+    if (r[2] > high) high = r[2];
+    if (r[3] < low) low = r[3];
+  }
+  const oldestOpen = window[window.length - 1][1];
+  const pct = oldestOpen > 0 ? ((latestClose - oldestOpen) / oldestOpen) * 100 : NaN;
+  return { high, low, pct };
+}
+
+export interface QuoteOkxNewsItem {
+  id?: string;
+  title?: string;
+  summary?: string;
+  url?: string;
+  publishedAt?: string;
+  source?: string;
+  importance?: string;
+  sentiment?: string;
+  coins?: string[];
+}
+
+export interface QuoteOkxSentiment {
+  baseCcy: string;
+  label?: string;
+  bullishRatio?: number | null;
+  bearishRatio?: number | null;
+  neutralRatio?: number | null;
+  hotness?: number | null;
+  newsMentionCnt?: number | null;
+  xMentionCnt?: number | null;
+}
+
+export interface QuoteOkxNewsBundle {
+  baseCcy: string;
+  latestNews: QuoteOkxNewsItem[];
+  sentiment: QuoteOkxSentiment | null;
+}
+
+/** News + Sentiment section rendered inside a quote card (OKX orbit). */
+export function OkxQuoteNews({ bundle, lang = 'zh' }: { bundle: QuoteOkxNewsBundle; lang?: 'zh' | 'en' }) {
+  const s = bundle.sentiment;
+  const items = (bundle.latestNews || []).slice(0, 4);
+  if (!s && !items.length) return null;
+  const L = lang === 'en'
+    ? { bull: 'Bull', bear: 'Bear', neutral: 'Neutral', mentions: 'mentions', news: 'News', important: 'Important' }
+    : { bull: '多', bear: '空', neutral: '中', mentions: '提及', news: '新闻', important: '重要' };
+  const barColor = s?.label === 'bullish' ? 'bg-emerald-500'
+    : s?.label === 'bearish' ? 'bg-red-500'
+    : 'bg-gray-400';
+  const labelColor = s?.label === 'bullish' ? 'text-emerald-600'
+    : s?.label === 'bearish' ? 'text-red-500'
+    : 'text-gray-500';
+  const fmt = (n?: number | null) => (n == null || !Number.isFinite(n) ? null : `${n.toFixed(1)}%`);
+  return (
+    <>
+      <div className="mx-5 h-px bg-gradient-to-r from-transparent via-sky-200/60 to-transparent" />
+      <div className="px-5 py-3.5 space-y-3">
+        <div className="flex items-center gap-1.5">
+          <svg className="w-3 h-3 text-sky-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" />
+          </svg>
+          <span className="text-[9px] uppercase tracking-[0.08em] text-sky-600 font-semibold leading-none">
+            {lang === 'en' ? 'Sentiment & News' : '情绪与新闻'}
+          </span>
+          <span className="text-[9px] text-gray-400">24h</span>
+        </div>
+
+        {/* Sentiment bar */}
+        {s && (s.bullishRatio != null || s.bearishRatio != null) && (
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span className={`font-bold uppercase tracking-wider ${labelColor}`}>{s.label || 'neutral'}</span>
+              <span className="text-gray-400">|</span>
+              <span className="text-emerald-600 font-semibold tabular-nums">{fmt(s.bullishRatio) || '—'} <span className="text-gray-400 font-normal">{L.bull}</span></span>
+              <span className="text-red-500 font-semibold tabular-nums">{fmt(s.bearishRatio) || '—'} <span className="text-gray-400 font-normal">{L.bear}</span></span>
+              <span className="text-gray-500 font-semibold tabular-nums">{fmt(s.neutralRatio) || '—'} <span className="text-gray-400 font-normal">{L.neutral}</span></span>
+              {s.hotness != null && (
+                <span className="ml-auto text-[10px] text-gray-400">🔥 {s.hotness.toLocaleString()} {L.mentions}</span>
+              )}
+            </div>
+            <div className="h-1.5 w-full rounded-full overflow-hidden bg-gray-100 flex">
+              {s.bullishRatio != null && s.bullishRatio > 0 && (
+                <div className="h-full bg-emerald-500" style={{ width: `${s.bullishRatio}%` }} />
+              )}
+              {s.neutralRatio != null && s.neutralRatio > 0 && (
+                <div className="h-full bg-gray-300" style={{ width: `${s.neutralRatio}%` }} />
+              )}
+              {s.bearishRatio != null && s.bearishRatio > 0 && (
+                <div className="h-full bg-red-500" style={{ width: `${s.bearishRatio}%` }} />
+              )}
+            </div>
+            {(s.newsMentionCnt != null || s.xMentionCnt != null) && (
+              <div className="flex gap-3 text-[10px] text-gray-400">
+                {s.newsMentionCnt != null && <span>{L.news} {s.newsMentionCnt}</span>}
+                {s.xMentionCnt != null && <span>X {s.xMentionCnt}</span>}
+              </div>
+            )}
+            <div className={`h-[2px] w-6 rounded-full ${barColor}`} />
+          </div>
+        )}
+
+        {/* News list */}
+        {items.length > 0 && (
+          <ul className="space-y-1.5">
+            {items.map((n, ni) => {
+              const when = n.publishedAt ? n.publishedAt.replace(/T.*$/, '') : '';
+              const sentTagColor = n.sentiment === 'bullish' ? 'text-emerald-600 bg-emerald-50'
+                : n.sentiment === 'bearish' ? 'text-red-500 bg-red-50'
+                : 'text-gray-500 bg-gray-50';
+              return (
+                <li key={ni} className="text-[11.5px] leading-snug">
+                  {n.url ? (
+                    <a href={n.url} target="_blank" rel="noopener noreferrer" className="text-gray-700 hover:text-sky-600 transition-colors">{n.title}</a>
+                  ) : (
+                    <span className="text-gray-700">{n.title}</span>
+                  )}
+                  <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-gray-400">
+                    {when && <span>{when}</span>}
+                    {n.source && <span>· {n.source}</span>}
+                    {n.importance === 'high' && <span className="text-amber-600">· {L.important}</span>}
+                    {n.sentiment && (
+                      <span className={`ml-auto px-1.5 py-0.5 rounded ${sentTagColor} font-medium uppercase tracking-wide`}>{n.sentiment}</span>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** Derivatives section rendered inside a quote card when OKX data is available. */
+export function OkxQuoteDerivatives({ okx, lang = 'zh' }: { okx: QuoteOkxSnapshot; lang?: 'zh' | 'en' }) {
+  const fr = okx.derivatives?.fundingRate;
+  const frAnnual = fr != null ? fr * 3 * 365 * 100 : null;
+  const fundingColor = fr != null
+    ? (fr >= 0 ? 'text-emerald-600' : 'text-red-500')
+    : 'text-gray-400';
+  const range7 = okxSummarizeWindow(okx.candles, 7);
+  const range30 = okxSummarizeWindow(okx.candles, 30);
+  const derivStats: { label: string; value: React.ReactNode }[] = [];
+  if (fr != null) {
+    derivStats.push({
+      label: 'Funding / 8h',
+      value: (
+        <span className={fundingColor}>
+          {(fr * 100).toFixed(4)}%
+          {frAnnual != null && (
+            <span className="text-gray-400 font-normal ml-1">({frAnnual >= 0 ? '+' : ''}{frAnnual.toFixed(1)}% APR)</span>
+          )}
+        </span>
+      ),
+    });
+  }
+  if (okx.derivatives?.openInterestUsd != null) {
+    derivStats.push({ label: 'Open Interest', value: okxFmtUsdCompact(okx.derivatives.openInterestUsd) });
+  }
+  if (okx.orderbookDepthUsd != null) {
+    derivStats.push({ label: 'Depth ±10', value: okxFmtUsdCompact(okx.orderbookDepthUsd) });
+  }
+  if (derivStats.length === 0 && !range7 && !range30) return null;
+  return (
+    <>
+      <div className="mx-5 h-px bg-gradient-to-r from-transparent via-amber-200/60 to-transparent" />
+      <div className="px-5 py-3.5 space-y-2.5">
+        {okx.swapInstId && (
+          <div className="text-[9px] text-gray-400 font-mono">{okx.swapInstId}</div>
+        )}
+        {derivStats.length > 0 && (
+          <div className="grid grid-cols-3 gap-x-4 gap-y-3">
+            {derivStats.map((s, si) => (
+              <div key={si} className="min-w-0">
+                <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
+                <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {(range7 || range30) && (
+          <div className="text-[11.5px] text-gray-600 pt-1">
+            {range7 && (
+              <>
+                <span className="text-gray-400">7D </span>
+                <span className="font-medium text-gray-700 tabular-nums">{okxFmtUsdCompact(range7.low)} — {okxFmtUsdCompact(range7.high)}</span>
+                <span className={`ml-1 font-medium ${range7.pct >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{okxFmtPctSigned(range7.pct)}</span>
+              </>
+            )}
+            {range7 && range30 && <span className="text-gray-300 mx-2">·</span>}
+            {range30 && (
+              <>
+                <span className="text-gray-400">30D </span>
+                <span className={`font-medium ${range30.pct >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{okxFmtPctSigned(range30.pct)}</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 interface QuoteData {
   symbol: string;
   name?: string;
@@ -102,8 +355,16 @@ const MKT_STYLE: Record<string, string> = {
   'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
 };
 
-/** Renders a stock quote snapshot as a styled card */
-export function QuoteCard({ quote }: { quote: QuoteData }) {
+/** Renders a stock/crypto quote snapshot as a styled card */
+export function QuoteCard({
+  quote,
+  okxSnap,
+  okxNews,
+}: {
+  quote: QuoteData;
+  okxSnap?: QuoteOkxSnapshot | null;
+  okxNews?: QuoteOkxNewsBundle | null;
+}) {
   const lang = quote.lang || 'zh';
   const L = LABELS[lang] || LABELS.zh;
 
@@ -186,6 +447,12 @@ export function QuoteCard({ quote }: { quote: QuoteData }) {
           </div>
         </div>
       )}
+
+      {/* Derivatives — merged section (crypto only) */}
+      {okxSnap && <OkxQuoteDerivatives okx={okxSnap} lang={lang as 'zh' | 'en'} />}
+
+      {/* OKX News & Sentiment (crypto only) */}
+      {okxNews && <OkxQuoteNews bundle={okxNews} lang={lang as 'zh' | 'en'} />}
 
       {/* Timestamp */}
       {quote.asOf && (

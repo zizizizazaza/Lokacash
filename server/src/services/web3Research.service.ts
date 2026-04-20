@@ -11,6 +11,63 @@ const WEB3_ROOT = path.join(__dirname, '../../tools/web3');
 const CLI_JS = path.join(WEB3_ROOT, 'dist', 'cli.js');
 const CLI_TS = path.join(WEB3_ROOT, 'src', 'cli.ts');
 
+export type Web3OkxSnapshot = {
+  baseCcy: string;
+  spotInstId: string | null;
+  swapInstId: string | null;
+  spot: {
+    last: number;
+    open24h: number;
+    high24h: number;
+    low24h: number;
+    change24hPct: number;
+    volume24hBase: number;
+    volume24hQuote: number;
+    ts: number;
+  } | null;
+  derivatives: {
+    fundingRate: number | null;
+    nextFundingTs: number | null;
+    openInterest: number | null;
+    openInterestUsd: number | null;
+    ts: number | null;
+  } | null;
+  candles?: Array<[ts: number, o: number, h: number, l: number, c: number]>;
+  orderbookDepthUsd?: number | null;
+  logs?: string[];
+};
+
+export type Web3OkxNewsItem = {
+  id?: string;
+  title?: string;
+  summary?: string;
+  url?: string;
+  publishedAt?: string;
+  source?: string;
+  importance?: string;
+  sentiment?: string;
+  coins?: string[];
+};
+
+export type Web3OkxSentiment = {
+  baseCcy: string;
+  label?: string;
+  bullishRatio?: number | null;
+  bearishRatio?: number | null;
+  neutralRatio?: number | null;
+  hotness?: number | null;
+  newsMentionCnt?: number | null;
+  xMentionCnt?: number | null;
+  trend?: Array<{ ts: number; bullish: number; bearish: number; neutral: number }>;
+  ts?: number;
+};
+
+export type Web3OkxNewsBundle = {
+  baseCcy: string;
+  latestNews: Web3OkxNewsItem[];
+  sentiment: Web3OkxSentiment | null;
+};
+
 export type Web3ResearchResult = {
   report: string;
   raw: {
@@ -26,6 +83,9 @@ export type Web3ResearchResult = {
     nft?: Record<string, unknown>;
     logs?: string[];
     missingData?: string[];
+    okx?: Web3OkxSnapshot[];
+    okxNews?: Web3OkxNewsBundle[];
+    providers?: Array<'coingecko' | 'okx-market' | 'okx-news'>;
   };
 };
 

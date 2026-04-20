@@ -530,7 +530,64 @@ function inferKnownAsset(query: string): ResolvedAsset | null {
   return null;
 }
 
+const EVM_ADDRESS_RE = /\b0x[a-fA-F0-9]{40}\b/;
+const SOLANA_ADDRESS_RE = /(?:^|[^A-Za-z0-9])([1-9A-HJ-NP-Za-km-z]{43,44})(?=$|[^A-Za-z0-9])/;
+const EVM_PLATFORMS = [
+  'ethereum',
+  'base',
+  'arbitrum-one',
+  'polygon-pos',
+  'binance-smart-chain',
+  'optimistic-ethereum',
+  'avalanche',
+];
+
+function extractContractAddress(query: string): { address: string; chain: 'evm' | 'solana' } | null {
+  const evm = query.match(EVM_ADDRESS_RE);
+  if (evm?.[0]) return { address: evm[0], chain: 'evm' };
+  const sol = query.match(SOLANA_ADDRESS_RE);
+  if (sol?.[1]) return { address: sol[1], chain: 'solana' };
+  return null;
+}
+
+async function resolveByContract(address: string, chain: 'evm' | 'solana'): Promise<ResolvedAsset | null> {
+  const platforms = chain === 'evm' ? EVM_PLATFORMS : ['solana'];
+  const normalized = chain === 'evm' ? address.toLowerCase() : address;
+  for (const platform of platforms) {
+    try {
+      const raw = (await fetchRestJson(
+        `/coins/${platform}/contract/${encodeURIComponent(normalized)}`,
+      )) as { id?: string; symbol?: string; name?: string } | null;
+      if (raw?.id) {
+        return {
+          id: raw.id,
+          symbol: raw.symbol,
+          name: raw.name,
+          hint: `${platform}:${normalized.slice(0, 10)}…`,
+          source: `coingecko-contract-${platform}`,
+        };
+      }
+    } catch (err) {
+      const status = (err as { status?: number })?.status;
+      if (status && status !== 404) {
+        console.error(
+          `[web3-cli] contract lookup non-404 error platform=${platform} status=${status} msg="${truncate(
+            (err as Error)?.message || '',
+            140,
+          )}"`,
+        );
+      }
+    }
+  }
+  return null;
+}
+
 async function resolveAsset(query: string): Promise<ResolvedAsset | null> {
+  const contract = extractContractAddress(query);
+  if (contract) {
+    const byContract = await resolveByContract(contract.address, contract.chain);
+    if (byContract) return byContract;
+  }
   const explicitTicker = extractDollarTicker(query);
   if (explicitTicker) {
     const tickerResolved = await resolveAssetByExplicitTicker(explicitTicker);
@@ -593,7 +650,15 @@ function extractAssetTerms(query: string): string[] {
   const rawWords = (query.match(/[A-Za-z][A-Za-z0-9-]{1,20}/g) || [])
     .map((w) => w.toLowerCase())
     .filter((w) => !STOP_WORDS.has(w));
-  return unique([...inferred, ...rawWords]).slice(0, 5);
+  const contractTerms: string[] = [];
+  const evmMatches = query.match(/\b0x[a-fA-F0-9]{40}\b/g) || [];
+  contractTerms.push(...evmMatches);
+  const solanaMatches = query.match(/(?:^|[^A-Za-z0-9])([1-9A-HJ-NP-Za-km-z]{43,44})(?=$|[^A-Za-z0-9])/g) || [];
+  for (const raw of solanaMatches) {
+    const m = raw.match(/[1-9A-HJ-NP-Za-km-z]{43,44}/);
+    if (m?.[0]) contractTerms.push(m[0]);
+  }
+  return unique([...contractTerms, ...inferred, ...rawWords]).slice(0, 6);
 }
 
 async function resolveAssets(query: string, limit = 3): Promise<ResolvedAsset[]> {

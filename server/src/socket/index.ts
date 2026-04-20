@@ -4,7 +4,8 @@ import { config } from '../config.js';
 import { verifyToken } from '../middleware/auth.js';
 import prisma from '../db.js';
 import { researchService, type XProfileSnapshot } from '../services/research.service.js';
-import { web3ResearchService, type Web3ResearchResult } from '../services/web3Research.service.js';
+import { type Web3ResearchResult } from '../services/web3Research.service.js';
+import { web3RouterService } from '../services/web3Router.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
@@ -179,6 +180,32 @@ function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): S
       domain: 'api.coingecko.com',
       url: 'https://www.coingecko.com/en/api/documentation',
       snippet: 'REST market snapshot used by the Web3 pipeline for deterministic filtering and comparison.',
+    });
+  }
+  const okxSnapshots = Array.isArray(raw.okx) ? raw.okx : [];
+  if (okxSnapshots.length) {
+    const bases = okxSnapshots.map((s) => s.baseCcy).filter(Boolean).slice(0, 4).join(', ');
+    out.push({
+      favicon: 'web',
+      title: 'OKX Market Data',
+      domain: 'okx.com',
+      url: 'https://www.okx.com/docs-v5/',
+      snippet: bases
+        ? `OKX public spot / perps snapshot (funding, open interest, orderbook depth) for ${bases}.`
+        : 'OKX public spot / perps snapshot used by the Web3 pipeline.',
+    });
+  }
+  const okxNewsBundles = Array.isArray(raw.okxNews) ? raw.okxNews : [];
+  if (okxNewsBundles.length) {
+    const bases = okxNewsBundles.map((b) => b.baseCcy).filter(Boolean).slice(0, 4).join(', ');
+    out.push({
+      favicon: 'web',
+      title: 'OKX News & Sentiment',
+      domain: 'okx.com',
+      url: 'https://www.okx.com/feed',
+      snippet: bases
+        ? `OKX orbit aggregated crypto news + sentiment snapshot for ${bases}.`
+        : 'OKX orbit crypto news + sentiment feed.',
     });
   }
   return out;
@@ -1272,6 +1299,11 @@ Text: "${query}"`;
       let finalSearchSourcesRaw: SignalSearchSource[] = [];
       let finalWeb3Sources: SignalSearchSource[] = [];
       let finalWeb3Intent: string | undefined;
+      let finalWeb3Okx: NonNullable<Web3ResearchResult['raw']['okx']> | undefined;
+      let finalWeb3OkxNews: NonNullable<Web3ResearchResult['raw']['okxNews']> | undefined;
+      let finalWeb3Providers: NonNullable<Web3ResearchResult['raw']['providers']> | undefined;
+      let finalWeb3Assets: NonNullable<Web3ResearchResult['raw']['assets']> | undefined;
+      let finalWeb3Via: Web3ResearchResult['raw']['via'];
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
@@ -1417,11 +1449,16 @@ Text: "${query}"`;
             ? `${originalQ} ; ${routedWeb3Q}`
             : routedWeb3Q || originalQ;
         promises.push(
-          web3ResearchService
+          web3RouterService
             .runQuery(web3Q)
             .then((result) => {
               finalWeb3Intent = result.raw.intent || undefined;
               finalWeb3Sources = buildWeb3ProviderSources(result.raw);
+              finalWeb3Okx = result.raw.okx;
+              finalWeb3OkxNews = result.raw.okxNews;
+              finalWeb3Providers = result.raw.providers;
+              finalWeb3Assets = result.raw.assets;
+              finalWeb3Via = result.raw.via;
               const focusTokens = web3FocusTokens(result.raw);
               if (plan.capabilities.search.needed) {
                 const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
@@ -1455,6 +1492,9 @@ Text: "${query}"`;
                 intent: result.raw.intent || 'unknown',
                 assets: result.raw.assets?.length || 0,
                 via: result.raw.via || 'n/a',
+                okx: result.raw.okx || [],
+                okxNews: result.raw.okxNews || [],
+                providers: result.raw.providers || [],
               });
               return { type: 'WEB3', data: result.report };
             })
@@ -2849,6 +2889,21 @@ The HTML must:
 
         const flowModules: Array<{ type: string; status: string; data?: Record<string, unknown> }> = [];
         if (plan.capabilities.search.needed) flowModules.push({ type: 'search', status: 'completed', data: { variant: 'social', sources: finalSocialSources } });
+        if (plan.capabilities.web3.needed) {
+          flowModules.push({
+            type: 'web3',
+            status: 'completed',
+            data: {
+              variant: 'coingecko_mcp',
+              intent: finalWeb3Intent || 'unknown',
+              via: finalWeb3Via || 'n/a',
+              assets: finalWeb3Assets?.length || 0,
+              okx: finalWeb3Okx || [],
+              okxNews: finalWeb3OkxNews || [],
+              providers: finalWeb3Providers || [],
+            },
+          });
+        }
         if (plan.capabilities.analysis.needed) flowModules.push({ type: 'analysis', status: 'completed', data: { stages: finalAnalysisStages } });
         if (plan.capabilities.simulate.needed) flowModules.push({ type: 'simulation', status: 'completed', data: { panelists: finalPanelists } });
 
