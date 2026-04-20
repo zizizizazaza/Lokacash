@@ -8,6 +8,7 @@ import { IFlytekStreamer } from '../services/iflytek';
 import ModeSelector from './chat/ModeSelector';
 import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { api } from '../services/api';
+import PlanUpgradeEntry from './PlanUpgradeEntry';
 const SuperAgentHome: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -193,14 +194,7 @@ const SuperAgentHome: React.FC = () => {
     <div className="flex-1 flex flex-col h-full overflow-y-auto">
       {/* ── Upgrade banner — top-right ── */}
       <div className="hidden md:flex justify-end px-6 pt-4 pb-0">
-        <button
-          onClick={() => navigate('/settings')}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl border border-gray-300 text-[13px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline"
-        >
-          <I.Crown />
-          <span>Upgrade Plan</span>
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
-        </button>
+        <PlanUpgradeEntry size="md" />
       </div>
       {/* ── Hero + Input ── */}
       <div className="hero-zone flex flex-col items-center pt-8 md:pt-16 pb-6 px-4">

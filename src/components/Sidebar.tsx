@@ -5,6 +5,7 @@ import { I } from './Icons';
 import { navItems, RECENTS } from '../constants';
 import { api } from '../services/api';
 import { socket } from '../services/socket';
+import PlanUpgradeEntry from './PlanUpgradeEntry';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -364,10 +365,7 @@ export const Sidebar: React.FC<{
               <div className="opacity-0 group-hover/user:opacity-100 transition-opacity text-gray-400"><I.Dots /></div>
             </div>
             {isLoggedIn && (
-              <button onClick={() => { navigate('/settings'); if (onCloseMobileDrawer) onCloseMobileDrawer(); }} className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 text-[11px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline">
-                <I.Crown />
-                <span>Upgrade</span>
-              </button>
+              <PlanUpgradeEntry size="sm" className="shrink-0" onNavigate={onCloseMobileDrawer} />
             )}
           </div>
           <UserMenu open={mobileUserMenuOpen} onClose={() => setMobileUserMenuOpen(false)} isDark={false} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
@@ -402,10 +400,7 @@ export const Sidebar: React.FC<{
         <div className="relative flex flex-col items-center gap-1.5">
           <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`w-8 h-8 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:ring-2 hover:ring-gray-300 transition-all overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
           {isLoggedIn && (
-            <button onClick={() => navigate('/settings')} className="rail-btn w-9 h-7 rounded-md flex items-center justify-center border border-gray-300 text-[8px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline">
-              <span className="rail-tip">Upgrade Plan</span>
-              <I.Crown />
-            </button>
+            <PlanUpgradeEntry size="rail" />
           )}
           <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} position="right" isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
         </div>
@@ -516,10 +511,7 @@ export const Sidebar: React.FC<{
               <div className={`opacity-0 group-hover/user:opacity-100 transition-opacity ${textMuted}`}><I.Dots /></div>
             </div>
             {isLoggedIn && (
-              <button onClick={() => navigate('/settings')} className={`shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 text-[11px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline`}>
-                <I.Crown />
-                <span>Upgrade</span>
-              </button>
+              <PlanUpgradeEntry size="sm" className="shrink-0" />
             )}
           </div>
           <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />

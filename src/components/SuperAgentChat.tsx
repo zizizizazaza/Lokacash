@@ -11,6 +11,7 @@ import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 import { I } from './Icons';
+import PlanUpgradeEntry from './PlanUpgradeEntry';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -4154,13 +4155,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Header: chat title ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <button
-                    onClick={() => navigate('/settings')}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 text-[11px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline"
-                >
-                    <I.Crown />
-                    <span>Upgrade</span>
-                </button>
+                <PlanUpgradeEntry size="sm" />
             </div>
 
             {/* ══ Content Row ══ */}

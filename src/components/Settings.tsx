@@ -1,8 +1,11 @@
 import React, { memo, useState } from 'react';
+import { usePlan } from '../hooks/usePlan';
 
 interface SettingsProps {
     onBack?: () => void;
 }
+
+const PLAN_RANK: Record<string, number> = { free: 0, pro: 1, max: 2 };
 
 const plans = [
     {
@@ -88,7 +91,7 @@ const accentStyles = {
 
 const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     const [billing, setBilling] = useState<'monthly' | 'yearly'>('monthly');
-    const currentPlan = 'free';
+    const currentPlan = usePlan();
 
     return (
         <div className="relative w-full min-h-full overflow-auto">
@@ -124,7 +127,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
             {/* ── Section 2: Current usage ── */}
             <div className="mt-6 mb-8">
-                <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-4">Current usage · Free plan</p>
+                <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-4">Current usage · {currentPlan === 'free' ? 'Free' : currentPlan === 'pro' ? 'Pro' : 'Max'} plan</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {/* Fast */}
                     <div className="flex items-center gap-4 px-5 py-4 bg-white rounded-2xl border border-gray-100">
@@ -259,18 +262,33 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
                             {/* CTA */}
                             <div className="mt-auto" />
-                            {plan.cta && !isCurrent ? (
-                                <button
-                                    onClick={() => window.dispatchEvent(new CustomEvent('loka-open-modal', { detail: 'deposit' }))}
-                                    className={`w-full py-3 rounded-xl text-[13px] font-bold transition-colors active:scale-[0.98] ${style.cta}`}
-                                >
-                                    {plan.cta}
-                                </button>
-                            ) : (
-                                <div className="w-full py-3 rounded-xl text-[13px] font-medium text-center text-gray-300 border border-dashed border-gray-200">
-                                    {isCurrent ? 'Current plan' : 'Free forever'}
-                                </div>
-                            )}
+                            {(() => {
+                                const rank = PLAN_RANK[plan.id] ?? 0;
+                                const curRank = PLAN_RANK[currentPlan] ?? 0;
+                                if (rank === curRank) {
+                                    return (
+                                        <div className="w-full py-3 rounded-xl text-[13px] font-medium text-center text-gray-500 bg-gray-50 border border-gray-200">
+                                            Current plan
+                                        </div>
+                                    );
+                                }
+                                if (rank < curRank) {
+                                    return (
+                                        <div className="w-full py-3 rounded-xl text-[13px] font-medium text-center text-gray-300 border border-dashed border-gray-200">
+                                            Included in your plan
+                                        </div>
+                                    );
+                                }
+                                // rank > curRank — upgrade path
+                                return (
+                                    <button
+                                        onClick={() => window.dispatchEvent(new CustomEvent('loka-open-modal', { detail: 'deposit' }))}
+                                        className={`w-full py-3 rounded-xl text-[13px] font-bold transition-colors active:scale-[0.98] ${style.cta}`}
+                                    >
+                                        {plan.cta || `Upgrade to ${plan.name}`}
+                                    </button>
+                                );
+                            })()}
                         </div>
                     );
                 })}
