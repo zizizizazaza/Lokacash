@@ -297,6 +297,34 @@
     .scrollbar-show::-webkit-scrollbar-thumb:hover {
       background: #999;
     }
+
+    /* Upgrade button shimmer */
+    @keyframes upgrade-shimmer-outline {
+      0% { border-color: #e5e7eb; }
+      50% { border-color: #d1d5db; }
+      100% { border-color: #e5e7eb; }
+    }
+    .upgrade-shimmer-outline {
+      animation: upgrade-shimmer-outline 3s ease-in-out infinite;
+    }
+    .upgrade-shimmer-outline > * {
+      background: linear-gradient(135deg, #f59e0b, #ef4444, #f59e0b);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: upgrade-text-shift 3s ease-in-out infinite;
+    }
+    .upgrade-shimmer-outline svg {
+      -webkit-text-fill-color: initial;
+      background: none;
+      color: #e67e22;
+    }
+    @keyframes upgrade-text-shift {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
   </style>
   <script type="importmap">
 {

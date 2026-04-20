@@ -58,12 +58,6 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
       >
         {React.createElement(current.icon)}
         {compact ? <span className="hidden sm:inline">{current.label}</span> : current.label}
-        {/* Show remaining count badge for fast/roundtable */}
-        {currentRemaining !== null && (
-          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-none ${currentExhausted ? 'bg-red-100 text-red-500' : 'bg-gray-100 text-gray-500'}`}>
-            {currentRemaining}
-          </span>
-        )}
         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
           <path d="M6 9l6 6 6-6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -100,8 +94,8 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
                 </div>
                 {/* Quota badge — far right */}
                 {itemRemaining !== null && (
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full leading-none shrink-0 ${itemExhausted ? 'bg-red-100 text-red-500' : 'bg-green-50 text-green-600'}`}>
-                    {itemExhausted ? 'Upgrade' : `${itemRemaining} left`}
+                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full leading-none shrink-0 ${itemExhausted ? 'bg-gray-100 text-gray-400' : 'bg-green-50 text-green-600'}`}>
+                    {`${itemRemaining} left`}
                   </span>
                 )}
                 {isActive && itemRemaining === null && (

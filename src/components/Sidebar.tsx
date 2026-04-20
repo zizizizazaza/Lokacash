@@ -357,10 +357,18 @@ export const Sidebar: React.FC<{
         </div>
 
         <div className="px-3 py-3 relative" style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 12px)' }}>
-          <div onClick={() => isLoggedIn ? setMobileUserMenuOpen(!mobileUserMenuOpen) : onLogin()} className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-gray-50 transition-all cursor-pointer group/user">
-            <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500'} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
-            <span className="flex-1 text-[13px] font-medium text-gray-700 truncate">{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
-            <div className="opacity-0 group-hover/user:opacity-100 transition-opacity text-gray-400"><I.Dots /></div>
+          <div className="flex items-center gap-2">
+            <div onClick={() => isLoggedIn ? setMobileUserMenuOpen(!mobileUserMenuOpen) : onLogin()} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-gray-50 transition-all cursor-pointer group/user">
+              <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500'} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+              <span className="flex-1 text-[13px] font-medium text-gray-700 truncate">{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
+              <div className="opacity-0 group-hover/user:opacity-100 transition-opacity text-gray-400"><I.Dots /></div>
+            </div>
+            {isLoggedIn && (
+              <button onClick={() => { navigate('/settings'); if (onCloseMobileDrawer) onCloseMobileDrawer(); }} className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 text-[11px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline">
+                <I.Crown />
+                <span>Upgrade</span>
+              </button>
+            )}
           </div>
           <UserMenu open={mobileUserMenuOpen} onClose={() => setMobileUserMenuOpen(false)} isDark={false} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
         </div>
@@ -391,8 +399,14 @@ export const Sidebar: React.FC<{
             </button>
           ))}
         </div>
-        <div className="relative">
+        <div className="relative flex flex-col items-center gap-1.5">
           <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`w-8 h-8 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:ring-2 hover:ring-gray-300 transition-all overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+          {isLoggedIn && (
+            <button onClick={() => navigate('/settings')} className="rail-btn w-9 h-7 rounded-md flex items-center justify-center border border-gray-300 text-[8px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline">
+              <span className="rail-tip">Upgrade Plan</span>
+              <I.Crown />
+            </button>
+          )}
           <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} position="right" isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
         </div>
       </nav>
@@ -495,10 +509,18 @@ export const Sidebar: React.FC<{
 
         {/* User */}
         <div className="px-3 py-3 relative">
-          <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`flex items-center gap-2.5 px-2 py-2 rounded-lg ${hoverBg} transition-all cursor-pointer group/user`}>
-            <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
-            <span className={`flex-1 text-[13px] font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'} truncate`}>{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
-            <div className={`opacity-0 group-hover/user:opacity-100 transition-opacity ${textMuted}`}><I.Dots /></div>
+          <div className="flex items-center gap-2">
+            <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`flex-1 min-w-0 flex items-center gap-2.5 px-2 py-2 rounded-lg ${hoverBg} transition-all cursor-pointer group/user`}>
+              <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+              <span className={`flex-1 text-[13px] font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'} truncate`}>{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
+              <div className={`opacity-0 group-hover/user:opacity-100 transition-opacity ${textMuted}`}><I.Dots /></div>
+            </div>
+            {isLoggedIn && (
+              <button onClick={() => navigate('/settings')} className={`shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 text-[11px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline`}>
+                <I.Crown />
+                <span>Upgrade</span>
+              </button>
+            )}
           </div>
           <UserMenu open={desktopUserMenuOpen} onClose={() => setDesktopUserMenuOpen(false)} isDark={isDark} onToggleDark={onToggleDark} onLogout={onLogout} userName={userName} userInitial={userInitial} userAvatar={userAvatar} onItemClick={() => { if (mobileDrawerOpen && onCloseMobileDrawer) onCloseMobileDrawer(); }} />
         </div>

@@ -157,7 +157,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                         </div>
                     </div>
                 </div>
-                <p className="text-[10px] text-gray-400 mt-2.5 pl-1">Resets every Monday · searches per week</p>
+                <p className="text-[10px] text-gray-400 mt-2.5 pl-1">Resets every 7 days from sign-up</p>
             </div>
 
             {/* ── Section 3: Billing toggle ── */}
@@ -294,7 +294,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
             {/* ── Footer ── */}
             <p className="text-center text-[11px] text-gray-400 mt-10">
-                All plans include unlimited casual chat. Analysis limits reset weekly (Free) or monthly (Pro & Max). Cancel anytime.
+                All plans include unlimited casual chat. Limits reset every 7 days (Free) or every 30 days (Pro & Max) from activation. Cancel anytime.
             </p>
             </div>
         </div>

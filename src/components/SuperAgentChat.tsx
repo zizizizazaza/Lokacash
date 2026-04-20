@@ -10,6 +10,7 @@ import { api } from '../services/api';
 import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
+import { I } from './Icons';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -749,37 +750,43 @@ interface KnowledgeGraphData {
 
 const STATIC_KG_DATA: KnowledgeGraphData = {
     nodes: [
-        { id: 'agent_0', type: 'agent', label: 'agent_0', x: 0, y: 0 },
-        { id: 'agent_1', type: 'agent', label: 'agent_1', x: 0, y: 0 },
-        { id: 'agent_2', type: 'agent', label: 'agent_2', x: 0, y: 0 },
-        { id: 'agent_3', type: 'agent', label: 'agent_3', x: 0, y: 0 },
+        { id: 'fundamental_specialist', type: 'agent', label: 'FA', x: 0, y: 0 },
+        { id: 'valuation_specialist', type: 'agent', label: 'VA', x: 0, y: 0 },
+        { id: 'macro_specialist', type: 'agent', label: 'MA', x: 0, y: 0 },
+        { id: 'risk_specialist', type: 'agent', label: 'RA', x: 0, y: 0 },
+        { id: 'sentiment_focus', type: 'agent', label: 'SF', x: 0, y: 0 },
+        { id: 'event_driven', type: 'agent', label: 'ED', x: 0, y: 0 },
+        { id: 'buffett_style', type: 'agent', label: 'WB', x: 0, y: 0 },
         { id: 'round_1', type: 'task', label: 'Round 1', x: 0, y: 0 },
         { id: 'round_2', type: 'task', label: 'Round 2', x: 0, y: 0 },
-        { id: 'round_3', type: 'task', label: 'Round 3', x: 0, y: 0 },
-        { id: 'round_4', type: 'task', label: 'Round 4', x: 0, y: 0 },
-        { id: 'node_A', type: 'stance', label: 'A', x: 0, y: 0 },
-        { id: 'node_B', type: 'stance', label: 'B', x: 0, y: 0 },
+        { id: 'consensus', type: 'task', label: 'Consensus', x: 0, y: 0 },
+        { id: 'bullish', type: 'stance', label: 'Bullish', x: 0, y: 0 },
+        { id: 'neutral', type: 'stance', label: 'Neutral', x: 0, y: 0 },
     ],
     edges: [
-        { id: 'e1', source: 'agent_1', target: 'round_2', label: 'participates_in' },
-        { id: 'e2', source: 'agent_1', target: 'round_3', label: 'participates_in' },
-        { id: 'e3', source: 'agent_1', target: 'round_4', label: 'participates_in' },
-        { id: 'e4', source: 'agent_1', target: 'node_B', label: 'supports' },
-        { id: 'e5', source: 'agent_3', target: 'round_2', label: 'participates_in' },
-        { id: 'e6', source: 'agent_3', target: 'round_3', label: 'participates_in' },
-        { id: 'e7', source: 'agent_3', target: 'round_4', label: 'participates_in' },
-        { id: 'e8', source: 'agent_3', target: 'node_B', label: 'supports' },
-        { id: 'e9', source: 'agent_2', target: 'round_1', label: 'participates_in' },
-        { id: 'e10', source: 'agent_2', target: 'round_2', label: 'participates_in' },
-        { id: 'e11', source: 'agent_2', target: 'round_3', label: 'participates_in' },
-        { id: 'e12', source: 'agent_2', target: 'round_4', label: 'participates_in' },
-        { id: 'e13', source: 'agent_2', target: 'node_A', label: 'supports' },
-        { id: 'e14', source: 'agent_2', target: 'node_B', label: 'supports' },
-        { id: 'e15', source: 'agent_0', target: 'round_1', label: 'participates_in' },
-        { id: 'e16', source: 'agent_0', target: 'round_2', label: 'participates_in' },
-        { id: 'e17', source: 'agent_0', target: 'round_3', label: 'participates_in' },
-        { id: 'e18', source: 'agent_0', target: 'round_4', label: 'participates_in' },
-        { id: 'e19', source: 'agent_0', target: 'node_B', label: 'supports' },
+        { id: 'e1', source: 'fundamental_specialist', target: 'round_1', label: 'participates_in' },
+        { id: 'e2', source: 'valuation_specialist', target: 'round_1', label: 'participates_in' },
+        { id: 'e3', source: 'macro_specialist', target: 'round_1', label: 'participates_in' },
+        { id: 'e4', source: 'risk_specialist', target: 'round_1', label: 'participates_in' },
+        { id: 'e5', source: 'sentiment_focus', target: 'round_1', label: 'participates_in' },
+        { id: 'e6', source: 'event_driven', target: 'round_1', label: 'participates_in' },
+        { id: 'e7', source: 'buffett_style', target: 'round_1', label: 'participates_in' },
+        { id: 'e8', source: 'fundamental_specialist', target: 'round_2', label: 'participates_in' },
+        { id: 'e9', source: 'valuation_specialist', target: 'round_2', label: 'participates_in' },
+        { id: 'e10', source: 'macro_specialist', target: 'round_2', label: 'participates_in' },
+        { id: 'e11', source: 'risk_specialist', target: 'round_2', label: 'participates_in' },
+        { id: 'e12', source: 'sentiment_focus', target: 'round_2', label: 'participates_in' },
+        { id: 'e13', source: 'event_driven', target: 'round_2', label: 'participates_in' },
+        { id: 'e14', source: 'buffett_style', target: 'round_2', label: 'participates_in' },
+        { id: 'e15', source: 'round_1', target: 'consensus', label: 'feeds_into' },
+        { id: 'e16', source: 'round_2', target: 'consensus', label: 'feeds_into' },
+        { id: 'e17', source: 'fundamental_specialist', target: 'bullish', label: 'supports' },
+        { id: 'e18', source: 'valuation_specialist', target: 'bullish', label: 'supports' },
+        { id: 'e19', source: 'macro_specialist', target: 'bullish', label: 'supports' },
+        { id: 'e20', source: 'risk_specialist', target: 'neutral', label: 'supports' },
+        { id: 'e21', source: 'sentiment_focus', target: 'bullish', label: 'supports' },
+        { id: 'e22', source: 'event_driven', target: 'bullish', label: 'supports' },
+        { id: 'e23', source: 'buffett_style', target: 'bullish', label: 'supports' },
     ]
 };
 
@@ -2143,13 +2150,6 @@ const ThinkingProcessSidePanel: React.FC<{
                                 </div>
                             );
                         })}
-                        {allDone && mindChanges > 0 && (
-                            <div className="mt-1 px-3 py-2 bg-amber-50/60 rounded-xl border border-amber-100/60 text-center">
-                                <span className="text-[10px] text-amber-700 font-medium">
-                                    ↻ {mindChanges} agent{mindChanges > 1 ? 's' : ''} changed conclusion after cross-validation
-                                </span>
-                            </div>
-                        )}
                     </div>
                 )}
             </div>
@@ -2768,9 +2768,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const keys = Object.keys(consensusResults).map(Number).sort((a, b) => b - a);
         return keys.length > 0 ? consensusResults[keys[0]] : null;
     })();
-    const currentRoundtableData: RoundtableData = currentConsensus
-        ? buildRoundtableFromConsensus(currentConsensus)
-        : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
+    // Demo mode: RoundtableView graph always uses static data (never backend consensus)
+    const currentRoundtableData: RoundtableData = { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
 
 
     // TOC: precompute headings for every completed assistant message
@@ -3116,11 +3115,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
 
         const onConsensusDone = (data: { sessionId: string; result: any }) => {
-            saLog('← agent:chat:consensus_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
-            if (data.sessionId !== sessionId) return;
-            const msgIdx = activeMsgIdxRef.current;
-            if (msgIdx < 0) return;
-            setConsensusResults(prev => ({ ...prev, [msgIdx]: data.result }));
+            saLog('← agent:chat:consensus_done (ignored — demo mode)', { expect: sessionId, got: data?.sessionId });
+            // Demo mode: do NOT overwrite panel with backend consensus data
         };
 
         const onQuote = (data: { sessionId: string; quote: any }) => {
@@ -3449,14 +3445,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
-                                    const rtFields = isRt && !meta.thinkingFlow.rtRounds && meta.consensusResult
-                                        ? reconstructRtFieldsFromConsensus(meta.consensusResult, meta.thinkingFlow.modules)
-                                        : null;
+                                    // Demo mode: never reconstruct rtFields from backend consensus — keep demo data in handleSummonConfirm
                                     restoredThinking[idx] = {
                                         ...meta.thinkingFlow,
                                         isActive: false,
                                         ...(isRt && !meta.thinkingFlow.routedMode ? { routedMode: 'roundtable' } : {}),
-                                        ...(rtFields || {}),
                                     };
                                     if (isRt) hasRoundtableHistory = true;
                                 }
@@ -3738,10 +3731,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
                 <button
                     onClick={() => navigate('/settings')}
-                    className="flex items-center gap-1.5 text-[11px] font-semibold text-green-600 hover:text-green-700 transition-colors"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 text-[11px] font-semibold hover:border-gray-900 transition-all upgrade-shimmer-outline"
                 >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
-                    Upgrade
+                    <I.Crown />
+                    <span>Upgrade</span>
                 </button>
             </div>
 
