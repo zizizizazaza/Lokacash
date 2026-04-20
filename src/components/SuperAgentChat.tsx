@@ -398,6 +398,65 @@ const AGENT_COLORS: Record<string, string> = {
     FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
 };
 
+/* ── Demo RT fields — canonical 7-agent roundtable for history restoration ── */
+function buildDemoRtFields() {
+    const sys = SUMMON_POOL.filter(a => a.group === 'system');
+    const extra = SUMMON_POOL.filter(a => ['buffett_style', 'dalio_style', 'sentiment_focus'].includes(a.id));
+    const all = [...sys, ...extra];
+    const r1 = all.slice(0, 2);
+    const r2 = all.slice(0, 7);
+    const verdicts = ['Bullish', 'Neutral', 'Bearish', 'Bullish', 'Bearish', 'Neutral', 'Bullish'];
+    const confs = [78, 62, 45, 71, 82, 58, 75];
+    const reasonings = [
+        'Revenue grew 18% YoY to $4.2B, beating consensus by $120M. Operating margins expanded 240bps to 28.3% driven by cost optimization and scale efficiencies. Free cash flow conversion improved to 92%. Forward P/E of 22x sits below 5-year average of 26x, suggesting room for multiple expansion. RSI at 58 indicates neutral momentum with no overbought signals. Key risk: rising interest rates could compress multiples in the near term.',
+        'Current valuation appears fair at 1.8x PEG ratio. Technical indicators are mixed — MACD shows a pending bullish crossover but volume has been declining for 3 consecutive weeks. The 50-day moving average ($148) is approaching the 200-day ($152), and a golden cross could trigger momentum buying. However, broad macro headwinds including hawkish Fed commentary and rising 10Y yields create uncertainty. Recommend maintaining position but not adding until clearer directional signals emerge.',
+        'Sector-wide de-rating in progress as competition intensifies. Company lost 2.1% market share in the latest quarter per IDC data. Gross margins contracted 180bps sequentially. Social sentiment turned notably negative after the product recall announcement, with Twitter mention sentiment dropping from +0.42 to -0.18 in two weeks. Balance sheet remains strong with $8.2B cash and minimal debt, which provides a floor, but near-term catalysts are lacking.',
+        'Tail risk assessment: correlation breakdown probability sits at 12% based on our fractal model. The current volatility regime is transitioning from low to moderate — VIX term structure shifted to contango. Max drawdown scenario under a 2-sigma stress event would be -18%. However, the company maintains a strong Altman Z-score of 4.2, suggesting minimal bankruptcy risk. Hedging cost via put spreads is relatively cheap at 45bps.',
+        'This is a wonderful business at a fair price. 85% customer retention rate, $3.2B in recurring revenue, and a brand moat evidenced by 40% pricing premium vs. closest competitor. Management has demonstrated disciplined capital allocation with $2.1B returned via buybacks. The stock trades at a 21% discount to peer median. As I always say: it is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.',
+        'The debt cycle analysis shows we are in the late expansion phase. Central bank tightening is creating headwinds across risk assets. However, this particular company has low leverage (0.8x net debt/EBITDA) and strong cash generation, making it relatively defensive. In an all-weather framework, this position contributes positive risk-adjusted returns across 3 of 4 economic environments. Maintain position but size conservatively given macro uncertainty.',
+        'Social sentiment analysis reveals a notable divergence: retail sentiment is turning bullish (+340% mention volume) while institutional positioning shows cautious accumulation. NLP analysis of recent earnings call transcripts indicates management confidence has increased — forward-looking language ratio improved from 0.42 to 0.61. The contrarian signal here is moderately bullish: when retail and institutions align gradually, the trend tends to persist.',
+    ];
+    return {
+        selectedAgentIds: all.map(a => a.id),
+        rtPreparationStatus: 'done' as const,
+        rtDataSearch: [
+            { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done' as const, count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+            { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done' as const, count: 15, sources: [
+                { title: 'Q4 Earnings Beat Expectations — Revenue surges 18% YoY', domain: 'reuters.com', favicon: 'reuters', url: 'https://reuters.com' },
+                { title: 'Analyst Upgrades Rating to Overweight on Margin Expansion', domain: 'bloomberg.com', favicon: 'bloomberg', url: 'https://bloomberg.com' },
+                { title: 'Sector Outlook: Mixed Signals Amid Rising Rates', domain: 'wsj.com', favicon: 'wsj', url: 'https://wsj.com' },
+                { title: 'New Product Line Could Drive $2B in Incremental Revenue', domain: 'cnbc.com', favicon: 'cnbc', url: 'https://cnbc.com' },
+            ]},
+            { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done' as const, count: 23, sources: [
+                { title: 'Bullish sentiment trending — $TICKER mentions up 340% this week', domain: 'x.com', favicon: 'x', url: 'https://x.com' },
+                { title: 'Community DD: Deep value analysis with DCF model breakdown', domain: 'reddit.com', favicon: 'reddit', url: 'https://reddit.com' },
+                { title: 'Institutional flow data shows heavy accumulation at support', domain: 'stocktwits.com', favicon: 'stocktwits', url: 'https://stocktwits.com' },
+            ]},
+        ],
+        rtRounds: [
+            {
+                round: 1, status: 'done' as const,
+                agents: r1.map((a, i) => ({ agentId: a.id, agentName: a.name, status: 'done' as const, verdict: verdicts[i], confidence: confs[i], reasoning: reasonings[i] })),
+            },
+            {
+                round: 2, status: 'done' as const,
+                agents: r2.map((a, i) => ({
+                    agentId: a.id, agentName: a.name, status: 'done' as const,
+                    verdict: i === 2 ? 'Neutral' : verdicts[i], confidence: confs[i] + (i === 2 ? 10 : 0), reasoning: reasonings[i],
+                    changedMind: i === 2, previousVerdict: i === 2 ? 'Bearish' : undefined,
+                    crossReferences: [r2[(i + 1) % r2.length]?.name, r2[(i + 2) % r2.length]?.name].filter(Boolean),
+                })),
+            },
+        ],
+        rtConsensus: {
+            status: 'done' as const, hasConsensus: true, conflictRate: 20,
+            agentConclusions: r2.map((a, i) => ({ agentName: a.name, verdict: i === 2 ? 'Neutral' : verdicts[i], confidence: confs[i] + (i === 2 ? 10 : 0) })),
+            finalVerdict: 'Bullish', finalConfidence: 74,
+        },
+        rtReportStatus: 'done' as const,
+    };
+}
+
 /* ── Avatar mapping: name/id → JPG path ── */
 const AVATAR_MAP: Record<string, string> = {
     // SUMMON_POOL system agents
@@ -729,11 +788,12 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
 // ─── Knowledge Graph Types ──────────────────────────────────
 interface KGNode {
     id: string;
-    type: 'agent' | 'task' | 'stance';
+    type: 'asset' | 'role' | 'evidence' | 'knowledge' | 'conclusion' | 'agent' | 'task' | 'stance';
     label: string;
     x: number;
     y: number;
-    data?: Record<string, string>;
+    group?: string;
+    data?: Record<string, any>;
 }
 
 interface KGEdge {
@@ -741,6 +801,8 @@ interface KGEdge {
     source: string;
     target: string;
     label: string;
+    type?: 'analyzes' | 'cites' | 'informs' | 'supports' | 'challenges' | 'converges_to' | 'has_metric' | string;
+    data?: Record<string, any>;
 }
 
 interface KnowledgeGraphData {
@@ -748,54 +810,129 @@ interface KnowledgeGraphData {
     edges: KGEdge[];
 }
 
+// Investment Committee Explainability Graph (AAPL demo) — 7-agent committee
 const STATIC_KG_DATA: KnowledgeGraphData = {
     nodes: [
-        { id: 'fundamental_specialist', type: 'agent', label: 'FA', x: 0, y: 0 },
-        { id: 'valuation_specialist', type: 'agent', label: 'VA', x: 0, y: 0 },
-        { id: 'macro_specialist', type: 'agent', label: 'MA', x: 0, y: 0 },
-        { id: 'risk_specialist', type: 'agent', label: 'RA', x: 0, y: 0 },
-        { id: 'sentiment_focus', type: 'agent', label: 'SF', x: 0, y: 0 },
-        { id: 'event_driven', type: 'agent', label: 'ED', x: 0, y: 0 },
-        { id: 'buffett_style', type: 'agent', label: 'WB', x: 0, y: 0 },
-        { id: 'round_1', type: 'task', label: 'Round 1', x: 0, y: 0 },
-        { id: 'round_2', type: 'task', label: 'Round 2', x: 0, y: 0 },
-        { id: 'consensus', type: 'task', label: 'Consensus', x: 0, y: 0 },
-        { id: 'bullish', type: 'stance', label: 'Bullish', x: 0, y: 0 },
-        { id: 'neutral', type: 'stance', label: 'Neutral', x: 0, y: 0 },
+        { id: 'asset_aapl', type: 'asset', label: 'AAPL', group: 'center', x: 0, y: 0, data: { symbol: 'AAPL', market: 'US', asset_type: 'equity', summary: 'Apple Inc. — US equity under committee review for position sizing and tactical call.' } },
+
+        // 7 Role nodes (match buildDemoRtFields pool: 4 system + buffett + dalio + sentiment)
+        { id: 'role_fundamental', type: 'role', label: 'Fundamental Analyst', group: 'role', x: 0, y: 0, data: { agentId: 'fundamental_specialist', color: '#3B82F6', initial_signal: 'buy',  final_signal: 'hold', confidence: 0.71, changed_position: true,  summary: 'Revenue +18% YoY, margins expanding, but flagged valuation risk in round 2.' } },
+        { id: 'role_valuation',   type: 'role', label: 'Valuation Analyst',   group: 'role', x: 0, y: 0, data: { agentId: 'valuation_specialist',   color: '#6366F1', initial_signal: 'hold', final_signal: 'hold', confidence: 0.62, changed_position: false, summary: 'PEG fair at 1.8x, forward P/E slightly rich vs 5Y average.' } },
+        { id: 'role_macro',       type: 'role', label: 'Macro Analyst',       group: 'role', x: 0, y: 0, data: { agentId: 'macro_specialist',       color: '#8B5CF6', initial_signal: 'sell', final_signal: 'hold', confidence: 0.55, changed_position: true,  summary: 'Hawkish Fed + rising 10Y yields create headwinds; revised up on resilient liquidity.' } },
+        { id: 'role_risk',        type: 'role', label: 'Risk Analyst',        group: 'role', x: 0, y: 0, data: { agentId: 'risk_specialist',        color: '#EF4444', initial_signal: 'hold', final_signal: 'hold', confidence: 0.70, changed_position: false, summary: 'Tail risk 12%, max drawdown -18% under 2σ stress. Strong Z-score.' } },
+        { id: 'role_buffett',     type: 'role', label: 'Warren Buffett',      group: 'role', x: 0, y: 0, data: { agentId: 'buffett_style',          color: '#1E40AF', initial_signal: 'buy',  final_signal: 'buy',  confidence: 0.82, changed_position: false, summary: 'Wonderful business at fair price — 85% retention, 40% pricing premium.' } },
+        { id: 'role_dalio',       type: 'role', label: 'Ray Dalio',           group: 'role', x: 0, y: 0, data: { agentId: 'dalio_style',            color: '#1D4ED8', initial_signal: 'hold', final_signal: 'hold', confidence: 0.58, changed_position: false, summary: 'Late expansion phase; defensive due to low leverage and strong FCF.' } },
+        { id: 'role_sentiment',   type: 'role', label: 'Sentiment Analyst',   group: 'role', x: 0, y: 0, data: { agentId: 'sentiment_focus',        color: '#0891B2', initial_signal: 'buy',  final_signal: 'buy',  confidence: 0.75, changed_position: false, summary: 'Retail mentions +340%, management forward-language ratio 0.42→0.61.' } },
+
+        // Evidence — consensus (green) drives alignment; divergence (red) fuels debate
+        { id: 'evidence_rev_growth',      type: 'evidence', label: 'Revenue Growth Resilient (+18% YoY)', group: 'evidence_positive', x: 0, y: 0, data: { polarity: 'positive', importance: 'high',   category: 'fundamentals', detail: 'Q4 revenue $4.2B, beat consensus by $120M. Operating margin +240bps.', cited_by: ['Fundamental', 'Buffett'] } },
+        { id: 'evidence_margin_quality',  type: 'evidence', label: 'Business Quality Moat',               group: 'evidence_positive', x: 0, y: 0, data: { polarity: 'positive', importance: 'medium', category: 'fundamentals', detail: '85% retention, 40% pricing premium vs closest peer, 92% FCF conversion.', cited_by: ['Fundamental', 'Buffett'] } },
+        { id: 'evidence_retail_flow',     type: 'evidence', label: 'Retail Sentiment Turning Bullish',    group: 'evidence_positive', x: 0, y: 0, data: { polarity: 'positive', importance: 'medium', category: 'sentiment',    detail: 'Twitter mention volume +340% this week, institutional accumulation at support.', cited_by: ['Sentiment'] } },
+        { id: 'evidence_pe_rich',         type: 'evidence', label: 'Valuation Above Historical Median',   group: 'evidence_negative', x: 0, y: 0, data: { polarity: 'negative', importance: 'high',   category: 'valuation',    detail: 'Forward P/E 22x vs 5Y average 26x — moderately rich on risk-adjusted basis.', cited_by: ['Valuation', 'Dalio'] } },
+        { id: 'evidence_macro_uncertain', type: 'evidence', label: 'Macro Liquidity Uncertain',            group: 'evidence_negative', x: 0, y: 0, data: { polarity: 'negative', importance: 'medium', category: 'macro',        detail: 'Fed hawkish stance + 10Y yield rise creates multi-expansion risk.', cited_by: ['Macro', 'Dalio'] } },
+        { id: 'evidence_event_risk',      type: 'evidence', label: 'Upcoming Event Risk',                 group: 'evidence_negative', x: 0, y: 0, data: { polarity: 'negative', importance: 'high',   category: 'risk',         detail: 'Upcoming product event + supply chain audit — tail risk 12%, -18% max DD under 2σ.', cited_by: ['Risk'] } },
+
+        // Knowledge bases
+        { id: 'knowledge_doc_valuation', type: 'knowledge', label: 'Valuation Playbook',           group: 'knowledge', x: 0, y: 0, data: { knowledge_type: 'document',        summary: 'Internal playbook for large-cap valuation decision rules.' } },
+        { id: 'knowledge_case_similar',  type: 'knowledge', label: 'Historical Case: Hold Setup',  group: 'knowledge', x: 0, y: 0, data: { knowledge_type: 'historical_case', summary: 'Prior large-cap hold setup (2023 Q2) — similar margin & macro backdrop.' } },
+        { id: 'knowledge_market_data',   type: 'knowledge', label: 'Market Indicators Feed',       group: 'knowledge', x: 0, y: 0, data: { knowledge_type: 'data_feed',       summary: 'P/E, EPS, RSI, MACD, Volume, Revenue, FCF, Net Income — 12 indicators.' } },
+        { id: 'knowledge_news_feed',     type: 'knowledge', label: 'News & Reports',               group: 'knowledge', x: 0, y: 0, data: { knowledge_type: 'news_feed',       summary: '15 articles from Reuters / Bloomberg / WSJ / CNBC ingested this session.' } },
+        { id: 'knowledge_social_feed',   type: 'knowledge', label: 'Social Sentiment Feed',        group: 'knowledge', x: 0, y: 0, data: { knowledge_type: 'social_feed',     summary: '23 sources from X / Reddit / StockTwits tracked for retail sentiment signals.' } },
+
+        // Final conclusion (single node — metrics folded into the main label)
+        { id: 'conclusion_action', type: 'conclusion', label: 'Final: HOLD · 74% · 5%', group: 'conclusion', x: 0, y: 0, data: { action: 'hold', confidence: 0.74, target_exposure_pct: 0.05, summary: 'Committee converged to HOLD after 2 rounds; 20% conflict rate; 74% weighted confidence; target exposure 5%.' } },
     ],
     edges: [
-        { id: 'e1', source: 'fundamental_specialist', target: 'round_1', label: 'participates_in' },
-        { id: 'e2', source: 'valuation_specialist', target: 'round_1', label: 'participates_in' },
-        { id: 'e3', source: 'macro_specialist', target: 'round_1', label: 'participates_in' },
-        { id: 'e4', source: 'risk_specialist', target: 'round_1', label: 'participates_in' },
-        { id: 'e5', source: 'sentiment_focus', target: 'round_1', label: 'participates_in' },
-        { id: 'e6', source: 'event_driven', target: 'round_1', label: 'participates_in' },
-        { id: 'e7', source: 'buffett_style', target: 'round_1', label: 'participates_in' },
-        { id: 'e8', source: 'fundamental_specialist', target: 'round_2', label: 'participates_in' },
-        { id: 'e9', source: 'valuation_specialist', target: 'round_2', label: 'participates_in' },
-        { id: 'e10', source: 'macro_specialist', target: 'round_2', label: 'participates_in' },
-        { id: 'e11', source: 'risk_specialist', target: 'round_2', label: 'participates_in' },
-        { id: 'e12', source: 'sentiment_focus', target: 'round_2', label: 'participates_in' },
-        { id: 'e13', source: 'event_driven', target: 'round_2', label: 'participates_in' },
-        { id: 'e14', source: 'buffett_style', target: 'round_2', label: 'participates_in' },
-        { id: 'e15', source: 'round_1', target: 'consensus', label: 'feeds_into' },
-        { id: 'e16', source: 'round_2', target: 'consensus', label: 'feeds_into' },
-        { id: 'e17', source: 'fundamental_specialist', target: 'bullish', label: 'supports' },
-        { id: 'e18', source: 'valuation_specialist', target: 'bullish', label: 'supports' },
-        { id: 'e19', source: 'macro_specialist', target: 'bullish', label: 'supports' },
-        { id: 'e20', source: 'risk_specialist', target: 'neutral', label: 'supports' },
-        { id: 'e21', source: 'sentiment_focus', target: 'bullish', label: 'supports' },
-        { id: 'e22', source: 'event_driven', target: 'bullish', label: 'supports' },
-        { id: 'e23', source: 'buffett_style', target: 'bullish', label: 'supports' },
+        // All 7 roles analyze the asset
+        { id: 'edge_role_fundamental_asset', source: 'role_fundamental', target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+        { id: 'edge_role_valuation_asset',   source: 'role_valuation',   target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+        { id: 'edge_role_macro_asset',       source: 'role_macro',       target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+        { id: 'edge_role_risk_asset',        source: 'role_risk',        target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+        { id: 'edge_role_buffett_asset',     source: 'role_buffett',     target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+        { id: 'edge_role_dalio_asset',       source: 'role_dalio',       target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+        { id: 'edge_role_sentiment_asset',   source: 'role_sentiment',   target: 'asset_aapl', type: 'analyzes', label: 'analyzes' },
+
+        // roles cite evidence
+        { id: 'edge_fundamental_rev',    source: 'role_fundamental', target: 'evidence_rev_growth',      type: 'cites', label: 'cites' },
+        { id: 'edge_fundamental_margin', source: 'role_fundamental', target: 'evidence_margin_quality',  type: 'cites', label: 'cites' },
+        { id: 'edge_buffett_margin',     source: 'role_buffett',     target: 'evidence_margin_quality',  type: 'cites', label: 'cites' },
+        { id: 'edge_buffett_rev',        source: 'role_buffett',     target: 'evidence_rev_growth',      type: 'cites', label: 'cites' },
+        { id: 'edge_valuation_pe',       source: 'role_valuation',   target: 'evidence_pe_rich',         type: 'cites', label: 'cites' },
+        { id: 'edge_dalio_pe',           source: 'role_dalio',       target: 'evidence_pe_rich',         type: 'cites', label: 'cites' },
+        { id: 'edge_macro_liquidity',    source: 'role_macro',       target: 'evidence_macro_uncertain', type: 'cites', label: 'cites' },
+        { id: 'edge_dalio_macro',        source: 'role_dalio',       target: 'evidence_macro_uncertain', type: 'cites', label: 'cites' },
+        { id: 'edge_risk_event',         source: 'role_risk',        target: 'evidence_event_risk',      type: 'cites', label: 'cites' },
+        { id: 'edge_sentiment_retail',   source: 'role_sentiment',   target: 'evidence_retail_flow',     type: 'cites', label: 'cites' },
+
+        // knowledge informs roles
+        { id: 'edge_doc_to_valuation', source: 'knowledge_doc_valuation', target: 'role_valuation', type: 'informs', label: 'informs' },
+        { id: 'edge_case_to_risk',     source: 'knowledge_case_similar',  target: 'role_risk',      type: 'informs', label: 'informs' },
+        { id: 'edge_doc_to_buffett',   source: 'knowledge_doc_valuation', target: 'role_buffett',   type: 'informs', label: 'informs' },
+        { id: 'edge_mkt_to_fundamental', source: 'knowledge_market_data', target: 'role_fundamental', type: 'informs', label: 'informs' },
+        { id: 'edge_mkt_to_valuation',   source: 'knowledge_market_data', target: 'role_valuation',   type: 'informs', label: 'informs' },
+        { id: 'edge_news_to_macro',      source: 'knowledge_news_feed',   target: 'role_macro',       type: 'informs', label: 'informs' },
+        { id: 'edge_news_to_dalio',      source: 'knowledge_news_feed',   target: 'role_dalio',       type: 'informs', label: 'informs' },
+        { id: 'edge_social_to_sentiment', source: 'knowledge_social_feed', target: 'role_sentiment',  type: 'informs', label: 'informs' },
+
+        // evidence supports conclusion
+        { id: 'edge_rev_to_conclusion',    source: 'evidence_rev_growth',      target: 'conclusion_action', type: 'supports', label: 'supports' },
+        { id: 'edge_margin_to_conclusion', source: 'evidence_margin_quality',  target: 'conclusion_action', type: 'supports', label: 'supports' },
+        { id: 'edge_retail_to_conclusion', source: 'evidence_retail_flow',     target: 'conclusion_action', type: 'supports', label: 'supports' },
+        { id: 'edge_pe_to_conclusion',     source: 'evidence_pe_rich',         target: 'conclusion_action', type: 'supports', label: 'supports_hold' },
+        { id: 'edge_macro_to_conclusion',  source: 'evidence_macro_uncertain', target: 'conclusion_action', type: 'supports', label: 'supports_hold' },
+        { id: 'edge_risk_to_conclusion',   source: 'evidence_event_risk',      target: 'conclusion_action', type: 'supports', label: 'supports_hold' },
+
+        // challenges (debate — 分歧)
+        { id: 'edge_valuation_challenges_fundamental', source: 'role_valuation', target: 'role_fundamental', type: 'challenges', label: 'challenges optimism' },
+        { id: 'edge_macro_challenges_fundamental',     source: 'role_macro',     target: 'role_fundamental', type: 'challenges', label: 'questions timing' },
+        { id: 'edge_risk_challenges_buffett',          source: 'role_risk',      target: 'role_buffett',     type: 'challenges', label: 'flags event risk' },
+        { id: 'edge_dalio_challenges_sentiment',       source: 'role_dalio',     target: 'role_sentiment',   type: 'challenges', label: 'cautions on retail froth' },
+
+        // roles converge to final conclusion
+        { id: 'edge_fundamental_to_final', source: 'role_fundamental', target: 'conclusion_action', type: 'converges_to', label: 'revises_to_hold' },
+        { id: 'edge_valuation_to_final',   source: 'role_valuation',   target: 'conclusion_action', type: 'converges_to', label: 'supports_hold' },
+        { id: 'edge_macro_to_final',       source: 'role_macro',       target: 'conclusion_action', type: 'converges_to', label: 'supports_hold' },
+        { id: 'edge_risk_to_final',        source: 'role_risk',        target: 'conclusion_action', type: 'converges_to', label: 'supports_hold' },
+        { id: 'edge_buffett_to_final',     source: 'role_buffett',     target: 'conclusion_action', type: 'converges_to', label: 'supports_hold' },
+        { id: 'edge_dalio_to_final',       source: 'role_dalio',       target: 'conclusion_action', type: 'converges_to', label: 'supports_hold' },
+        { id: 'edge_sentiment_to_final',   source: 'role_sentiment',   target: 'conclusion_action', type: 'converges_to', label: 'supports_hold' },
     ]
 };
 
 const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
 
 // ─── KnowledgeGraphView Component ──────────────────────────
-const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) => {
+const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean }> = ({ data, animate = false }) => {
     const svgRef = useRef<SVGSVGElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const [hoverNode, setHoverNode] = useState<{ node: any; x: number; y: number } | null>(null);
+
+    // Styling maps by node.type — simplified palette: neutral + 3 semantic accents
+    const NEUTRAL = { fill: '#f8fafc', stroke: '#94a3b8', text: '#334155' };
+    const NODE_STYLE: Record<string, { fill: string; stroke: string; text: string; r: number }> = {
+        asset:      { fill: '#fef3c7', stroke: '#d97706', text: '#92400e', r: 26 },
+        role:       { ...NEUTRAL, r: 20 },
+        evidence:   { ...NEUTRAL, r: 14 },
+        knowledge:  { ...NEUTRAL, r: 14 },
+        conclusion: { fill: '#dcfce7', stroke: '#16a34a', text: '#14532d', r: 18 },
+        agent:      { ...NEUTRAL, r: 18 },
+        task:       { ...NEUTRAL, r: 14 },
+        stance:     { ...NEUTRAL, r: 14 },
+    };
+    // Evidence colored only by polarity: green = 共识点, red = 分歧点, else neutral
+    const getNodeStyle = (n: any) => {
+        const base = NODE_STYLE[n.type] || NODE_STYLE.evidence;
+        if (n.type === 'evidence') {
+            const polarity = n.data?.polarity;
+            if (polarity === 'positive') return { fill: '#dcfce7', stroke: '#16a34a', text: '#14532d', r: 14 };
+            if (polarity === 'negative') return { fill: '#fee2e2', stroke: '#dc2626', text: '#991b1b', r: 14 };
+        }
+        return base;
+    };
+
+    // Unified edge styling: single light-gray stroke, no labels, no per-type color
+    const EDGE_STYLE_DEFAULT = { stroke: '#cbd5e1', width: 1.2, marker: 'arrow-gray' };
+    const getEdgeStyle = (_e: any) => EDGE_STYLE_DEFAULT;
 
     useEffect(() => {
         if (!svgRef.current || !data.nodes.length) return;
@@ -811,49 +948,84 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) =>
             .on('zoom', (e) => {
                 g.attr('transform', e.transform);
             });
-        
+
         svg.call(zoom as any);
 
         const g = svg.append('g');
 
-        svg.append('defs').append('marker')
-            .attr('id', 'arrow')
-            .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 22)
-            .attr('refY', 0)
-            .attr('markerWidth', 5)
-            .attr('markerHeight', 5)
-            .attr('orient', 'auto')
-            .append('path')
-            .attr('fill', '#9ca3af')
-            .attr('d', 'M0,-4L8,0L0,4');
+        // Define one arrow marker per stroke color
+        const defs = svg.append('defs');
+        const markers: { id: string; fill: string }[] = [
+            { id: 'arrow-gray',   fill: '#cbd5e1' },
+        ];
+        markers.forEach(m => {
+            defs.append('marker')
+                .attr('id', m.id)
+                .attr('viewBox', '0 -5 10 10')
+                .attr('refX', 22)
+                .attr('refY', 0)
+                .attr('markerWidth', 5)
+                .attr('markerHeight', 5)
+                .attr('orient', 'auto')
+                .append('path')
+                .attr('fill', m.fill)
+                .attr('d', 'M0,-4L8,0L0,4');
+        });
 
         const nodes = data.nodes.map(d => ({ ...d }));
         const edges = data.edges.map(d => ({ ...d }));
 
+        // ── Staged reveal: stages match left-panel phases ──
+        // Stage 0 = Team summoned (asset + roles) — visible immediately
+        // Stage 1 = Data Collection (gray knowledge feeds)
+        // Stage 2 = Round 1 (positive/consensus evidence — green)
+        // Stage 3 = Round 2 (negative/divergence evidence — red + challenges)
+        // Stage 4 = Conclusion
+        const stageOf = (n: any): number => {
+            if (n.type === 'asset') return 0;
+            if (n.type === 'role') return 0;
+            if (n.type === 'knowledge') return 1;
+            if (n.type === 'evidence') return n.data?.polarity === 'negative' ? 3 : 2;
+            if (n.type === 'conclusion') return 4;
+            return 0;
+        };
+        nodes.forEach((n: any) => { n._stage = stageOf(n); });
+        const stageById = new Map<string, number>(nodes.map((n: any) => [n.id, n._stage]));
+        edges.forEach((e: any) => {
+            const src = typeof e.source === 'string' ? e.source : e.source?.id;
+            const tgt = typeof e.target === 'string' ? e.target : e.target?.id;
+            let st = Math.max(stageById.get(src) ?? 0, stageById.get(tgt) ?? 0);
+            // Debate edges belong to Round 2 regardless of endpoints
+            if (e.type === 'challenges') st = Math.max(st, 3);
+            // analyzes (role → asset) is part of team assembly — instant
+            if (e.type === 'analyzes') st = 0;
+            e._stage = st;
+        });
+
         const simulation = d3.forceSimulation(nodes as any)
-            .force('link', d3.forceLink(edges).id((d: any) => d.id).distance(110))
-            .force('charge', d3.forceManyBody().strength(-400))
+            .force('link', d3.forceLink(edges).id((d: any) => d.id).distance((d: any) => {
+                // Longer links by relationship semantics — spreads the graph
+                if (d.type === 'analyzes') return 180;
+                if (d.type === 'cites') return 170;
+                if (d.type === 'supports' || d.type === 'converges_to') return 210;
+                if (d.type === 'challenges') return 150;
+                if (d.type === 'informs') return 160;
+                return 180;
+            }).strength(0.35))
+            .force('charge', d3.forceManyBody().strength(-1100).distanceMin(30).distanceMax(width))
             .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collide', d3.forceCollide().radius(40));
+            .force('x', d3.forceX(width / 2).strength(0.04))
+            .force('y', d3.forceY(height / 2).strength(0.04))
+            .force('collide', d3.forceCollide().radius((d: any) => (getNodeStyle(d).r + 32)).strength(0.9));
 
         const link = g.append('g')
-            .attr('stroke', '#9ca3af')
-            .attr('stroke-opacity', 0.8)
             .selectAll('line')
             .data(edges)
             .join('line')
-            .attr('stroke-width', 1.5)
-            .attr('marker-end', 'url(#arrow)');
-
-        const linkLabel = g.append('g')
-            .selectAll('text')
-            .data(edges)
-            .join('text')
-            .text((d: any) => d.label)
-            .attr('font-size', '8px')
-            .attr('fill', '#9ca3af')
-            .attr('text-anchor', 'middle');
+            .attr('stroke', (d: any) => getEdgeStyle(d).stroke)
+            .attr('stroke-opacity', 0)
+            .attr('stroke-width', (d: any) => getEdgeStyle(d).width)
+            .attr('marker-end', (d: any) => `url(#${getEdgeStyle(d).marker})`);
 
         const drag = d3.drag<SVGGElement, any>()
             .on('start', (event, d) => {
@@ -876,24 +1048,90 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) =>
             .data(nodes)
             .join('g')
             .call(drag as any)
-            .style('cursor', 'grab');
+            .style('cursor', 'grab')
+            .style('opacity', 0);
 
         node.append('circle')
-            .attr('r', (d: any) => d.type === 'agent' ? 18 : 14)
-            .attr('fill', (d: any) => d.type === 'agent' ? '#f3f4f6' : d.type === 'stance' ? '#f5f3ff' : '#eff6ff')
-            .attr('stroke', (d: any) => d.type === 'agent' ? '#6b7280' : d.type === 'stance' ? '#7c3aed' : '#3b82f6')
-            .attr('stroke-width', 1.5);
+            .attr('r', (d: any) => getNodeStyle(d).r)
+            .attr('fill', (d: any) => d.type === 'role' ? '#ffffff' : getNodeStyle(d).fill)
+            .attr('stroke', (d: any) => d.type === 'role' && d.data?.color ? d.data.color : getNodeStyle(d).stroke)
+            .attr('stroke-width', (d: any) => d.type === 'role' ? 2.5 : (d.type === 'asset' || d.type === 'conclusion' ? 2 : 1.5));
 
+        // Avatar <image> for role nodes (clipped to circle)
+        node.filter((d: any) => d.type === 'role' && !!d.data?.agentId)
+            .append('clipPath')
+            .attr('id', (d: any) => `clip-${d.id}`)
+            .append('circle')
+            .attr('r', (d: any) => getNodeStyle(d).r - 3);
+        node.filter((d: any) => d.type === 'role' && !!d.data?.agentId)
+            .append('image')
+            .attr('href', (d: any) => AVATAR_MAP[d.data.agentId] || '/avatars/default.jpg')
+            .attr('x', (d: any) => -(getNodeStyle(d).r - 3))
+            .attr('y', (d: any) => -(getNodeStyle(d).r - 3))
+            .attr('width', (d: any) => 2 * (getNodeStyle(d).r - 3))
+            .attr('height', (d: any) => 2 * (getNodeStyle(d).r - 3))
+            .attr('clip-path', (d: any) => `url(#clip-${d.id})`)
+            .attr('preserveAspectRatio', 'xMidYMid slice');
+
+        // Short label (inside circle) only for asset — role now shows avatar instead
         node.append('text')
-            .text((d: any) => {
-                const parts = d.label.split(' ');
-                return d.type === 'agent' ? parts[0] : (d.label.length > 15 ? d.label.slice(0, 13) + '…' : d.label);
-            })
-            .attr('y', 28)
-            .attr('font-size', '9px')
-            .attr('fill', (d: any) => d.type === 'agent' ? '#374151' : d.type === 'stance' ? '#5b21b6' : '#1d4ed8')
+            .text((d: any) => d.type === 'asset' ? d.label : '')
+            .attr('y', 4)
+            .attr('font-size', '11px')
+            .attr('fill', (d: any) => getNodeStyle(d).text)
             .attr('text-anchor', 'middle')
-            .attr('font-weight', '500');
+            .attr('font-weight', 600);
+
+        // Hover handlers — show tooltip via React state
+        node
+            .on('mouseenter', function (this: any, event: MouseEvent, d: any) {
+                const rect = containerRef.current?.getBoundingClientRect();
+                const x = rect ? event.clientX - rect.left : event.offsetX;
+                const y = rect ? event.clientY - rect.top : event.offsetY;
+                setHoverNode({ node: d, x, y });
+                d3.select(this).select('circle').attr('stroke-width', 4);
+            })
+            .on('mousemove', function (_event: MouseEvent, _d: any) { /* position fixed on enter */ })
+            .on('mouseleave', function (this: any, _event: MouseEvent, d: any) {
+                setHoverNode(null);
+                d3.select(this).select('circle')
+                    .attr('stroke-width', d.type === 'role' ? 2.5 : (d.type === 'asset' || d.type === 'conclusion' ? 2 : 1.5));
+            });
+
+        // External label below circle (wrap long labels)
+        node.each(function (this: any, d: any) {
+            const sel = d3.select(this as SVGGElement);
+            const style = getNodeStyle(d);
+            const raw = d.label || '';
+            const maxLen = 22;
+            const words = raw.split(' ');
+            const lines: string[] = [];
+            let cur = '';
+            for (const w of words) {
+                if ((cur + ' ' + w).trim().length > maxLen) {
+                    if (cur) lines.push(cur);
+                    cur = w;
+                } else {
+                    cur = (cur + ' ' + w).trim();
+                }
+                if (lines.length >= 2) break;
+            }
+            if (cur && lines.length < 2) lines.push(cur);
+            if (lines.length === 0) lines.push(raw.slice(0, maxLen));
+            // For asset/role: show label outside; for others: show label outside as primary text
+            const showOutside = d.type !== 'asset';
+            if (!showOutside) return;
+            const startY = style.r + 12;
+            lines.forEach((ln, i) => {
+                sel.append('text')
+                    .text(ln)
+                    .attr('y', startY + i * 11)
+                    .attr('font-size', '9px')
+                    .attr('fill', style.text)
+                    .attr('text-anchor', 'middle')
+                    .attr('font-weight', d.type === 'conclusion' ? 600 : 500);
+            });
+        });
 
         simulation.on('tick', () => {
             link
@@ -902,30 +1140,120 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) =>
                 .attr('x2', (d: any) => d.target.x)
                 .attr('y2', (d: any) => d.target.y);
 
-            linkLabel
-                .attr('x', (d: any) => (d.source.x + d.target.x) / 2)
-                .attr('y', (d: any) => (d.source.y + d.target.y) / 2 - 4);
-
             node
                 .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
         });
 
+        // ── Staged reveal animation (only when animate=true, i.e. first generation) ──
+        // Historical messages open fully visible — no fade-in.
+        const MAX_STAGE = 4;
+        const STEP_MS = 900;
+        const FADE_MS = 550;
+        const timers: ReturnType<typeof setTimeout>[] = [];
+        if (!animate) {
+            // Show everything immediately
+            node.style('opacity', 1);
+            link.attr('stroke-opacity', 0.7);
+        } else {
+            // Stage 0 — team + asset, instant
+            node.filter((d: any) => d._stage === 0).style('opacity', 1);
+            link.filter((d: any) => d._stage === 0).attr('stroke-opacity', 0.7);
+            // Stages 1..4 — staggered fade-in
+            for (let s = 1; s <= MAX_STAGE; s++) {
+                const t = setTimeout(() => {
+                    node.filter((d: any) => d._stage === s)
+                        .transition().duration(FADE_MS).style('opacity', 1);
+                    link.filter((d: any) => d._stage === s)
+                        .transition().duration(FADE_MS).attr('stroke-opacity', 0.7);
+                    simulation.alphaTarget(0.12).restart();
+                    const cool = setTimeout(() => simulation.alphaTarget(0), 500);
+                    timers.push(cool);
+                }, 400 + (s - 1) * STEP_MS);
+                timers.push(t);
+            }
+        }
+
         return () => {
+            timers.forEach(clearTimeout);
             simulation.stop();
         };
-    }, [data.nodes, data.edges]);
+    }, [data.nodes, data.edges, animate]);
 
     return (
         <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white" style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
             <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
-            <div className="absolute bottom-4 left-4 flex gap-4 z-10">
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f3f4f6] border border-[#6b7280]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Agent</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#eff6ff] border border-[#3b82f6]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Task</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f5f3ff] border border-[#7c3aed]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Stance</span></div>
+            <div className="absolute bottom-4 left-4 flex flex-wrap gap-x-3 gap-y-1.5 z-10 max-w-[calc(100%-2rem)]">
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f8fafc] border border-[#94a3b8]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">News / Knowledge</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#dcfce7] border border-[#16a34a]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Consensus</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#fee2e2] border border-[#dc2626]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Divergence</span></div>
+                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#dcfce7] border border-[#16a34a]" style={{ borderWidth: 2 }}></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Conclusion</span></div>
             </div>
             <div className="absolute top-4 right-4 text-[10px] text-gray-500 font-mono text-right pointer-events-none">
                 scroll to zoom<br/>drag to pan
             </div>
+            {hoverNode && (() => {
+                const n = hoverNode.node;
+                const d = n.data || {};
+                const rect = containerRef.current?.getBoundingClientRect();
+                const W = rect?.width ?? 400;
+                const H = rect?.height ?? 600;
+                const tipW = 240;
+                const tipH = 160;
+                const left = Math.min(Math.max(hoverNode.x + 16, 8), W - tipW - 8);
+                const top = Math.min(Math.max(hoverNode.y + 16, 8), H - tipH - 8);
+                const kv: [string, string][] = [];
+                kv.push(['Type', n.type]);
+                kv.push(['ID', n.id]);
+                if (n.type === 'asset') { if (d.symbol) kv.push(['Symbol', d.symbol]); if (d.market) kv.push(['Market', d.market]); if (d.asset_type) kv.push(['Class', d.asset_type]); }
+                if (n.type === 'role') {
+                    if (d.initial_signal) kv.push(['Initial', String(d.initial_signal).toUpperCase()]);
+                    if (d.final_signal)   kv.push(['Final',   String(d.final_signal).toUpperCase()]);
+                    if (typeof d.confidence === 'number') kv.push(['Confidence', `${Math.round(d.confidence * 100)}%`]);
+                    if (d.changed_position) kv.push(['Changed Mind', 'Yes']);
+                }
+                if (n.type === 'evidence') {
+                    if (d.polarity) kv.push(['Polarity', d.polarity === 'positive' ? 'Consensus (+)' : d.polarity === 'negative' ? 'Divergence (−)' : 'Neutral']);
+                    if (d.importance) kv.push(['Importance', d.importance]);
+                    if (d.category) kv.push(['Category', d.category]);
+                    if (Array.isArray(d.cited_by)) kv.push(['Cited by', d.cited_by.join(', ')]);
+                }
+                if (n.type === 'knowledge') { if (d.knowledge_type) kv.push(['Kind', d.knowledge_type]); }
+                if (n.type === 'conclusion') {
+                    if (d.action) kv.push(['Action', String(d.action).toUpperCase()]);
+                    if (typeof d.confidence === 'number') kv.push(['Confidence', `${Math.round(d.confidence * 100)}%`]);
+                    if (typeof d.target_exposure_pct === 'number') kv.push(['Exposure', `${Math.round(d.target_exposure_pct * 100)}%`]);
+                }
+                const detail = d.detail || d.summary;
+                return (
+                    <div
+                        className="absolute z-20 pointer-events-none bg-white/95 backdrop-blur border border-gray-200 rounded-lg shadow-lg px-3 py-2.5"
+                        style={{ left, top, width: tipW, maxHeight: tipH + 40 }}
+                    >
+                        <div className="flex items-center gap-2 mb-1.5">
+                            {n.type === 'role' && d.agentId ? (
+                                <img src={AVATAR_MAP[d.agentId] || '/avatars/default.jpg'} alt="" className="w-7 h-7 rounded-full object-cover" style={{ border: `2px solid ${d.color || '#94a3b8'}` }} />
+                            ) : (
+                                <div className="w-7 h-7 rounded-full" style={{ background: getNodeStyle(n).fill, border: `2px solid ${getNodeStyle(n).stroke}` }} />
+                            )}
+                            <div className="min-w-0 flex-1">
+                                <div className="text-[12px] font-semibold text-gray-900 truncate">{n.label}</div>
+                                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-mono">{n.type}</div>
+                            </div>
+                        </div>
+                        {detail && (
+                            <div className="text-[11px] text-gray-600 leading-snug mb-1.5 line-clamp-3">{detail}</div>
+                        )}
+                        <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+                            {kv.slice(0, 5).map(([k, v]) => (
+                                <React.Fragment key={k}>
+                                    <div className="text-[10px] uppercase tracking-wider text-gray-400 font-mono">{k}</div>
+                                    <div className="text-[10px] text-gray-700 font-medium truncate">{v}</div>
+                                </React.Fragment>
+                            ))}
+                        </div>
+                    </div>
+                );
+            })()}
         </div>
     );
 };
@@ -983,7 +1311,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
         <div className="flex flex-col h-full bg-white">
             {/* Knowledge Graph — fills full space */}
             <div className="flex-1 min-h-0 relative">
-                <KnowledgeGraphView data={buildKnowledgeGraph()} />
+                <KnowledgeGraphView data={buildKnowledgeGraph()} animate={!!isLive} />
             </div>
         </div>
     );
@@ -2585,6 +2913,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
     const [pendingRtText, setPendingRtText] = useState<string | null>(null);
     const summonBypassRef = useRef(false);
+    const rtDemoTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+    useEffect(() => {
+        return () => { rtDemoTimersRef.current.forEach(clearTimeout); rtDemoTimersRef.current = []; };
+    }, []);
     const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
     const [chatModeOpen, setChatModeOpen] = useState(false);
     const chatModeRef = useRef<HTMLDivElement>(null);
@@ -2768,8 +3100,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const keys = Object.keys(consensusResults).map(Number).sort((a, b) => b - a);
         return keys.length > 0 ? consensusResults[keys[0]] : null;
     })();
-    // Demo mode: RoundtableView graph always uses static data (never backend consensus)
-    const currentRoundtableData: RoundtableData = { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
+    // Demo mode: RoundtableView graph renders when current message has roundtable data.
+    // We put a sentinel round so RoundtableView's `rounds.length > 0` check passes and the KG shows.
+    // Mount as soon as roundtable preparation is staged (so stages 0-1 of the reveal animation can run).
+    const hasRtThinking = currentThinking?.routedMode === 'roundtable'
+        && (((currentThinking.rtRounds?.length ?? 0) > 0)
+            || currentThinking.rtPreparationStatus === 'done'
+            || (currentThinking.rtDataSearch?.length ?? 0) > 0);
+    const currentRoundtableData: RoundtableData = hasRtThinking
+        ? { rounds: [{ round: 1, agents: [], status: 'done' } as any], finalVerdict: { summary: '', confidence: 0 } }
+        : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
 
 
     // TOC: precompute headings for every completed assistant message
@@ -3445,13 +3785,21 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
-                                    // Demo mode: never reconstruct rtFields from backend consensus — keep demo data in handleSummonConfirm
-                                    restoredThinking[idx] = {
-                                        ...meta.thinkingFlow,
-                                        isActive: false,
-                                        ...(isRt && !meta.thinkingFlow.routedMode ? { routedMode: 'roundtable' } : {}),
-                                    };
-                                    if (isRt) hasRoundtableHistory = true;
+                                    if (isRt) {
+                                        // Demo mode: always override with canonical 7-agent demo data
+                                        restoredThinking[idx] = {
+                                            ...meta.thinkingFlow,
+                                            isActive: false,
+                                            routedMode: 'roundtable',
+                                            ...buildDemoRtFields(),
+                                        };
+                                        hasRoundtableHistory = true;
+                                    } else {
+                                        restoredThinking[idx] = {
+                                            ...meta.thinkingFlow,
+                                            isActive: false,
+                                        };
+                                    }
                                 }
                                 if (meta.consensusResult) {
                                     restoredConsensus[idx] = meta.consensusResult;
@@ -3591,69 +3939,146 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     startTime: Date.now(),
                     routedMode: 'roundtable',
                     rtPreparationStatus: 'done',
-                    // Phase 1: Data Collection (all done for demo)
+                    // Phase 1: Data Collection — start all pending, stream below
                     rtDataSearch: [
-                        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
-                        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done', count: 15, sources: [
+                        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'pending', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+                        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'pending', count: 15, sources: [
                             { title: 'Q4 Earnings Beat Expectations — Revenue surges 18% YoY', domain: 'reuters.com', favicon: 'reuters', url: 'https://reuters.com' },
                             { title: 'Analyst Upgrades Rating to Overweight on Margin Expansion', domain: 'bloomberg.com', favicon: 'bloomberg', url: 'https://bloomberg.com' },
                             { title: 'Sector Outlook: Mixed Signals Amid Rising Rates', domain: 'wsj.com', favicon: 'wsj', url: 'https://wsj.com' },
                             { title: 'New Product Line Could Drive $2B in Incremental Revenue', domain: 'cnbc.com', favicon: 'cnbc', url: 'https://cnbc.com' },
                         ]},
-                        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done', count: 23, sources: [
+                        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'pending', count: 23, sources: [
                             { title: 'Bullish sentiment trending — $TICKER mentions up 340% this week', domain: 'x.com', favicon: 'x', url: 'https://x.com' },
                             { title: 'Community DD: Deep value analysis with DCF model breakdown', domain: 'reddit.com', favicon: 'reddit', url: 'https://reddit.com' },
                             { title: 'Institutional flow data shows heavy accumulation at support', domain: 'stocktwits.com', favicon: 'stocktwits', url: 'https://stocktwits.com' },
                         ]},
                     ],
-                    // Phase 2: Round 1 — Initial inference (2 agents)
-                    rtRounds: [
-                        {
-                            round: 1,
-                            status: 'done',
-                            agents: r1Agents.map((a, i) => ({
-                                agentId: a.id,
-                                agentName: a.name,
-                                status: 'done' as const,
-                                verdict: verdicts[i],
-                                confidence: confs[i],
-                                reasoning: reasonings[i],
-                            })),
-                        },
-                        // Phase 3: Round 2 — Cross-validation (all agents)
-                        {
-                            round: 2,
-                            status: 'done',
-                            agents: r2Agents.map((a, i) => ({
-                                agentId: a.id,
-                                agentName: a.name,
-                                status: 'done' as const,
-                                verdict: i === 2 ? 'Neutral' : verdicts[i],  // agent C changed mind
-                                confidence: confs[i] + (i === 2 ? 10 : 0),
-                                reasoning: reasonings[i],
-                                changedMind: i === 2,
-                                previousVerdict: i === 2 ? 'Bearish' : undefined,
-                                crossReferences: [r2Agents[(i + 1) % r2Agents.length]?.name, r2Agents[(i + 2) % r2Agents.length]?.name].filter(Boolean),
-                            })),
-                        },
-                    ],
-                    // Phase 4: Consensus
+                    // Rounds & consensus will be populated by the timeline below
+                    rtRounds: [],
                     rtConsensus: {
-                        status: 'done',
-                        hasConsensus: true,
-                        conflictRate: 20,
-                        agentConclusions: r2Agents.map((a, i) => ({
-                            agentName: a.name,
-                            verdict: i === 2 ? 'Neutral' : verdicts[i],
-                            confidence: confs[i] + (i === 2 ? 10 : 0),
-                        })),
-                        finalVerdict: 'Bullish',
-                        finalConfidence: 74,
+                        status: 'pending',
+                        hasConsensus: false,
+                        agentConclusions: [],
                     },
-                    rtReportStatus: 'done',
+                    rtReportStatus: 'pending',
                 },
             };
         });
+
+        // ── Build final-state data (used to hydrate each stage) ──
+        const finalR1Agents: RtAgentInference[] = r1Agents.map((a, i) => ({
+            agentId: a.id,
+            agentName: a.name,
+            status: 'done' as const,
+            verdict: verdicts[i],
+            confidence: confs[i],
+            reasoning: reasonings[i],
+        }));
+        const finalR2Agents: RtAgentInference[] = r2Agents.map((a, i) => ({
+            agentId: a.id,
+            agentName: a.name,
+            status: 'done' as const,
+            verdict: i === 2 ? 'Neutral' : verdicts[i],
+            confidence: confs[i] + (i === 2 ? 10 : 0),
+            reasoning: reasonings[i],
+            changedMind: i === 2,
+            previousVerdict: i === 2 ? 'Bearish' : undefined,
+            crossReferences: [r2Agents[(i + 1) % r2Agents.length]?.name, r2Agents[(i + 2) % r2Agents.length]?.name].filter(Boolean) as string[],
+        }));
+        const finalConsensus: RtConsensusResult = {
+            status: 'done',
+            hasConsensus: true,
+            conflictRate: 20,
+            agentConclusions: r2Agents.map((a, i) => ({
+                agentName: a.name,
+                verdict: i === 2 ? 'Neutral' : verdicts[i],
+                confidence: confs[i] + (i === 2 ? 10 : 0),
+            })),
+            finalVerdict: 'Bullish',
+            finalConfidence: 74,
+        };
+
+        // ── Staged reveal (mirrors the graph's 5 phases) ──
+        const patch = (fn: (f: ThinkingFlow) => ThinkingFlow) => {
+            setThinkingProcesses(prev => {
+                const cur = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable', routedMode: 'roundtable' };
+                return { ...prev, [nextMsgIdx]: fn(cur) };
+            });
+        };
+        const setDataStatus = (idx: number, status: 'pending' | 'active' | 'done') => patch(c => ({
+            ...c,
+            rtDataSearch: (c.rtDataSearch || []).map((d, i) => i === idx ? { ...d, status } : d),
+        }));
+
+        // Tuning: each phase gets enough dwell time to feel intentional (total ~10s)
+        const T_DATA_STEP = 900;          // per feed
+        const T_ROUND1_START = T_DATA_STEP * 3 + 300;   // 3000ms
+        const T_R1_AGENT_STEP = 600;
+        const T_ROUND2_START = T_ROUND1_START + T_R1_AGENT_STEP * 2 + 200; // ~4400ms
+        const T_R2_AGENT_STEP = 500;
+        const steps: { t: number; run: () => void }[] = [
+            // Data collection streams
+            { t: 0,                     run: () => setDataStatus(0, 'active') },
+            { t: T_DATA_STEP,           run: () => { setDataStatus(0, 'done'); setDataStatus(1, 'active'); } },
+            { t: T_DATA_STEP * 2,       run: () => { setDataStatus(1, 'done'); setDataStatus(2, 'active'); } },
+            { t: T_DATA_STEP * 3,       run: () => { setDataStatus(2, 'done'); } },
+            // Round 1 spawn
+            { t: T_ROUND1_START, run: () => patch(c => ({
+                ...c,
+                rtRounds: [{
+                    round: 1,
+                    status: 'active',
+                    agents: finalR1Agents.map((a, i) => ({ ...a, status: i === 0 ? 'active' : 'pending' })),
+                }],
+            })) },
+            { t: T_ROUND1_START + T_R1_AGENT_STEP, run: () => patch(c => ({
+                ...c,
+                rtRounds: c.rtRounds && c.rtRounds[0] ? [{
+                    ...c.rtRounds[0],
+                    agents: c.rtRounds[0].agents.map((a, i) => i === 0 ? { ...a, status: 'done' } : i === 1 ? { ...a, status: 'active' } : a),
+                }] : c.rtRounds,
+            })) },
+            // Round 2 spawn (closes Round 1, opens Round 2 agent 0)
+            { t: T_ROUND2_START, run: () => patch(c => ({
+                ...c,
+                rtRounds: [
+                    c.rtRounds && c.rtRounds[0]
+                        ? { ...c.rtRounds[0], status: 'done', agents: c.rtRounds[0].agents.map(a => ({ ...a, status: 'done' })) }
+                        : { round: 1, status: 'done', agents: finalR1Agents },
+                    { round: 2, status: 'active', agents: finalR2Agents.map((a, i) => ({ ...a, status: i === 0 ? 'active' : 'pending' })) },
+                ],
+            })) },
+        ];
+        // Round 2 agents stream
+        for (let i = 1; i < finalR2Agents.length; i++) {
+            const k = i;
+            steps.push({ t: T_ROUND2_START + T_R2_AGENT_STEP * k, run: () => patch(c => ({
+                ...c,
+                rtRounds: c.rtRounds && c.rtRounds[1] ? [c.rtRounds[0], {
+                    ...c.rtRounds[1],
+                    agents: c.rtRounds[1].agents.map((a, j) => j < k ? { ...a, status: 'done' } : j === k ? { ...a, status: 'active' } : a),
+                }] : c.rtRounds,
+            })) });
+        }
+        const r2EndT = T_ROUND2_START + T_R2_AGENT_STEP * finalR2Agents.length;
+        steps.push({ t: r2EndT, run: () => patch(c => ({
+            ...c,
+            rtRounds: c.rtRounds && c.rtRounds[1]
+                ? [c.rtRounds[0], { ...c.rtRounds[1], status: 'done', agents: c.rtRounds[1].agents.map(a => ({ ...a, status: 'done' })) }]
+                : c.rtRounds,
+            rtConsensus: { ...(c.rtConsensus || finalConsensus), status: 'active' },
+        })) });
+        steps.push({ t: r2EndT + 700, run: () => patch(c => ({
+            ...c,
+            rtConsensus: finalConsensus,
+            rtReportStatus: 'active',
+        })) });
+        steps.push({ t: r2EndT + 1600, run: () => patch(c => ({ ...c, rtReportStatus: 'done' })) });
+
+        // Clear any previous timers (e.g. rapid re-confirm) before scheduling
+        rtDemoTimersRef.current.forEach(clearTimeout);
+        rtDemoTimersRef.current = steps.map(s => setTimeout(s.run, s.t));
         sendToAI(text, messages);
         setTimeout(scrollUserMsgToTop, 150);
     }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop]);
