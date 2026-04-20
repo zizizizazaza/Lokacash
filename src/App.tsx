@@ -10,6 +10,7 @@ import Portfolio from './components/Portfolio';
 import RealChatsPage from './components/ChatsPage';
 import RealContactsPage from './components/ContactsPage';
 import DiscoverPage from './components/DiscoverPage';
+import Settings from './components/Settings';
 import ApiLanding from './components/ApiLanding';
 import AuthModal from './components/AuthModal';
 import TxModal from './components/TxModal';
@@ -198,12 +199,12 @@ const App: React.FC = () => {
         </div>
         <div className={`flex-1 overflow-y-auto flex flex-col md:m-0 ${location.pathname.startsWith('/market/startup/') ? 'bg-gray-50 md:bg-gray-100/80' : ''}`}>
           <Routes>
-            <Route path="/" element={<SuperAgentHome isLoggedIn={isLoggedIn} onRequireLogin={() => setShowAuthModal(true)} />} />
+            <Route path="/" element={<SuperAgentHome />} />
             <Route path="/chat" element={<RealChatsPage />} />
             <Route path="/contacts" element={<RealContactsPage />} />
             <Route path="/market/*" element={<Market />} />
             <Route path="/discover" element={<DiscoverPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings" element={<Settings />} />
             <Route path="/api" element={<ApiLanding />} />
             <Route path="/signal-radar" element={<SignalRadarToSuperAgentRedirect />} />
             <Route path="/portfolio" element={<Portfolio isWalletConnected={isLoggedIn} onConnect={() => setShowAuthModal(true)} onLogout={logout} defaultTab="personal" />} />

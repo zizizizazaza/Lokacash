@@ -466,6 +466,11 @@ export function QuoteCard({
 
 // ─── Markdown Rendering ─────────────────────────────────────────
 
+const LINK_CHIP =
+  'inline-flex items-center align-middle gap-0.5 max-w-[min(100%,13rem)] mx-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium leading-tight ' +
+  'text-indigo-700 bg-indigo-50/90 hover:bg-indigo-100 border border-indigo-200/70 shadow-sm ' +
+  'transition-colors cursor-pointer no-underline hover:no-underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50';
+
 /** Citation tag style — small inline badge with source name */
 const CITE_TAG =
   'group/cite relative inline-flex items-center align-middle gap-1 mx-0.5 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight ' +
@@ -500,56 +505,27 @@ function urlDomain(href: string): string {
   }
 }
 
-function decodeHtmlEntities(text: string): string {
-  if (!text) return text;
-  if (typeof document !== 'undefined') {
-    const textarea = document.createElement('textarea');
-    textarea.innerHTML = text;
-    return textarea.value;
-  }
-  return text
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
-}
-
-function isLowValueSourceTitle(title: string): boolean {
-  const t = title.trim().toLowerCase();
-  if (!t) return true;
-  if (t.length <= 2) return true;
-  if (/^news\s*&\s*disclaimer$/.test(t)) return true;
-  if (/^disclaimer$/.test(t)) return true;
-  if (/^untitled$/.test(t)) return true;
-  return false;
-}
-
-function normalizeCitationLabel(label: string, href: string): string {
-  const domain = urlDomain(href).toLowerCase();
-  const cleaned = decodeHtmlEntities(label || '').trim();
-  if (/(^|\.)(x\.com|t\.co|twitter\.com)$/.test(domain)) {
-    if (!cleaned || cleaned.length <= 2 || /^t$/i.test(cleaned) || /^x$/i.test(cleaned)) {
-      return 'X';
-    }
-  }
-  if (!cleaned || cleaned === href || cleaned.length <= 1) {
-    return urlChipLabel(href);
-  }
-  return cleaned;
+function ExternalGlyph() {
+  return (
+    <svg className="w-3 h-3 shrink-0 opacity-75" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+    </svg>
+  );
 }
 
 function InlineCitation({
   href,
   label,
+  variant,
 }: {
   href: string;
   label: string;
+  variant: 'chip' | 'markdown';
 }) {
   const sources = useContext(SourcesContext);
   const safe = safeHttpUrl(href);
   if (!safe) return <span className="text-gray-600">{label}</span>;
-  const show = normalizeCitationLabel(label, safe);
+  const show = label.trim() && label !== href ? label : urlChipLabel(safe);
   const domain = urlDomain(safe);
 
   // Look up source from context for rich tooltip
@@ -563,79 +539,53 @@ function InlineCitation({
     return false;
   });
 
-  const snippetText = matchedSource?.snippet ? decodeHtmlEntities(matchedSource.snippet) : undefined;
-  const decodedTitle = decodeHtmlEntities(matchedSource?.title || '');
-  const titleText = !isLowValueSourceTitle(decodedTitle) ? decodedTitle : show;
-  return (
-    <a
-      href={safe}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={CITE_TAG}
-    >
-      <svg className="w-2.5 h-2.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-      </svg>
-      <span className="truncate max-w-[8rem]">{show}</span>
-      {/* Rich hover tooltip — right-aligned so it never clips at right edge */}
-      <span className="pointer-events-none absolute bottom-full right-0 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
-        {/* Row 1: favicon + domain */}
-        <span className="flex items-center gap-1.5">
-          <img
-            src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
-            alt=""
-            className="w-3.5 h-3.5 rounded-sm shrink-0"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-          <span className="text-[10px] text-gray-400 truncate">{domain}</span>
-        </span>
-        {/* Row 2: title */}
-        <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
-          {titleText}
-        </span>
-        {/* Row 3: snippet */}
-        {snippetText && (
-          <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
-            {snippetText}
+  // Citation tag style: small rounded badge with hover tooltip
+  if (variant === 'markdown') {
+    const snippetText = matchedSource?.snippet;
+    const titleText = matchedSource?.title || show;
+    return (
+      <a
+        href={safe}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={CITE_TAG}
+      >
+        <svg className="w-2.5 h-2.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+        </svg>
+        <span className="truncate max-w-[8rem]">{show}</span>
+        {/* Rich hover tooltip */}
+        <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
+          {/* Row 1: favicon + domain */}
+          <span className="flex items-center gap-1.5">
+            <img
+              src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
+              alt=""
+              className="w-3.5 h-3.5 rounded-sm shrink-0"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <span className="text-[10px] text-gray-400 truncate">{domain}</span>
           </span>
-        )}
-        <span className="absolute top-full right-3 -mt-px border-4 border-transparent border-t-gray-900" />
-      </span>
-    </a>
-  );
-}
-
-/**
- * Strips [label](url) citation links from text, keeping the label as plain text.
- * Returns cleaned text + ordered list of citations for rendering as trailing badges.
- */
-function extractTrailingCitations(text: string): { cleanText: string; citations: Array<{ label: string; url: string }> } {
-  const citations: Array<{ label: string; url: string }> = [];
-  const cleanText = text
-    .replace(/\[([^\]]*)\]\(([^)]+)\)/g, (match, label, rawUrl) => {
-      const url = rawUrl.trim();
-      if (safeHttpUrl(url)) {
-        citations.push({ label: label.trim() || urlChipLabel(url), url });
-        return ''; // remove entirely — badge appears at end, no inline duplication
-      }
-      return match;
-    })
-    .replace(/\s{2,}/g, ' ') // collapse double spaces left by removal
-    .trim();
-  return { cleanText, citations };
-}
-
-/** Like parseLine but moves all inline http citations to the end as trailing badges. */
-function parseLineWithEndCitations(text: string): React.ReactNode {
-  const { cleanText, citations } = extractTrailingCitations(text);
-  if (citations.length === 0) return parseLine(text);
+          {/* Row 2: title */}
+          <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
+            {titleText}
+          </span>
+          {/* Row 3: snippet */}
+          {snippetText && (
+            <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
+              {snippetText}
+            </span>
+          )}
+          <span className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-gray-900" />
+        </span>
+      </a>
+    );
+  }
   return (
-    <>
-      {parseLine(cleanText)}
-      {citations.map((c, i) => (
-        <InlineCitation key={`ec-${i}`} href={c.url} label={c.label} />
-      ))}
-    </>
+    <a href={safe} target="_blank" rel="noopener noreferrer" title={safe} className={LINK_CHIP}>
+      <ExternalGlyph />
+      <span className="truncate">{show}</span>
+    </a>
   );
 }
 
@@ -686,7 +636,7 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
     if (m) {
       const url = m[2].trim();
       if (safeHttpUrl(url)) {
-        out.push(<InlineCitation key={k++} href={url} label={m[1]} />);
+        out.push(<InlineCitation key={k++} href={url} label={m[1]} variant="markdown" />);
         pos += m[0].length;
         continue;
       }
@@ -696,7 +646,7 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
     if (m) {
       const url = m[1];
       if (safeHttpUrl(url)) {
-        out.push(<InlineCitation key={k++} href={url} label={url} />);
+        out.push(<InlineCitation key={k++} href={url} label={url} variant="chip" />);
         pos += m[0].length;
         continue;
       }
@@ -707,7 +657,7 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
       let url = m[1];
       url = url.replace(/[.,;:!?]+$/g, '');
       if (safeHttpUrl(url)) {
-        out.push(<InlineCitation key={k++} href={url} label={url} />);
+        out.push(<InlineCitation key={k++} href={url} label={url} variant="chip" />);
         pos += m[0].length;
         continue;
       }
@@ -768,23 +718,17 @@ function headingSlug(text: string): string {
   return text.replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'h';
 }
 
-/** Strip inline citation links `[label](http…)` from heading text, keeping just the label. */
-function stripCitationsFromHeading(text: string): string {
-  return text.replace(/\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g, (_match, label) => label).replace(/\s{2,}/g, ' ').trim();
-}
-
 export function extractHeadings(text: string, msgIdx?: number): { level: number; text: string; id: string }[] {
   if (!text) return [];
   const prefix = msgIdx != null ? `m${msgIdx}-` : '';
   const headings: { level: number; text: string; id: string }[] = [];
   for (const line of text.split('\n')) {
-    const cleanH = (s: string) => stripCitationsFromHeading(s.replace(/\*\*/g, ''));
     const m3 = line.match(/^###\s+(.+)/);
-    if (m3) { const t = cleanH(m3[1]); headings.push({ level: 3, text: t, id: prefix + headingSlug(t) }); continue; }
+    if (m3) { headings.push({ level: 3, text: m3[1].replace(/\*\*/g, ''), id: prefix + headingSlug(m3[1].replace(/\*\*/g, '')) }); continue; }
     const m2 = line.match(/^##\s+(.+)/);
-    if (m2) { const t = cleanH(m2[1]); headings.push({ level: 2, text: t, id: prefix + headingSlug(t) }); continue; }
+    if (m2) { headings.push({ level: 2, text: m2[1].replace(/\*\*/g, ''), id: prefix + headingSlug(m2[1].replace(/\*\*/g, '')) }); continue; }
     const m1 = line.match(/^#\s+(.+)/);
-    if (m1 && !line.startsWith('##')) { const t = cleanH(m1[1]); headings.push({ level: 1, text: t, id: prefix + headingSlug(t) }); continue; }
+    if (m1 && !line.startsWith('##')) { headings.push({ level: 1, text: m1[1].replace(/\*\*/g, ''), id: prefix + headingSlug(m1[1].replace(/\*\*/g, '')) }); continue; }
   }
   return headings;
 }
@@ -826,10 +770,9 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
     }
     if (/^#{3}\s/.test(line)) {
       const hText = line.replace(/^#{3}\s/, '');
-      const slug = headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
       elements.push(
-        <h3 key={i} id={prefix + slug} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
-          {parseLineWithEndCitations(hText)}
+        <h3 key={i} id={prefix + headingSlug(hText.replace(/\*\*/g, ''))} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
+          {parseLine(hText)}
         </h3>,
       );
       i++;
@@ -837,10 +780,9 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
     }
     if (/^#{2}\s/.test(line)) {
       const hText = line.replace(/^#{2}\s/, '');
-      const slug = headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
       elements.push(
-        <h2 key={i} id={prefix + slug} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
-          {parseLineWithEndCitations(hText)}
+        <h2 key={i} id={prefix + headingSlug(hText.replace(/\*\*/g, ''))} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
+          {parseLine(hText)}
         </h2>,
       );
       i++;
@@ -848,10 +790,9 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
     }
     if (/^#\s/.test(line) && !line.startsWith('##')) {
       const hText = line.replace(/^#\s/, '');
-      const slug = headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
       elements.push(
-        <h1 key={i} id={prefix + slug} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
-          {parseLineWithEndCitations(hText)}
+        <h1 key={i} id={prefix + headingSlug(hText.replace(/\*\*/g, ''))} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
+          {parseLine(hText)}
         </h1>,
       );
       i++;
@@ -896,7 +837,7 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
         >
           {items.map((t, li) => (
             <li key={li} className="text-[14.5px] text-gray-700 leading-[1.7] pl-1.5 marker:text-gray-400 marker:font-medium [&_strong]:text-gray-900">
-              {parseLineWithEndCitations(t)}
+              {parseLine(t)}
             </li>
           ))}
         </ol>,
@@ -914,7 +855,7 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
         <ul key={`ul-${i}`} className="list-disc list-outside ml-5 my-3.5 space-y-2.5 marker:text-indigo-300">
           {items.map((t, li) => (
             <li key={li} className="text-[14.5px] text-gray-700 leading-[1.7] pl-1.5 [&_strong]:font-semibold [&_strong]:text-gray-900">
-              {parseLineWithEndCitations(t)}
+              {parseLine(t)}
             </li>
           ))}
         </ul>,
@@ -948,31 +889,29 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       const bodyRows = tableRows.slice(bodyStart).map(parseRow);
 
       elements.push(
-        <div key={`tbl-${i}`} className="my-4 overflow-visible">
-          <div className="overflow-x-auto [overflow-y:clip] rounded-lg border border-gray-200">
-            <table className="w-full text-[13.5px] text-left">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  {headerCells.map((cell, ci) => (
-                    <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+        <div key={`tbl-${i}`} className="my-4 overflow-x-auto rounded-lg border border-gray-200">
+          <table className="w-full text-[13.5px] text-left">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {headerCells.map((cell, ci) => (
+                  <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+                    {parseLine(cell)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {bodyRows.map((cells, ri) => (
+                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                  {cells.map((cell, ci) => (
+                    <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
                       {parseLine(cell)}
-                    </th>
+                    </td>
                   ))}
                 </tr>
-              </thead>
-              <tbody>
-                {bodyRows.map((cells, ri) => (
-                  <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                    {cells.map((cell, ci) => (
-                      <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
-                        {parseLine(cell)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              ))}
+            </tbody>
+          </table>
         </div>,
       );
       continue;
@@ -980,7 +919,7 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
 
     elements.push(
       <p key={i} className="text-[14.5px] text-gray-700 leading-[1.75] break-words [&_strong]:font-semibold [&_strong]:text-gray-900">
-        {parseLineWithEndCitations(line)}
+        {parseLine(line)}
       </p>,
     );
     i++;

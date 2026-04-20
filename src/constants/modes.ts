@@ -15,12 +15,12 @@ export interface ModeConfig {
 
 export const MODES: ModeConfig[] = [
   {
-    id: 'auto', label: 'Auto', desc: 'Smart auto-routing to the optimal pipeline',
+    id: 'auto', label: 'Auto', desc: 'Direct model chat, no agent analysis',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       React.createElement('path', { d: 'M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z' }))
   },
   {
-    id: 'fast', label: 'Fast', desc: 'Direct response, minimal orchestration',
+    id: 'fast', label: 'Fast', desc: 'Single-agent analysis, fast turnaround',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       React.createElement('path', { d: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z' }))
   },

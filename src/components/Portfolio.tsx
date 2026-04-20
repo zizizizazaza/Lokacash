@@ -454,18 +454,12 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
                       )}
                     </div>
                     <div className="flex flex-col gap-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <h2 className="text-base sm:text-xl font-black text-black tracking-tight truncate">
-                          {`${displayAddress.slice(0, 6)}...${displayAddress.slice(-4)}`}
-                        </h2>
-                        <button onClick={handleCopy} className="text-gray-400 hover:text-black transition-colors" title="Copy Address">
-                          {copied ? (
-                            <svg className="w-4 h-4 text-[#00E676]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                          ) : (
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                          )}
-                        </button>
-                      </div>
+                      <h2 className="text-base sm:text-xl font-black text-black tracking-tight truncate">
+                        {userProfile.name || avatarUserName}
+                      </h2>
+                      {user?.email?.address && (
+                        <p className="text-[11px] text-gray-400 truncate">{user.email.address}</p>
+                      )}
                       <p className="text-[11px] font-medium text-gray-400">Joined Nov {new Date().getFullYear()}</p>
                       {userProfile.bio && <p className="text-[11px] text-gray-600 mt-0.5 line-clamp-2">{userProfile.bio}</p>}
                       {(userProfile.twitter || userProfile.linkedin || userProfile.personalWebsite) && (
@@ -1667,40 +1661,29 @@ const InvitationCodesTopEntry: React.FC<{ variant?: 'topbar' | 'card' }> = ({ va
       <>
         <button
           onClick={() => setOpen(true)}
-          className="w-full relative overflow-hidden rounded-2xl transition-all group"
-          style={{
-            background: 'linear-gradient(135deg, #1a1a1a 0%, #222 50%, #182018 100%)',
-            boxShadow: '0 4px 20px rgba(0,0,0,0.15), 0 2px 12px rgba(0,230,118,0.1)',
-            border: '1px solid rgba(255,255,255,0.06)'
-          }}
+          className="w-full relative overflow-hidden rounded-2xl transition-all group border border-gray-100 bg-white hover:border-green-200 hover:shadow-md"
         >
           {/* Shimmer on hover */}
           <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700"
-            style={{ background: 'linear-gradient(105deg, transparent 35%, rgba(0,230,118,0.07) 50%, transparent 65%)' }} />
-          {/* Green glow blob */}
-          <div className="absolute -top-6 -right-6 w-24 h-24 rounded-full pointer-events-none"
-            style={{ background: 'radial-gradient(circle, rgba(0,230,118,0.35) 0%, transparent 70%)' }} />
+            style={{ background: 'linear-gradient(105deg, transparent 35%, rgba(0,230,118,0.06) 50%, transparent 65%)' }} />
 
           <div className="relative flex items-center justify-between px-4 py-3.5">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-                style={{ background: 'rgba(0,230,118,0.15)', border: '1px solid rgba(0,230,118,0.25)' }}>
-                <svg className="w-4 h-4" style={{ color: '#00E676' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 bg-green-50">
+                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
                 </svg>
               </div>
               <div className="text-left">
-                <p className="text-xs font-black text-white leading-tight">Invite Friends</p>
-                <p className="text-[10px] font-medium" style={{ color: 'rgba(255,255,255,0.4)' }}>Earn rewards for every referral</p>
+                <p className="text-xs font-bold text-gray-700 leading-tight">Invite Friends</p>
+                <p className="text-[10px] font-medium text-gray-400">Earn rewards for every referral</p>
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <span className="text-[10px] font-black px-2.5 py-1 rounded-full"
-                style={{ color: '#00E676', background: 'rgba(0,230,118,0.15)', border: '1px solid rgba(0,230,118,0.3)' }}>
+              <span className="text-[10px] font-bold px-2.5 py-1 rounded-full text-green-600 bg-green-50 border border-green-100">
                 + New Code
               </span>
-              <svg className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform"
-                style={{ color: 'rgba(255,255,255,0.35)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-3.5 h-3.5 text-gray-300 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
               </svg>
             </div>

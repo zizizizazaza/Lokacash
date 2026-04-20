@@ -321,6 +321,12 @@ class ApiClient {
     });
   }
 
+  // ============ Subscription & Quota ============
+
+  async getQuota(): Promise<{ plan: string; roundtable: { used: number; limit: number; period: string }; fast?: { used: number; limit: number; period: string } }> {
+    return this.request('/subscription/quota');
+  }
+
   async uploadFile(file: File) {
     const formData = new FormData();
     formData.append('file', file);

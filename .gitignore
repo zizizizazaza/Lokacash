@@ -80,6 +80,10 @@ dist-ssr
 .agents/skills/user-stories/
 .agents/skills/value-proposition/
 .agents/skills/wwas/
+.agents/skills/lokacash/
+
+# Skills CLI lockfile (local install artifact)
+skills-lock.json
 
 # Private docs
 docs/NEED_FROM_YOU.md
