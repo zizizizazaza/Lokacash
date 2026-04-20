@@ -30,6 +30,7 @@ import stripeRoutes from './routes/stripe.js';
 import voiceRoutes from './routes/voice.js';
 import agentsRoutes from './routes/agents.js';
 import eventsRoutes from './routes/events.js';
+import skillRoutes from './routes/skill.js';
 import path from 'path';
 import prisma from './db.js';
 
@@ -116,6 +117,10 @@ app.use('/api/stripe', stripeRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/agents', agentsRoutes);
 app.use('/api/events', eventsRoutes);
+// Public skill API for external AI agents — no auth (internal testing).
+// Mounted under /api so it inherits the reverse-proxy path in production
+// (e.g. https://nftkashai.online/lokacash/api/skill/v1/*).
+app.use('/api/skill', skillRoutes);
 
 // Static file serving for uploads
 app.use('/api/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
