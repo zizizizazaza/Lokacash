@@ -18,8 +18,8 @@ const plans = [
     {
         id: 'pro' as const,
         name: 'Pro',
-        monthlyPrice: 29,
-        yearlyPrice: 289,
+        monthlyPrice: 39,
+        yearlyPrice: 389,
         accent: 'pro' as const,
         searches: { fast: '200 / mo', roundtable: '50 / mo' },
         extras: ['Unlimited casual chat', 'Priority response speed'],
@@ -28,8 +28,8 @@ const plans = [
     {
         id: 'max' as const,
         name: 'Max',
-        monthlyPrice: 79,
-        yearlyPrice: 787,
+        monthlyPrice: 99,
+        yearlyPrice: 987,
         accent: 'max' as const,
         searches: { fast: '500 / mo', roundtable: '150 / mo' },
         extras: ['Unlimited casual chat', 'Priority response speed', 'Early access to new features'],
