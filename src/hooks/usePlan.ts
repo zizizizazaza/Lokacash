@@ -36,6 +36,10 @@ function fetchPlan(): Promise<PlanTier> {
  * Cached across component mounts; refetches on mount if cache is empty.
  * Listen to `plan-changed` CustomEvent on window to invalidate from elsewhere.
  */
+// DEV OVERRIDE: force a specific tier for previewing UI states.
+// Set to null to use the real plan from the API.
+const DEV_FORCE_PLAN: PlanTier | null = null;
+
 export function usePlan(): PlanTier {
     const [plan, setPlan] = useState<PlanTier>(cached ?? 'free');
 
@@ -55,5 +59,5 @@ export function usePlan(): PlanTier {
         };
     }, []);
 
-    return plan;
+    return DEV_FORCE_PLAN ?? plan;
 }

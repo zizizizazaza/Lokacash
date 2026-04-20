@@ -4155,7 +4155,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             {/* ══ Header: chat title ══ */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
                 <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <PlanUpgradeEntry size="sm" />
+                <PlanUpgradeEntry size="sm" hideIfMax />
             </div>
 
             {/* ══ Content Row ══ */}

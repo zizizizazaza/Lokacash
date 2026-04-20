@@ -194,7 +194,7 @@ const SuperAgentHome: React.FC = () => {
     <div className="flex-1 flex flex-col h-full overflow-y-auto">
       {/* ── Upgrade banner — top-right ── */}
       <div className="hidden md:flex justify-end px-6 pt-4 pb-0">
-        <PlanUpgradeEntry size="md" />
+        <PlanUpgradeEntry size="md" hideIfMax />
       </div>
       {/* ── Hero + Input ── */}
       <div className="hero-zone flex flex-col items-center pt-8 md:pt-16 pb-6 px-4">
