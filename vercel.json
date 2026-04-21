@@ -1,0 +1,21 @@
+{
+  "rewrites": [
+    {
+      "source": "/redirect",
+      "destination": "/redirect.html"
+    },
+    {
+      "source": "/((?!assets|logo|favicon|.well-known).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/.well-known/(.*)",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
+    }
+  ]
+}
