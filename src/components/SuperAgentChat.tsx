@@ -1145,6 +1145,45 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
                 .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
         });
 
+        // ── Auto-fit: scale the whole graph to the container once the layout settles ──
+        const fitToBounds = (padding = 32) => {
+            if (!nodes.length) return;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            nodes.forEach((n: any) => {
+                const r = (getNodeStyle(n).r || 14) + 14; // include label/shadow
+                if (typeof n.x !== 'number' || typeof n.y !== 'number') return;
+                if (n.x - r < minX) minX = n.x - r;
+                if (n.y - r < minY) minY = n.y - r;
+                if (n.x + r > maxX) maxX = n.x + r;
+                if (n.y + r > maxY) maxY = n.y + r;
+            });
+            if (!isFinite(minX) || !isFinite(maxX)) return;
+            const bw = maxX - minX;
+            const bh = maxY - minY;
+            if (bw <= 0 || bh <= 0) return;
+            const scale = Math.min(
+                (width  - padding * 2) / bw,
+                (height - padding * 2) / bh,
+                1, // never zoom in beyond 1x — keep it readable
+            );
+            const tx = width  / 2 - ((minX + maxX) / 2) * scale;
+            const ty = height / 2 - ((minY + maxY) / 2) * scale;
+            svg.transition().duration(500).call(
+                (zoom as any).transform,
+                d3.zoomIdentity.translate(tx, ty).scale(scale),
+            );
+        };
+        // Schedule fit once the force layout has settled. For animated reveals
+        // we wait until the last stage finished fading in, so every node has
+        // settled into position before we measure the bounds.
+        const fitDelay = animate ? (400 + 4 * STEP_MS + 700) : 900;
+        const fitTimer = setTimeout(() => fitToBounds(40), fitDelay);
+        // Also refit if the container resizes
+        const ro = typeof ResizeObserver !== 'undefined' && containerRef.current
+            ? new ResizeObserver(() => fitToBounds(40))
+            : null;
+        if (ro && containerRef.current) ro.observe(containerRef.current);
+
         // ── Staged reveal animation (only when animate=true, i.e. first generation) ──
         // Historical messages open fully visible — no fade-in.
         const MAX_STAGE = 4;
@@ -1176,6 +1215,8 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
 
         return () => {
             timers.forEach(clearTimeout);
+            clearTimeout(fitTimer);
+            if (ro) ro.disconnect();
             simulation.stop();
         };
     }, [data.nodes, data.edges, animate]);
@@ -1579,6 +1620,197 @@ const SourceCard: React.FC<{ source: SearchSource }> = ({ source }) => {
     return (
         <div className={className} title={source.title}>
             {content}
+        </div>
+    );
+};
+
+// ─── TerminalLogPanel (monospace streaming logs) ──────────────
+type TermLine = { ts: string; level: 'info' | 'run' | 'ok' | 'err' | 'hdr'; text: string };
+
+const fmtTs = (ms: number) => {
+    const d = new Date(ms);
+    const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+};
+
+const TerminalLogPanel: React.FC<{ thinking: ThinkingFlow | null }> = ({ thinking }) => {
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const logRef = useRef<TermLine[]>([]);
+    const seenRef = useRef<Set<string>>(new Set());
+    const sessionIdRef = useRef<string>('');
+    const taskIdRef = useRef<string>('');
+    const [, forceTick] = useState(0);
+
+    // Reset log when we switch to a fresh thinking flow
+    useEffect(() => {
+        logRef.current = [];
+        seenRef.current = new Set();
+        sessionIdRef.current = '';
+        taskIdRef.current = '';
+        forceTick(x => x + 1);
+    }, [thinking?.startTime, thinking?.route]);
+
+    // Emit new lines as the thinking flow evolves
+    useEffect(() => {
+        if (!thinking) return;
+        const push = (key: string, level: TermLine['level'], text: string) => {
+            if (seenRef.current.has(key)) return;
+            seenRef.current.add(key);
+            logRef.current.push({ ts: fmtTs(Date.now()), level, text });
+        };
+
+        // Session header (once per flow)
+        if (!sessionIdRef.current) {
+            const rand = Math.random().toString(16).slice(2, 14);
+            sessionIdRef.current = `sess_${rand}`;
+            const startMs = thinking.startTime || Date.now();
+            logRef.current.push({ ts: fmtTs(startMs), level: 'hdr', text: sessionIdRef.current });
+            logRef.current.push({ ts: fmtTs(startMs), level: 'info', text: 'Session initialized' });
+            if (thinking.routedMode) {
+                logRef.current.push({ ts: fmtTs(startMs), level: 'info', text: `Route: ${thinking.routedMode}` });
+            }
+        }
+
+        // Planning message (once)
+        if (thinking.planningMessage) {
+            push(`plan:${thinking.planningMessage}`, 'info', thinking.planningMessage);
+        }
+
+        // Tool trace — detect transitions per index
+        const trace = thinking.toolTrace || [];
+        trace.forEach((t, idx) => {
+            const name = t.displayName || t.tool || 'tool';
+            if (t.status === 'running') {
+                push(`tool:${idx}:run`, 'run', `→ ${name}`);
+            } else if (t.status === 'done') {
+                const d = typeof t.durationSec === 'number' ? ` (${t.durationSec.toFixed(2)}s)` : '';
+                push(`tool:${idx}:ok`, 'ok', `✓ ${name}${d}`);
+            } else if (t.status === 'error') {
+                push(`tool:${idx}:err`, 'err', `✗ ${name} failed`);
+            }
+        });
+
+        // Roundtable milestones
+        if (thinking.routedMode === 'roundtable') {
+            if (thinking.rtPreparationStatus === 'loading') {
+                push('rt:prep:start', 'info', 'Summoning roundtable…');
+            }
+            if (thinking.rtPreparationStatus === 'done') {
+                push('rt:prep:done', 'ok', '✓ Team summoned');
+                if (!taskIdRef.current) {
+                    taskIdRef.current = `task_rt_${Date.now()}`;
+                    push('rt:task', 'info', `Task: ${taskIdRef.current}`);
+                }
+            }
+            const ds = thinking.rtDataSearch || [];
+            ds.forEach((cat: any, idx: number) => {
+                const label = cat?.category || cat?.label || `category ${idx + 1}`;
+                if (cat?.status === 'active' || cat?.status === 'running') {
+                    push(`rt:data:${idx}:run`, 'run', `→ Data search: ${label}`);
+                }
+                if (cat?.status === 'done' || cat?.status === 'completed') {
+                    const n = Array.isArray(cat?.results) ? cat.results.length : (cat?.count ?? 0);
+                    push(`rt:data:${idx}:ok`, 'ok', `✓ ${label}: ${n} items`);
+                }
+            });
+            const rounds = thinking.rtRounds || [];
+            rounds.forEach((r: any, idx: number) => {
+                const n = idx + 1;
+                if (r?.status === 'active' || r?.status === 'running') {
+                    push(`rt:round:${idx}:run`, 'run', `→ Round ${n} debating…`);
+                }
+                if (r?.status === 'done' || r?.status === 'completed') {
+                    const spk = Array.isArray(r?.speeches) ? r.speeches.length : (r?.count ?? 0);
+                    push(`rt:round:${idx}:ok`, 'ok', `✓ Round ${n} completed: ${spk} speeches`);
+                }
+            });
+            if (thinking.rtConsensus) {
+                push('rt:consensus', 'ok', '✓ Consensus reached');
+            }
+            if (thinking.rtReportStatus === 'active') {
+                push('rt:report:start', 'run', '→ Generating report…');
+            }
+            if (thinking.rtReportStatus === 'done') {
+                push('rt:report:done', 'ok', '✓ Report completed');
+            }
+        }
+
+        // Signal research log (last30days)
+        if (thinking.signalResearchLog) {
+            const raw = thinking.signalResearchLog.split('\n').map(s => s.trim()).filter(Boolean);
+            raw.forEach((l, idx) => push(`sig:${idx}:${l.slice(0, 40)}`, 'info', l));
+        }
+
+        forceTick(x => x + 1);
+    }, [thinking, thinking?.toolTrace, thinking?.signalResearchLog, thinking?.planningMessage,
+        thinking?.rtPreparationStatus, thinking?.rtDataSearch, thinking?.rtRounds,
+        thinking?.rtConsensus, thinking?.rtReportStatus]);
+
+    // Auto-scroll to bottom as new lines arrive
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, [logRef.current.length]);
+
+    if (!thinking) {
+        return <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400 bg-[#0f1419]">No active session</div>;
+    }
+
+    const colorFor = (lv: TermLine['level']) =>
+        lv === 'run' ? 'text-sky-400' :
+        lv === 'ok'  ? 'text-emerald-400' :
+        lv === 'err' ? 'text-red-400' :
+        lv === 'hdr' ? 'text-amber-300' :
+        'text-gray-400';
+
+    const lines = logRef.current;
+
+    return (
+        <div className="flex-1 flex flex-col bg-[#0b0f14] overflow-hidden">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[11px] leading-[1.6]">
+                {lines.length === 0 ? (
+                    <div className="text-gray-600 italic">Waiting for activity…</div>
+                ) : (
+                    lines.map((l, i) => (
+                        <div key={i} className="flex gap-2 items-baseline whitespace-pre-wrap break-all">
+                            <span className="shrink-0 text-gray-600 tabular-nums">{l.ts}</span>
+                            <span className={`${colorFor(l.level)} ${l.level === 'hdr' ? 'font-semibold' : ''}`}>{l.text}</span>
+                        </div>
+                    ))
+                )}
+                {thinking.isActive && (
+                    <div className="flex gap-2 items-center mt-1">
+                        <span className="text-gray-600 tabular-nums">{fmtTs(Date.now()).slice(0, 8)}</span>
+                        <span className="inline-block w-1.5 h-3 bg-emerald-400 animate-pulse" />
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+// ─── RoundtableGraphInline (collapsible card in chat column) ────────
+const RoundtableGraphInline: React.FC<{
+    isLive: boolean;
+    defaultOpen?: boolean;
+}> = ({ isLive, defaultOpen = true }) => {
+    const [open, setOpen] = useState(defaultOpen);
+    return (
+        <div className="mb-3 rounded-xl border border-gray-200 bg-white overflow-hidden">
+            <button
+                onClick={() => setOpen(o => !o)}
+                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 transition-colors"
+            >
+                <svg className={`w-3.5 h-3.5 text-gray-400 shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                <svg className="w-3.5 h-3.5 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M4 6h16M4 10h16M4 14h10M4 18h10" /></svg>
+                <span className="text-[12px] font-semibold text-gray-700">Roundtable Graph</span>
+                {isLive && <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-blue-500"><span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />live</span>}
+            </button>
+            {open && (
+                <div className="relative border-t border-gray-100" style={{ height: 520 }}>
+                    <KnowledgeGraphView data={buildKnowledgeGraph()} animate={isLive} />
+                </div>
+            )}
         </div>
     );
 };
@@ -2341,7 +2573,7 @@ const ThinkingProcessSidePanel: React.FC<{
         return (
             <div>
                 <button onClick={() => toggleSection('round1')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
-                    <StepBadge step={1} done={allDone} />
+                    <StepBadge step={3} done={allDone} />
                     <div className="flex-1 min-w-0">
                         <span className="text-[14px] font-bold text-gray-900">Round 1 · Thesis Formation</span>
                         <p className="text-[10px] text-gray-400 mt-0.5">Generating analytical conclusions</p>
@@ -2413,7 +2645,7 @@ const ThinkingProcessSidePanel: React.FC<{
         return (
             <div>
                 <button onClick={() => toggleSection('round2')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
-                    <StepBadge step={2} done={allDone} />
+                    <StepBadge step={4} done={allDone} />
                     <div className="flex-1 min-w-0">
                         <span className="text-[14px] font-bold text-gray-900">Round 2 · Cross Validation</span>
                         <p className="text-[10px] text-gray-400 mt-0.5">Agents debate, challenge, and re-evaluate</p>
@@ -2498,7 +2730,7 @@ const ThinkingProcessSidePanel: React.FC<{
         return (
             <div>
                 <button onClick={() => toggleSection('consensus')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
-                    <StepBadge step={3} done={consensus.status === 'done'} />
+                    <StepBadge step={5} done={consensus.status === 'done'} />
                     <span className="text-[14px] font-bold text-gray-900 flex-1">Consensus & Report</span>
                     <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
                 </button>
@@ -2573,27 +2805,12 @@ const ThinkingProcessSidePanel: React.FC<{
         const hasCons = !!thinking.rtConsensus;
 
         return (
-            <div className="space-y-6">
-                {/* ── Section I: Preparation ── */}
-                <div>
-                    <h3 className="text-[13px] font-extrabold text-gray-800 tracking-wide mb-4">Preparation</h3>
-                    <div className="space-y-5 ml-1">
-                        <RtPhasePreparation />
-                        <RtPhaseDataSearch />
-                    </div>
-                </div>
-
-                {/* ── Section II: Roundtable ── */}
-                {(hasR1 || hasR2 || hasCons) && (
-                    <div>
-                        <h3 className="text-[13px] font-extrabold text-gray-800 tracking-wide mb-4">Roundtable</h3>
-                        <div className="space-y-5 ml-1">
-                            {hasR1 && <RtPhaseRound1 />}
-                            {hasR2 && <RtPhaseRound2 />}
-                            {hasCons && <RtPhaseConsensus />}
-                        </div>
-                    </div>
-                )}
+            <div className="space-y-5 ml-1">
+                <RtPhasePreparation />
+                <RtPhaseDataSearch />
+                {hasR1 && <RtPhaseRound1 />}
+                {hasR2 && <RtPhaseRound2 />}
+                {hasCons && <RtPhaseConsensus />}
             </div>
         );
     };
@@ -2908,7 +3125,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [showGraphPanel, setShowGraphPanel] = useState(false);
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
-    const [panelTab, setPanelTab] = useState<'process' | 'graph'>('process');
+    const [panelTab, setPanelTab] = useState<'process' | 'terminal'>('process');
+    // Terminal dock (inside Process panel) — collapsible bottom drawer
+    const [terminalDockOpen, setTerminalDockOpen] = useState(true);
     const [rtPanelExpanded, setRtPanelExpanded] = useState(false);
     const [summonPhase, setSummonPhase] = useState<'idle' | 'loading' | 'narrating' | 'selecting'>('idle');
     const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
@@ -3904,7 +4123,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setShowThinkingPanel(true);
         setShowGraphPanel(false);
         setSourcePanelData(null);
-        setPanelTab('graph');
+        setPanelTab('process');
         // Store roundtable context in thinking process (with demo data for UI preview)
         const agentIds = [...selectedSummonIds];
         const nextMsgIdx = messages.length; // assistant message will be at this index
@@ -4258,36 +4477,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         }}
                                                     />
                                                 )}
-                                                {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && !msg.isStreaming && (htmlReports[i] || htmlGenerating[i]) && (
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <div className="flex items-center gap-1.5">
-                                                        {(htmlReports[i] || htmlGenerating[i]) && (
-                                                            <div className="flex items-center gap-0.5 p-0.5 bg-gray-100 rounded-lg">
-                                                                <button
-                                                                    onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
-                                                                    className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                                                                        (msgViewMode[i] || 'docs') === 'docs'
-                                                                            ? 'bg-white text-gray-900 shadow-sm'
-                                                                            : 'text-gray-500 hover:text-gray-700'
-                                                                    }`}
-                                                                >
-                                                                    Docs
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
-                                                                    className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                                                                        msgViewMode[i] === 'web'
-                                                                            ? 'bg-white text-gray-900 shadow-sm'
-                                                                            : 'text-gray-500 hover:text-gray-700'
-                                                                    }`}
-                                                                >
-                                                                    Web
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        </div>
-                                                    </div>
+                                                {/* Inline Roundtable Graph — collapsible, per message */}
+                                                {thinkingProcesses[i]?.routedMode === 'roundtable'
+                                                  && (((thinkingProcesses[i]!.rtRounds?.length ?? 0) > 0)
+                                                      || thinkingProcesses[i]!.rtPreparationStatus === 'done'
+                                                      || (thinkingProcesses[i]!.rtDataSearch?.length ?? 0) > 0) && (
+                                                    <RoundtableGraphInline
+                                                        isLive={!!thinkingProcesses[i]?.isActive}
+                                                        defaultOpen={i === messages.length - 1}
+                                                    />
                                                 )}
                                                 {msg.content === '__cancelled__' ? (() => {
                                                     const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
@@ -4420,6 +4618,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                 {/* Sources bar — click to open side panel */}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
+                                                        {/* Docs / Web view toggle — relocated here from above the answer */}
+                                                        {msg.role === 'assistant' && (htmlReports[i] || htmlGenerating[i]) && (
+                                                            <>
+                                                                <div className="flex items-center gap-0.5 p-0.5 bg-gray-100 rounded-lg mr-1">
+                                                                    <button
+                                                                        onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
+                                                                        className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
+                                                                            (msgViewMode[i] || 'docs') === 'docs'
+                                                                                ? 'bg-white text-gray-900 shadow-sm'
+                                                                                : 'text-gray-500 hover:text-gray-700'
+                                                                        }`}
+                                                                    >
+                                                                        Docs
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
+                                                                        className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
+                                                                            msgViewMode[i] === 'web'
+                                                                                ? 'bg-white text-gray-900 shadow-sm'
+                                                                                : 'text-gray-500 hover:text-gray-700'
+                                                                        }`}
+                                                                    >
+                                                                        Web
+                                                                    </button>
+                                                                </div>
+                                                                <div className="w-px h-4 bg-gray-200 mx-1" />
+                                                            </>
+                                                        )}
                                                         {/* Copy — hide for cancelled */}
                                                         {msg.content !== '__cancelled__' && (
                                                             <button
@@ -4924,55 +5150,43 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 {(() => { if (showThinkingPanel) console.log('[RT-DEBUG] panel check', { chatMode, routedMode: currentThinking?.routedMode, rtPanelExpanded, activeGraphMsgIdx }); return null; })()}
                 {showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && !rtPanelExpanded && (
                     <div className="w-[480px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
-                        {/* Tab bar */}
+                        {/* Header */}
                         <div className="flex items-center px-4 py-2.5 border-b border-gray-100 gap-1 shrink-0">
-                            <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                                <button onClick={() => setPanelTab('process')}
-                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
-                                        panelTab === 'process' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                                    }`}>Process</button>
-                                <button onClick={() => setPanelTab('graph')}
-                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
-                                        panelTab === 'graph' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                                    }`}>Roundtable Graph</button>
-                            </div>
+                            <span className="text-[12px] font-bold text-gray-800 tracking-wide">Process</span>
                             <div className="flex-1" />
-                            <button onClick={() => setRtPanelExpanded(true)}
-                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
-                                title="Expand">
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
-                            </button>
                             <button onClick={() => setShowThinkingPanel(false)}
                                 className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
                         </div>
-                        {/* Content */}
-                        {panelTab === 'process' ? (
-                            currentThinking ? (
-                                <div className="flex-1 overflow-hidden">
-                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
-                                </div>
+                        {/* Process body */}
+                        <div className="flex-1 min-h-0 overflow-hidden">
+                            {currentThinking ? (
+                                <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
                             ) : (
-                                <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
-                            )
-                        ) : (
-                            <div className="flex-1 overflow-hidden">
-                                <RoundtableView data={currentRoundtableData}
-                                    isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
-                                    isLive={isStreaming}
-                                    hideHeader
-                                    summonPhase={summonPhase}
-                                    selectedSummonIds={selectedSummonIds}
-                                    onSummonToggle={(id) => setSelectedSummonIds(prev => {
-                                        const next = new Set(prev);
-                                        next.has(id) ? next.delete(id) : next.add(id);
-                                        return next;
-                                    })}
-                                    onSummonConfirm={handleSummonConfirm}
-                                />
-                            </div>
-                        )}
+                                <div className="h-full flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
+                            )}
+                        </div>
+                        {/* Terminal dock (bottom, collapsible) */}
+                        <div className={`shrink-0 border-t border-gray-200 flex flex-col ${terminalDockOpen ? '' : ''}`} style={{ height: terminalDockOpen ? 140 : 28 }}>
+                            <button
+                                onClick={() => setTerminalDockOpen(o => !o)}
+                                className="flex items-center gap-2 px-3 h-7 shrink-0 bg-[#0b0f14] text-gray-300 hover:bg-[#111821] transition-colors"
+                                title={terminalDockOpen ? 'Hide activity log' : 'Show activity log'}
+                            >
+                                <svg className={`w-3 h-3 text-gray-500 transition-transform ${terminalDockOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 9l6 6 6-6" /></svg>
+                                <svg className="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" /></svg>
+                                <span className="text-[11px] font-semibold text-gray-200 tracking-wide">Activity Log</span>
+                                {currentThinking?.isActive && terminalDockOpen && (
+                                    <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-emerald-400"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />live</span>
+                                )}
+                            </button>
+                            {terminalDockOpen && (
+                                <div className="flex-1 min-h-0 flex flex-col">
+                                    <TerminalLogPanel thinking={currentThinking} />
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
 
@@ -4993,39 +5207,37 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
                         </div>
-                        {/* Split: Process (1/3) + Graph (2/3) */}
-                        <div className="flex flex-1 min-h-0">
-                            <div className="w-1/3 border-r border-gray-100 overflow-hidden flex flex-col">
-                                <div className="px-4 py-3 border-b border-gray-50 shrink-0">
-                                    <span className="text-[13px] font-bold text-gray-800">Process</span>
-                                </div>
+                        {/* Full-width Process with Terminal docked at bottom */}
+                        <div className="flex flex-col flex-1 min-h-0">
+                            <div className="px-4 py-3 border-b border-gray-50 shrink-0">
+                                <span className="text-[13px] font-bold text-gray-800">Process</span>
+                            </div>
+                            <div className="flex-1 min-h-0 overflow-hidden">
                                 {currentThinking ? (
-                                    <div className="flex-1 overflow-hidden">
-                                        <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }} hideHeader chatMode={chatMode} />
-                                    </div>
+                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }} hideHeader chatMode={chatMode} />
                                 ) : (
-                                    <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
+                                    <div className="h-full flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
                                 )}
                             </div>
-                            <div className="w-2/3 overflow-hidden flex flex-col">
-                                <div className="px-4 py-3 border-b border-gray-50 shrink-0">
-                                    <span className="text-[13px] font-bold text-gray-800">Roundtable Graph</span>
-                                </div>
-                                <div className="flex-1 overflow-hidden">
-                                    <RoundtableView data={currentRoundtableData}
-                                        isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
-                                        isLive={isStreaming}
-                                        hideHeader
-                                        summonPhase={summonPhase}
-                                        selectedSummonIds={selectedSummonIds}
-                                        onSummonToggle={(id) => setSelectedSummonIds(prev => {
-                                            const next = new Set(prev);
-                                            next.has(id) ? next.delete(id) : next.add(id);
-                                            return next;
-                                        })}
-                                        onSummonConfirm={handleSummonConfirm}
-                                    />
-                                </div>
+                            {/* Terminal dock */}
+                            <div className="shrink-0 border-t border-gray-200 flex flex-col" style={{ height: terminalDockOpen ? 160 : 28 }}>
+                                <button
+                                    onClick={() => setTerminalDockOpen(o => !o)}
+                                    className="flex items-center gap-2 px-3 h-7 shrink-0 bg-[#0b0f14] text-gray-300 hover:bg-[#111821] transition-colors"
+                                    title={terminalDockOpen ? 'Hide activity log' : 'Show activity log'}
+                                >
+                                    <svg className={`w-3 h-3 text-gray-500 transition-transform ${terminalDockOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 9l6 6 6-6" /></svg>
+                                    <svg className="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" /></svg>
+                                    <span className="text-[11px] font-semibold text-gray-200 tracking-wide">Activity Log</span>
+                                    {currentThinking?.isActive && terminalDockOpen && (
+                                        <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-emerald-400"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />live</span>
+                                    )}
+                                </button>
+                                {terminalDockOpen && (
+                                    <div className="flex-1 min-h-0 flex flex-col">
+                                        <TerminalLogPanel thinking={currentThinking} />
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
