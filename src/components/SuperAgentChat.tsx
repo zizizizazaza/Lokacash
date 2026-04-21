@@ -17,6 +17,15 @@ function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
 }
 
+/** Space above the bottom of the chat column reserved for the floating input bar (padding + field + controls). TOC must stay above this. */
+const TOC_BOTTOM_RESERVE_PX = 148;
+
+/** Minimum TOC panel height so the list isn't collapsed to ~3 rows before layout stabilizes */
+const TOC_MIN_VIEWPORT_PX = 220;
+
+/** Standard sticky offset for the left TOC rail. */
+const TOC_STICKY_TOP_PX = 24;
+
 // ─── Types and Interfaces ────────────────────────────────────
 
 const InputIcons = {
@@ -105,6 +114,10 @@ interface Message {
     metadata?: string | null;
     /** Verified source URLs extracted from research data */
     sources?: SearchSource[];
+    /** Set when the backend had to degrade this turn to lite-mode (no-agent)
+     * because the user ran out of Fast and Roundtable quota. Renders an
+     * inline upgrade hint above the response. */
+    liteMode?: { hint: string } | null;
 }
 
 interface SearchSource {
@@ -3225,23 +3238,42 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [messages, setMessages] = useState<Message[]>(() => {
         try {
             const raw = sessionStorage.getItem(SA_PENDING_KEY);
-            if (!raw) return [];
-            const p = JSON.parse(raw) as {
-                sessionId?: string;
-                userContent?: string;
-                streaming?: boolean;
-            };
-            const sid = sessionStorage.getItem(SA_SID_KEY);
-            if (!p?.streaming || !p.userContent || p.sessionId !== sid) return [];
-            return [
-                { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
-                {
-                    role: 'assistant',
-                    content: '',
-                    timestamp: new Date().toLocaleTimeString(),
-                    isStreaming: true,
-                },
-            ];
+            if (raw) {
+                const p = JSON.parse(raw) as {
+                    sessionId?: string;
+                    userContent?: string;
+                    streaming?: boolean;
+                };
+                // When viewing an existing session, the "effective" sid is initialSessionId.
+                // Falling back to SA_SID_KEY is only correct when starting a brand-new chat.
+                const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+                if (p?.streaming && p.userContent && p.sessionId === effectiveSid) {
+                    return [
+                        { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
+                        {
+                            role: 'assistant',
+                            content: '',
+                            timestamp: new Date().toLocaleTimeString(),
+                            isStreaming: true,
+                        },
+                    ];
+                }
+            }
+            // Guest mode: restore chat history from localStorage so their
+            // conversation survives reloads. Only when there's no in-flight
+            // session and the caller didn't pass a fresh initialMessage.
+            if (!initialMessage && !api.isAuthenticated) {
+                const guestRaw = localStorage.getItem('loka_guest_chat_history');
+                if (guestRaw) {
+                    const parsed = JSON.parse(guestRaw) as { messages?: Message[]; savedAt?: number };
+                    const savedAt = parsed?.savedAt || 0;
+                    const SEVEN_DAYS_MS = 7 * 86400_000;
+                    if (Array.isArray(parsed?.messages) && Date.now() - savedAt < SEVEN_DAYS_MS) {
+                        return parsed.messages;
+                    }
+                }
+            }
+            return [];
         } catch {
             return [];
         }
@@ -3253,13 +3285,29 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const raw = sessionStorage.getItem(SA_PENDING_KEY);
             if (!raw) return false;
             const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
-            const sid = sessionStorage.getItem(SA_SID_KEY);
-            return !!(p?.streaming && p.sessionId === sid);
+            const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+            return !!(p?.streaming && p.sessionId === effectiveSid);
         } catch {
             return false;
         }
     });
     const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
+
+    // Guest-only: persist chat history to localStorage so conversations
+    // survive reloads. Authenticated users are already persisted in the DB.
+    useEffect(() => {
+        if (api.isAuthenticated) return;
+        if (!messages.length) return;
+        try {
+            localStorage.setItem('loka_guest_chat_history', JSON.stringify({
+                messages,
+                savedAt: Date.now(),
+            }));
+        } catch {
+            /* localStorage full or disabled — silently degrade */
+        }
+    }, [messages]);
+
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
@@ -3272,7 +3320,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 const raw = sessionStorage.getItem(SA_PENDING_KEY);
                 if (!raw) return false;
                 const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
-                return !!(p?.streaming && p.sessionId === sessionStorage.getItem(SA_SID_KEY));
+                const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+                return !!(p?.streaming && p.sessionId === effectiveSid);
             } catch {
                 return false;
             }
@@ -3411,20 +3460,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
-        // Match a bold/heading title containing question/watch/关注/问题 keywords,
-        // then a bullet list. Allow optional trailing tags/text after the bullet list.
+        // Match a bold/heading title that clearly announces a follow-up / suggested-question
+        // section, followed by a bullet list that is the LAST thing in the response.
+        // The `\s*$` anchor prevents over-matching headings that merely mention "问题"
+        // in the middle of the analysis (which used to swallow analytical bullets into
+        // the "相关问题" UI).
         // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
-        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:question|watch|关注|问题|考虑|思考)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)/i;
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:follow.?up|questions?\s+to\s+watch|值得[^\n]{0,6}(?:关注|思考)|需要[^\n]{0,6}关注|持续关注|后续[^\n]{0,3}问题|延伸[^\n]{0,3}问题|关注[^\n]{0,3}问题|follow-?up\s+questions?)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
         const match = content.match(pattern);
         if (match) {
-            const questions = match[1].split('\n')
+            const rawLines = match[1].split('\n')
                 .map(l => l.trim())
                 .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
                 .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').replace(/\*\*/g, '').trim())
                 .filter(Boolean);
-            if (questions.length > 0) {
-                // Strip everything from the questions heading onwards
-                return { body: content.slice(0, match.index).trimEnd(), questions };
+            // Extra safety: a true follow-up section should contain questions — require
+            // at least one item to look interrogative. This blocks analytical bullets
+            // (declarative statements) from being hijacked.
+            const looksLikeQuestion = (s: string) => /[?？]/.test(s) || /(吗|呢|是否|如何|怎样|为何|何时|是不是|要不要|还是)\s*[?？]?\s*$/.test(s) || /^(should|can|will|why|how|what|when|where|who|is|are|do|does)\b/i.test(s);
+            const hasAnyQuestion = rawLines.some(looksLikeQuestion);
+            if (rawLines.length > 0 && hasAnyQuestion) {
+                return { body: content.slice(0, match.index).trimEnd(), questions: rawLines };
             }
         }
         return { body: content, questions: [] };
@@ -3678,8 +3734,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
-        const onRouted = (data: { sessionId: string; mode: string }) => {
-            saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, match: data.sessionId === sessionId });
+        const onRouted = (data: { sessionId: string; mode: string; actualTier?: string; requested?: string; autoResolved?: string | null; degraded?: boolean }) => {
+            saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, actual: data?.actualTier, auto: data?.autoResolved, degraded: data?.degraded, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             setThinkingProcesses(prev => {
                 const msgIdx = activeMsgIdxRef.current;
@@ -3688,6 +3744,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 // Don't overwrite roundtable routedMode set by handleSummonConfirm
                 if (flow.routedMode === 'roundtable') return prev;
                 return { ...prev, [msgIdx]: { ...flow, routedMode: data.mode } };
+            });
+        };
+
+        const onQuotaDegraded = (data: { sessionId: string; reason: string; hint: string }) => {
+            saLog('← agent:chat:quota_degraded', { sessionId: data?.sessionId, reason: data?.reason });
+            if (data.sessionId !== sessionId) return;
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], liteMode: { hint: data.hint } };
+                return updated;
             });
         };
 
@@ -3791,7 +3859,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
-        const onError = (data: { sessionId: string; error: string }) => {
+        const onError = (data: { sessionId: string; error: string; mode?: string; resetAt?: string; hint?: string }) => {
             saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             try {
@@ -3799,11 +3867,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             } catch {
                 /* ignore */
             }
+            // Quota exhaustion gets a friendlier, actionable message
+            let displayMsg = data.error;
+            if (data.error === 'quota_exhausted') {
+                const modeLabel = data.mode === 'roundtable' ? 'Roundtable' : 'Fast';
+                const resetTxt = data.resetAt ? ` Resets ${new Date(data.resetAt).toLocaleString()}.` : '';
+                displayMsg = `Your ${modeLabel} quota is exhausted.${resetTxt} Switch to Auto mode (always free) or upgrade your plan.`;
+                // Invalidate cached plan/quota so Settings + mode selector refresh
+                try { window.dispatchEvent(new CustomEvent('plan-changed')); } catch { /* ignore */ }
+            } else if (data.error === 'guest_quota_exhausted' || data.error === 'guest_ip_quota_exhausted') {
+                const resetTxt = data.resetAt ? ` Resets ${new Date(data.resetAt).toLocaleString()}.` : '';
+                displayMsg = `You've used all your free Auto turns for now.${resetTxt} Sign in to get more Auto turns plus Fast and Roundtable modes.`;
+                try { window.dispatchEvent(new Event('show-auth-modal')); } catch { /* ignore */ }
+            } else if (data.error === 'login_required') {
+                displayMsg = 'Sign in to unlock Fast and Roundtable modes. Auto mode is always free.';
+                try { window.dispatchEvent(new Event('show-auth-modal')); } catch { /* ignore */ }
+            }
             setMessages(prev => {
                 const updated = [...prev];
                 const msgIdx = activeMsgIdxRef.current;
                 if (!updated[msgIdx]) return prev;
-                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + data.error, isStreaming: false };
+                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + displayMsg, isStreaming: false };
                 return updated;
             });
             setIsStreaming(false);
@@ -3906,6 +3990,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
+        socket.on('agent:chat:quota_degraded', onQuotaDegraded);
         socket.on('agent:chat:started', onStarted);
         socket.on('agent:chat:module', onModule);
         socket.on('agent:chat:progress', onProgress);
@@ -3922,6 +4007,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         return () => {
             socket.off('agent:chat:routing', onRouting);
             socket.off('agent:chat:routed', onRouted);
+            socket.off('agent:chat:quota_degraded', onQuotaDegraded);
             socket.off('agent:chat:started', onStarted);
             socket.off('agent:chat:module', onModule);
             socket.off('agent:chat:progress', onProgress);
@@ -3949,28 +4035,57 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     ok?: boolean;
                     isRunning?: boolean;
                     steps?: unknown[];
+                    modules?: Array<{ moduleType: string; status: string; data?: any }>;
+                    mode?: string;
                     report?: string;
                     status?: string;
                 }) => {
-                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, isRunning: res?.isRunning, status: res?.status });
+                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, modulesLen: Array.isArray(res?.modules) ? res.modules.length : 0, mode: res?.mode, isRunning: res?.isRunning, status: res?.status });
+                    // Restore roundtable chatMode so the right-side panel picks the correct variant
+                    // when a client returns mid-stream to a roundtable session.
+                    if (res?.mode === 'roundtable' && chatMode !== 'roundtable') {
+                        setChatMode('roundtable');
+                    }
 
                     const stepsLen = Array.isArray(res?.steps) ? res.steps.length : 0;
+                    const modulesLen = Array.isArray(res?.modules) ? res.modules.length : 0;
                     const hasSteps = stepsLen > 0;
+                    const hasModules = modulesLen > 0;
 
-                    if (res?.ok && hasSteps) {
+                    if (res?.ok && (hasSteps || hasModules)) {
                         const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
-                        const trace = buildTraceFromSteps(res.steps!);
-                        const planning = extractPlanningMessage(res.steps!);
+                        const trace = hasSteps ? buildTraceFromSteps(res.steps!) : undefined;
+                        const planning = hasSteps ? extractPlanningMessage(res.steps!) : undefined;
+                        // Reduce the raw module event stream into final per-type module
+                        // state so the Thinking Process panel can render after A→B→A.
+                        const rebuiltModules: ThinkingModule[] = [];
+                        if (hasModules) {
+                            const byType = new Map<string, ThinkingModule>();
+                            for (const ev of res.modules!) {
+                                const existing = byType.get(ev.moduleType);
+                                const merged: ThinkingModule = {
+                                    type: ev.moduleType as any,
+                                    status: ev.status as any,
+                                    data: ev.data
+                                        ? { ...(existing?.data || {}), ...ev.data }
+                                        : existing?.data,
+                                };
+                                byType.set(ev.moduleType, merged);
+                            }
+                            for (const mod of byType.values()) rebuiltModules.push(mod);
+                        }
                         setThinkingProcesses(prev => ({
                             ...prev,
                             [msgIdx]: {
                                 ...(prev[msgIdx] || {
                                     modules: [],
                                     isActive: !!res.isRunning,
-                                    route: 'Investment Analyst',
+                                    route: res?.mode === 'roundtable' ? 'Roundtable' : 'Investment Analyst',
                                 }),
-                                toolTrace: trace,
-                                planningMessage: planning,
+                                ...(hasModules ? { modules: rebuiltModules } : {}),
+                                ...(trace !== undefined ? { toolTrace: trace } : {}),
+                                ...(planning !== undefined ? { planningMessage: planning } : {}),
+                                ...(res?.mode === 'roundtable' ? { routedMode: 'roundtable' } : {}),
                                 isActive: !!res.isRunning,
                             },
                         }));
@@ -4182,8 +4297,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         if (initialSessionId) {
             api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
                 if (history && history.length > 0) {
-                    setMessages(
-                        history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
+                    const transformedHistory: Message[] = history.map(
+                        (m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
                             let sources: SearchSource[] | undefined;
                             if (m.metadata) {
                                 try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
@@ -4196,8 +4311,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 metadata: m.metadata ?? null,
                                 sources,
                             };
-                        }),
+                        },
                     );
+                    // If the last persisted message is a user msg or an empty assistant msg,
+                    // the stream is likely still in-flight — append a placeholder so socket
+                    // replay / live events have a target to fill, rather than returning early
+                    // and leaving the chat blank.
+                    const lastHistoryMsg = transformedHistory[transformedHistory.length - 1];
+                    const streamStillActive = (
+                        lastHistoryMsg.role === 'user' ||
+                        (lastHistoryMsg.role === 'assistant' && !lastHistoryMsg.content)
+                    );
+                    if (streamStillActive) {
+                        setMessages([
+                            ...transformedHistory,
+                            {
+                                role: 'assistant',
+                                content: '',
+                                timestamp: new Date().toLocaleTimeString(),
+                                isStreaming: true,
+                            },
+                        ]);
+                    } else {
+                        setMessages(transformedHistory);
+                    }
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
@@ -4242,7 +4379,37 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             }
                         },
                     );
-                    setThinkingProcesses(restoredThinking);
+                    // Merge instead of replace: preserves the active-stream placeholder's
+                    // thinkingProcesses entry (set by the initial-send useEffect) when we
+                    // return to a session whose stream is still mid-flight.
+                    const placeholderIdx = transformedHistory.length;
+                    // Recover start time from the last user message's createdAt so the
+                    // elapsed counter ("12s") keeps showing across A→B→A switches. The
+                    // socket-side `startTime` local isn't persisted to DB, so this is the
+                    // best available proxy (off by at most the routing latency).
+                    const lastUserCreatedAt = (() => {
+                        for (let k = history.length - 1; k >= 0; k--) {
+                            if (history[k]?.role === 'user' && history[k]?.createdAt) {
+                                const t = Date.parse(history[k].createdAt);
+                                if (!Number.isNaN(t)) return t;
+                            }
+                        }
+                        return undefined;
+                    })();
+                    setThinkingProcesses(prev => {
+                        const merged: Record<number, ThinkingFlow> = { ...prev, ...restoredThinking };
+                        if (streamStillActive) {
+                            const existing = merged[placeholderIdx];
+                            merged[placeholderIdx] = {
+                                modules: existing?.modules ?? [],
+                                route: existing?.route || 'Investment Analyst',
+                                ...existing,
+                                isActive: true,
+                                startTime: existing?.startTime ?? lastUserCreatedAt ?? Date.now(),
+                            };
+                        }
+                        return merged;
+                    });
                     // Restore chatMode to roundtable if history contains roundtable data
                     if (hasRoundtableHistory) {
                         setChatMode('roundtable');
@@ -4257,7 +4424,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
                         setMsgViewMode(prev => ({ ...prev, ...restoredViewModes }));
                     }
-                    activeMsgIdxRef.current = history.length - 1;
+                    // If we appended a streaming placeholder, point activeMsgIdxRef at it
+                    // so incoming socket chunks write into the placeholder, not the last user msg.
+                    activeMsgIdxRef.current = streamStillActive ? transformedHistory.length : transformedHistory.length - 1;
                 }
             }).catch(console.error);
         }
@@ -4276,6 +4445,25 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         if (initialSessionId) {
             hasSentInitial.current = true;
             saLog('initial: skipped auto-send because initialSessionId is provided (history load)');
+            // If the history restore appended a streaming placeholder (A→B→A case
+            // where the previous session's stream is still mid-flight), point
+            // activeMsgIdxRef at it so modules / tool_trace events that arrive
+            // before history fetch resolves land on the correct slot. Without this,
+            // events write to index -1 and are lost, leaving the Thinking panel empty.
+            const streamingIdx = messages.findIndex(m => m.role === 'assistant' && m.isStreaming);
+            if (streamingIdx >= 0) {
+                activeMsgIdxRef.current = streamingIdx;
+                setActiveGraphMsgIdx(streamingIdx);
+                setThinkingProcesses(prev => ({
+                    ...prev,
+                    [streamingIdx]: {
+                        modules: prev[streamingIdx]?.modules ?? [],
+                        route: prev[streamingIdx]?.route || 'Investment Analyst',
+                        ...prev[streamingIdx],
+                        isActive: true,
+                    },
+                }));
+            }
             return;
         }
         if (restoredFromPendingRef.current) {
@@ -4587,74 +4775,77 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
-                    {/* TOC floating panel */}
-                    {showToc && (
-                        <nav
-                            ref={tocNavRef}
-                            className="absolute left-3 z-30 hidden md:block transition-all duration-150"
-                            style={{ top: tocTopPx, maxHeight: `calc(100% - ${Math.max(tocTopPx, 0)}px - 80px)`, overflow: 'hidden' }}
-                        >
-                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
-                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
-                                <ul className="space-y-0.5">
-                                    {(() => {
-                                        // Filter and optimize TOC hierarchy:
-                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
-                                        const filtered = tocHeadings.filter(h => h.level >= 2);
-                                        const optimized: typeof filtered = [];
-                                        for (let fi = 0; fi < filtered.length; fi++) {
-                                            const h = filtered[fi];
-                                            if (h.level === 2) {
-                                                optimized.push(h);
-                                            } else if (h.level >= 3) {
-                                                // Count siblings: how many consecutive level-3 items follow the same level-2 parent
-                                                const parentIdx = optimized.findLastIndex(x => x.level === 2);
-                                                let siblingCount = 0;
-                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
-                                                // Only show sub-items if there are 2+ siblings
-                                                if (siblingCount >= 2) optimized.push(h);
-                                            }
-                                        }
-                                        return optimized;
-                                    })().map((h, idx, arr) => {
-                                        const isActive = activeTocId === h.id;
-                                        const sectionNum = h.level === 2
-                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
-                                            : null;
-                                        return (
-                                            <li key={idx}>
-                                                <button
-                                                    onClick={() => {
-                                                        const el = document.getElementById(h.id);
-                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                                    }}
-                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
-                                                        isActive
-                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
-                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
-                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
-                                                >
-                                                    {sectionNum !== null && (
-                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
-                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
-                                                        }`}>
-                                                            {sectionNum}
-                                                        </span>
-                                                    )}
-                                                    {h.level >= 3 && (
-                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
-                                                    )}
-                                                    <span className="break-words whitespace-normal">{h.text}</span>
-                                                </button>
-                                            </li>
-                                        );
-                                    })}
-                                </ul>
-                            </div>
-                        </nav>
-                    )}
-                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-10 py-8 pb-28">
-                        <div className={`max-w-4xl mx-auto space-y-8 transition-all duration-200 ${showToc ? 'md:ml-[228px]' : ''}`}>
+                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
+                        <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
+                            <div className={`flex items-start gap-6 xl:gap-8 ${showToc ? '' : 'justify-center'}`}>
+                                {showToc && (
+                                    <aside className="hidden md:block w-[220px] shrink-0 self-start sticky" style={{ top: TOC_STICKY_TOP_PX }}>
+                                        <nav
+                                            ref={tocNavRef}
+                                            className="overflow-hidden"
+                                            style={{
+                                                maxHeight: `max(${TOC_MIN_VIEWPORT_PX}px, calc(100dvh - ${TOC_STICKY_TOP_PX + TOC_BOTTOM_RESERVE_PX}px))`,
+                                            }}
+                                        >
+                                            <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
+                                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
+                                                <ul className="space-y-0.5">
+                                                    {(() => {
+                                                        // Filter and optimize TOC hierarchy:
+                                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
+                                                        const filtered = tocHeadings.filter(h => h.level >= 2);
+                                                        const optimized: typeof filtered = [];
+                                                        for (let fi = 0; fi < filtered.length; fi++) {
+                                                            const h = filtered[fi];
+                                                            if (h.level === 2) {
+                                                                optimized.push(h);
+                                                            } else if (h.level >= 3) {
+                                                                let siblingCount = 0;
+                                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
+                                                                // Only show sub-items if there are 2+ siblings
+                                                                if (siblingCount >= 2) optimized.push(h);
+                                                            }
+                                                        }
+                                                        return optimized;
+                                                    })().map((h, idx, arr) => {
+                                                        const isActive = activeTocId === h.id;
+                                                        const sectionNum = h.level === 2
+                                                            ? arr.filter(x => x.level === 2).indexOf(h) + 1
+                                                            : null;
+                                                        return (
+                                                            <li key={idx}>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const el = document.getElementById(h.id);
+                                                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                                    }}
+                                                                    className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
+                                                                        isActive
+                                                                            ? 'bg-blue-50/80 text-blue-700 font-semibold'
+                                                                            : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                                                                    } ${h.level >= 3 ? 'pl-7' : ''}`}
+                                                                >
+                                                                    {sectionNum !== null && (
+                                                                        <span className={`shrink-0 w-4 text-center text-[11px] font-bold ${
+                                                                            isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-500'
+                                                                        }`}>
+                                                                            {sectionNum}
+                                                                        </span>
+                                                                    )}
+                                                                    {h.level >= 3 && (
+                                                                        <span className={`shrink-0 mt-[6px] w-1 h-1 rounded-full ${isActive ? 'bg-blue-500' : 'bg-gray-400'}`} />
+                                                                    )}
+                                                                    <span className="break-words whitespace-normal">{h.text}</span>
+                                                                </button>
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ul>
+                                            </div>
+                                        </nav>
+                                    </aside>
+                                )}
+                                <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
                             {messages.map((msg, i) => (
                                 <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -4682,6 +4873,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                             if (isRt) setPanelTab('process');
                                                         }}
                                                     />
+                                                )}
+                                                {/* Lite-mode banner: Auto fell back to no-agent because both buckets are empty */}
+                                                {msg.role === 'assistant' && msg.liteMode && (
+                                                    <div className="mb-3 flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200">
+                                                        <svg className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-[12px] font-semibold text-amber-900 leading-snug">Running in lite mode</p>
+                                                            <p className="text-[11px] text-amber-800 leading-snug mt-0.5">{msg.liteMode.hint}</p>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => navigate('/settings')}
+                                                            className="shrink-0 text-[11px] font-bold text-amber-900 hover:text-amber-950 underline underline-offset-2"
+                                                        >
+                                                            Upgrade
+                                                        </button>
+                                                    </div>
                                                 )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
                                                 {msg.role === 'assistant' && !msg.isStreaming && (htmlReports[i] || htmlGenerating[i]) && (
@@ -5367,6 +5576,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             );})()}
 
                             <div ref={messagesEndRef} />
+                                </div>
+                            </div>
                         </div>
                     </div>
 

@@ -1,46 +1,13 @@
-import React, { memo, useState } from 'react';
+import React, { memo, useEffect, useMemo, useState } from 'react';
 import { usePlan } from '../hooks/usePlan';
+import { usePublicConfig } from '../hooks/usePublicConfig';
+import { api } from '../services/api';
 
 interface SettingsProps {
     onBack?: () => void;
 }
 
 const PLAN_RANK: Record<string, number> = { free: 0, pro: 1, max: 2 };
-
-const plans = [
-    {
-        id: 'free' as const,
-        name: 'Free',
-        monthlyPrice: 0,
-        yearlyPrice: 0,
-        accent: 'gray' as const,
-        searches: { fast: '10 / week', roundtable: '2 / week' },
-        extras: ['Unlimited casual chat'],
-        cta: null,
-    },
-    {
-        id: 'pro' as const,
-        name: 'Pro',
-        monthlyPrice: 39,
-        yearlyPrice: 389,
-        accent: 'pro' as const,
-        searches: { fast: '200 / mo', roundtable: '50 / mo' },
-        extras: ['Unlimited casual chat', 'Priority response speed'],
-        cta: 'Upgrade to Pro',
-    },
-    {
-        id: 'max' as const,
-        name: 'Max',
-        monthlyPrice: 99,
-        yearlyPrice: 987,
-        accent: 'max' as const,
-        searches: { fast: '500 / mo', roundtable: '150 / mo' },
-        extras: ['Unlimited casual chat', 'Priority response speed', 'Early access to new features'],
-        cta: 'Upgrade to Max',
-    },
-];
-
-const ANNUAL_DISCOUNT = 17;
 
 const CheckIcon = memo(({ className = '' }: { className?: string }) => (
     <svg className={`w-3 h-3 shrink-0 ${className}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -89,9 +56,145 @@ const accentStyles = {
     },
 };
 
+type UsageSnapshot = {
+    kind: 'authed';
+    fast: { used: number; limit: number };
+    roundtable: { used: number; limit: number };
+    resetLabel: string;
+} | {
+    kind: 'guest';
+    autoUsed: number;
+    autoLimit: number;
+    resetLabel: string;
+} | null;
+
 const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     const [billing, setBilling] = useState<'monthly' | 'yearly'>('monthly');
+    const [checkoutBusy, setCheckoutBusy] = useState<'pro' | 'max' | null>(null);
+    const [checkoutError, setCheckoutError] = useState<string | null>(null);
     const currentPlan = usePlan();
+    const config = usePublicConfig();
+    const [usage, setUsage] = useState<UsageSnapshot>(null);
+
+    // Fetch the real usage snapshot. Uses /subscription/quota for logged-in
+    // users, /guest/quota for guests — both auto-selected by api.isAuthenticated.
+    useEffect(() => {
+        let cancelled = false;
+        const fmtReset = (iso: string | null | undefined): string => {
+            if (!iso) return 'auto-renews';
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return 'auto-renews';
+            const diffMs = d.getTime() - Date.now();
+            if (diffMs <= 0) return 'resetting...';
+            const days = Math.floor(diffMs / 86400_000);
+            const hours = Math.floor((diffMs % 86400_000) / 3_600_000);
+            if (days > 0) return `resets in ${days}d ${hours}h`;
+            if (hours > 0) return `resets in ${hours}h`;
+            const mins = Math.max(1, Math.floor((diffMs % 3_600_000) / 60_000));
+            return `resets in ${mins}m`;
+        };
+        const load = async () => {
+            try {
+                if (api.isAuthenticated) {
+                    const q = await api.getQuota();
+                    if (cancelled) return;
+                    setUsage({
+                        kind: 'authed',
+                        fast: { used: q.fast?.used ?? 0, limit: q.fast?.limit ?? 0 },
+                        roundtable: { used: q.roundtable.used, limit: q.roundtable.limit },
+                        resetLabel: fmtReset(q.fast?.period?.replace('resets ', '') || q.roundtable?.period?.replace('resets ', '')),
+                    });
+                } else {
+                    const g = await api.getGuestQuota();
+                    if (cancelled) return;
+                    setUsage({
+                        kind: 'guest',
+                        autoUsed: g.autoUsed,
+                        autoLimit: g.autoLimit,
+                        resetLabel: fmtReset(g.resetAt),
+                    });
+                }
+            } catch {
+                if (!cancelled) setUsage(null);
+            }
+        };
+        load();
+        return () => { cancelled = true; };
+    }, []);
+
+    // Derive plan cards + yearly discount from the backend config on every
+    // render. Fallbacks inside usePublicConfig ensure sensible numbers even
+    // before the first fetch resolves.
+    const { plans, annualDiscount } = useMemo(() => {
+        const { free, pro, max } = config.plans;
+        const computedPlans = [
+            {
+                id: 'free' as const,
+                name: 'Free',
+                monthlyPrice: 0,
+                yearlyPrice: 0,
+                accent: 'gray' as const,
+                searches: {
+                    fast: `${free.fast} / ${free.windowDays}d`,
+                    roundtable: `${free.roundtable} / ${free.windowDays}d`,
+                },
+                extras: ['Unlimited casual chat'],
+                cta: null,
+            },
+            {
+                id: 'pro' as const,
+                name: 'Pro',
+                monthlyPrice: pro.monthlyUsd,
+                yearlyPrice: pro.yearlyUsd,
+                accent: 'pro' as const,
+                searches: {
+                    fast: `${pro.fast} / mo`,
+                    roundtable: `${pro.roundtable} / mo`,
+                },
+                extras: ['Unlimited casual chat', 'Priority response speed'],
+                cta: 'Upgrade to Pro',
+            },
+            {
+                id: 'max' as const,
+                name: 'Max',
+                monthlyPrice: max.monthlyUsd,
+                yearlyPrice: max.yearlyUsd,
+                accent: 'max' as const,
+                searches: {
+                    fast: `${max.fast} / mo`,
+                    roundtable: `${max.roundtable} / mo`,
+                },
+                extras: ['Unlimited casual chat', 'Priority response speed', 'Early access to new features'],
+                cta: 'Upgrade to Max',
+            },
+        ];
+        const monthlyTotal = pro.monthlyUsd * 12;
+        const discount = monthlyTotal > 0
+            ? Math.max(0, Math.round((1 - pro.yearlyUsd / monthlyTotal) * 100))
+            : 0;
+        return { plans: computedPlans, annualDiscount: discount };
+    }, [config]);
+
+    const handleUpgrade = async (planId: 'pro' | 'max') => {
+        if (checkoutBusy) return;
+        // Guest must sign in before Stripe can create a customer for them.
+        // Show pricing freely, gate only at the pay step (user's explicit UX choice).
+        if (!api.isAuthenticated) {
+            window.dispatchEvent(new Event('show-auth-modal'));
+            return;
+        }
+        setCheckoutError(null);
+        setCheckoutBusy(planId);
+        try {
+            const { url } = await api.startCheckout({ plan: planId, billingCycle: billing });
+            if (!url) throw new Error('No checkout URL returned');
+            window.location.href = url;
+        } catch (err) {
+            const msg = (err as Error)?.message || 'Checkout failed. Please try again.';
+            setCheckoutError(msg);
+            setCheckoutBusy(null);
+        }
+    };
 
     return (
         <div className="relative w-full min-h-full overflow-auto">
@@ -127,40 +230,89 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
             {/* ── Section 2: Current usage ── */}
             <div className="mt-6 mb-8">
-                <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-4">Current usage · {currentPlan === 'free' ? 'Free' : currentPlan === 'pro' ? 'Pro' : 'Max'} plan</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {/* Fast */}
-                    <div className="flex items-center gap-4 px-5 py-4 bg-white rounded-2xl border border-gray-100">
-                        <div className="w-9 h-9 rounded-xl bg-green-50 flex items-center justify-center text-green-500 shrink-0">
-                            <BoltIcon />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <div className="flex items-baseline justify-between mb-1.5">
-                                <span className="text-[12px] font-semibold text-gray-700">Fast Analysis</span>
-                                <span className="text-[12px] font-bold text-gray-900 tabular-nums">6 <span className="text-gray-300 font-normal">/</span> 10</span>
+                <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-4">
+                    Current usage · {currentPlan === 'guest' ? 'Guest' : currentPlan === 'free' ? 'Free' : currentPlan === 'pro' ? 'Pro' : 'Max'} {currentPlan === 'guest' ? 'mode' : 'plan'}
+                </p>
+                {usage?.kind === 'guest' ? (
+                    <div className="grid grid-cols-1 gap-3">
+                        <div className="flex items-center gap-4 px-5 py-4 bg-white rounded-2xl border border-gray-100">
+                            <div className="w-9 h-9 rounded-xl bg-green-50 flex items-center justify-center text-green-500 shrink-0">
+                                <BoltIcon />
                             </div>
-                            <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-green-500 rounded-full" style={{ width: '60%' }} />
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-baseline justify-between mb-1.5">
+                                    <span className="text-[12px] font-semibold text-gray-700">Auto turns</span>
+                                    <span className="text-[12px] font-bold text-gray-900 tabular-nums">
+                                        {usage.autoUsed} <span className="text-gray-300 font-normal">/</span> {usage.autoLimit}
+                                    </span>
+                                </div>
+                                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-green-500 rounded-full"
+                                        style={{ width: `${usage.autoLimit > 0 ? Math.min(100, (usage.autoUsed / usage.autoLimit) * 100) : 0}%` }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        <p className="text-[11px] text-gray-500 mt-1 pl-1">
+                            Sign in to unlock Fast and Roundtable modes, plus a much higher Auto limit.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {/* Fast */}
+                        <div className="flex items-center gap-4 px-5 py-4 bg-white rounded-2xl border border-gray-100">
+                            <div className="w-9 h-9 rounded-xl bg-green-50 flex items-center justify-center text-green-500 shrink-0">
+                                <BoltIcon />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-baseline justify-between mb-1.5">
+                                    <span className="text-[12px] font-semibold text-gray-700">Fast Analysis</span>
+                                    <span className="text-[12px] font-bold text-gray-900 tabular-nums">
+                                        {usage?.kind === 'authed' ? usage.fast.used : '—'} <span className="text-gray-300 font-normal">/</span> {usage?.kind === 'authed' ? usage.fast.limit : '—'}
+                                    </span>
+                                </div>
+                                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-green-500 rounded-full transition-[width] duration-500"
+                                        style={{
+                                            width: usage?.kind === 'authed' && usage.fast.limit > 0
+                                                ? `${Math.min(100, (usage.fast.used / usage.fast.limit) * 100)}%`
+                                                : '0%',
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        {/* Roundtable */}
+                        <div className="flex items-center gap-4 px-5 py-4 bg-white rounded-2xl border border-gray-100">
+                            <div className="w-9 h-9 rounded-xl bg-green-50 flex items-center justify-center text-green-500 shrink-0">
+                                <RoundtableIcon />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-baseline justify-between mb-1.5">
+                                    <span className="text-[12px] font-semibold text-gray-700">Multi-Agent Roundtable</span>
+                                    <span className="text-[12px] font-bold text-gray-900 tabular-nums">
+                                        {usage?.kind === 'authed' ? usage.roundtable.used : '—'} <span className="text-gray-300 font-normal">/</span> {usage?.kind === 'authed' ? usage.roundtable.limit : '—'}
+                                    </span>
+                                </div>
+                                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-green-500 rounded-full transition-[width] duration-500"
+                                        style={{
+                                            width: usage?.kind === 'authed' && usage.roundtable.limit > 0
+                                                ? `${Math.min(100, (usage.roundtable.used / usage.roundtable.limit) * 100)}%`
+                                                : '0%',
+                                        }}
+                                    />
+                                </div>
                             </div>
                         </div>
                     </div>
-                    {/* Roundtable */}
-                    <div className="flex items-center gap-4 px-5 py-4 bg-white rounded-2xl border border-gray-100">
-                        <div className="w-9 h-9 rounded-xl bg-green-50 flex items-center justify-center text-green-500 shrink-0">
-                            <RoundtableIcon />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <div className="flex items-baseline justify-between mb-1.5">
-                                <span className="text-[12px] font-semibold text-gray-700">Multi-Agent Roundtable</span>
-                                <span className="text-[12px] font-bold text-gray-900 tabular-nums">1 <span className="text-gray-300 font-normal">/</span> 2</span>
-                            </div>
-                            <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-green-500 rounded-full" style={{ width: '50%' }} />
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <p className="text-[10px] text-gray-400 mt-2.5 pl-1">Resets every 7 days from sign-up</p>
+                )}
+                <p className="text-[10px] text-gray-400 mt-2.5 pl-1">
+                    {usage?.resetLabel || (currentPlan === 'guest' ? 'Resets every 24h' : currentPlan === 'free' ? 'Resets every 7 days from sign-up' : 'Resets every 30 days')}
+                </p>
             </div>
 
             {/* ── Section 3: Billing toggle ── */}
@@ -184,7 +336,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                     >
                         Yearly
                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700">
-                            -{ANNUAL_DISCOUNT}%
+                            -{annualDiscount}%
                         </span>
                     </button>
                 </div>
@@ -263,12 +415,16 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                             {/* CTA */}
                             <div className="mt-auto" />
                             {(() => {
+                                // Guests are treated like Free users for display purposes — they
+                                // can see the real Upgrade buttons. handleUpgrade() intercepts
+                                // the click and pops the auth modal before touching Stripe.
+                                const effectivePlan: 'free' | 'pro' | 'max' = currentPlan === 'guest' ? 'free' : currentPlan;
                                 const rank = PLAN_RANK[plan.id] ?? 0;
-                                const curRank = PLAN_RANK[currentPlan] ?? 0;
+                                const curRank = PLAN_RANK[effectivePlan] ?? 0;
                                 if (rank === curRank) {
                                     return (
                                         <div className="w-full py-3 rounded-xl text-[13px] font-medium text-center text-gray-500 bg-gray-50 border border-gray-200">
-                                            Current plan
+                                            {currentPlan === 'guest' ? 'Sign in to activate' : 'Current plan'}
                                         </div>
                                     );
                                 }
@@ -279,13 +435,16 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                                         </div>
                                     );
                                 }
-                                // rank > curRank — upgrade path
+                                // rank > curRank — upgrade path (guest falls through too)
+                                const isBusy = checkoutBusy === plan.id;
+                                const anyBusy = checkoutBusy !== null;
                                 return (
                                     <button
-                                        onClick={() => window.dispatchEvent(new CustomEvent('loka-open-modal', { detail: 'deposit' }))}
-                                        className={`w-full py-3 rounded-xl text-[13px] font-bold transition-colors active:scale-[0.98] ${style.cta}`}
+                                        onClick={() => handleUpgrade(plan.id as 'pro' | 'max')}
+                                        disabled={anyBusy}
+                                        className={`w-full py-3 rounded-xl text-[13px] font-bold transition-colors active:scale-[0.98] ${style.cta} ${anyBusy ? 'opacity-60 cursor-not-allowed' : ''}`}
                                     >
-                                        {plan.cta || `Upgrade to ${plan.name}`}
+                                        {isBusy ? 'Redirecting…' : (plan.cta || `Upgrade to ${plan.name}`)}
                                     </button>
                                 );
                             })()}
@@ -293,6 +452,12 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                     );
                 })}
             </div>
+
+            {checkoutError && (
+                <div className="mt-4 px-4 py-3 rounded-xl bg-red-50 border border-red-200 text-[12px] text-red-700 text-center">
+                    {checkoutError}
+                </div>
+            )}
 
             {/* ── Supported payment methods ── */}
             <div className="flex items-center justify-center gap-1.5 mt-8 mb-2">

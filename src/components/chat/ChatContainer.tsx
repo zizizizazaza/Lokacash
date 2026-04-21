@@ -96,10 +96,16 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
   const [researchLogs, setResearchLogs] = useState<string[]>([]);
   const [researchSummary, setResearchSummary] = useState<string | null>(null);
 
-  // Roundtable & Fast quota
+  // Roundtable & Fast quota — skipped for guests since ModeSelector locks
+  // those modes behind login anyway.
   const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
   const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
   useEffect(() => {
+    if (!api.isAuthenticated) {
+      setRoundtableQuota(null);
+      setFastQuota(null);
+      return;
+    }
     api.getQuota()
       .then(q => {
         setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
@@ -671,7 +677,15 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
             <div className="max-w-3xl mx-auto">
               <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-2xl shadow-sm pl-2 pr-4 py-2 focus-within:border-gray-300 focus-within:shadow-md transition-all">
                 {showModeSelector && (
-                  <ModeSelector mode={currentMode} onModeChange={setCurrentMode} roundtableQuota={roundtableQuota} fastQuota={fastQuota} compact />
+                  <ModeSelector
+                    mode={currentMode}
+                    onModeChange={setCurrentMode}
+                    roundtableQuota={roundtableQuota}
+                    fastQuota={fastQuota}
+                    compact
+                    isGuest={!api.isAuthenticated}
+                    onLockedClick={() => window.dispatchEvent(new Event('show-auth-modal'))}
+                  />
                 )}
                 <input
                   type="text"

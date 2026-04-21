@@ -18,6 +18,7 @@ import OAuthCallbackHandler from './components/OAuthCallbackHandler';
 import { PAGE_PATHS } from './constants';
 import { api } from './services/api';
 import { socket } from './services/socket';
+import { getOrCreateGuestId } from './services/guestId';
 
 // ── Re-exports for backward compatibility ──
 // Other components import these from '../App'
@@ -61,6 +62,13 @@ const App: React.FC = () => {
     onSuccess: () => navigate('/'),
   });
   const isLoggedIn = ready && authenticated;
+
+  // ── Guest identity: always set first so socket can fall back to guest mode on logout ──
+  useEffect(() => {
+    const guestId = getOrCreateGuestId();
+    api.setGuestId(guestId);
+    socket.setGuestId(guestId);
+  }, []);
 
   // ── Socket + API token (do not rely on the entire `user` object, otherwise it will repeatedly reconnect → WS flash)──
   useEffect(() => {

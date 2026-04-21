@@ -22,6 +22,7 @@ class SocketClient {
   private socket: Socket | null = null;
   private token: string | null = null;
   private tokenGetter: (() => Promise<string | null>) | null = null;
+  private guestId: string | null = null;
   private listeners: Record<string, Function[]> = {};
   private isRefreshing = false; // Prevent concurrent refresh loops
   private emitQueue: { event: string; args: unknown[] }[] = [];
@@ -38,11 +39,30 @@ class SocketClient {
     this.tokenGetter = getter;
   }
 
+  /**
+   * Set the guest identifier used when the user is unauthenticated.
+   * If a token is already present, this is stored for later (after logout)
+   * but does not trigger a reconnect. Otherwise it starts a guest session.
+   */
+  setGuestId(guestId: string) {
+    if (this.guestId === guestId) return;
+    this.guestId = guestId;
+    if (!this.token) this.connect();
+  }
+
+  /**
+   * Clear the token but keep the guestId if set — the socket transitions
+   * from authenticated to guest mode on logout rather than going offline.
+   */
   clearToken() {
     this.token = null;
     this.tokenGetter = null;
     this.emitQueue = [];
-    this.disconnect();
+    if (this.guestId) {
+      this.connect(); // reconnect as guest
+    } else {
+      this.disconnect();
+    }
   }
 
   private flushEmitQueue() {
@@ -64,16 +84,22 @@ class SocketClient {
       socketUrl: SOCKET_URL,
       socketPath: SOCKET_PATH,
       hasToken: Boolean(this.token),
+      hasGuestId: Boolean(this.guestId),
     };
   }
 
   private connect() {
-    if (!this.token) {
-      console.warn(LOG, 'connect() skipped — no token');
+    if (!this.token && !this.guestId) {
+      console.warn(LOG, 'connect() skipped — no token, no guestId');
       return;
     }
 
-    console.log(LOG, 'connect()', { url: SOCKET_URL, path: SOCKET_PATH });
+    const authPayload: Record<string, string> = {};
+    if (this.token) authPayload.token = this.token;
+    if (this.guestId) authPayload.guestId = this.guestId;
+    const asGuest = !this.token && !!this.guestId;
+
+    console.log(LOG, 'connect()', { url: SOCKET_URL, path: SOCKET_PATH, mode: asGuest ? 'guest' : 'auth' });
 
     if (this.socket) {
       this.socket.disconnect();
@@ -81,7 +107,7 @@ class SocketClient {
 
     this.socket = io(SOCKET_URL, {
       path: SOCKET_PATH,
-      auth: { token: this.token },
+      auth: authPayload,
       reconnection: true,
       reconnectionAttempts: Infinity,  // Never give up (Telegram-style)
       reconnectionDelay: 2000,

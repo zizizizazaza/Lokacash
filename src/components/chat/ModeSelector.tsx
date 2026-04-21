@@ -25,9 +25,13 @@ interface ModeSelectorProps {
   roundtableQuota?: RoundtableQuota | null;
   /** Fast analysis usage quota — show remaining count when provided */
   fastQuota?: FastQuota | null;
+  /** Guest mode locks Fast and Roundtable; clicking them prompts sign-in. */
+  isGuest?: boolean;
+  /** Called when a guest clicks a locked mode. */
+  onLockedClick?: (mode: ChatMode) => void;
 }
 
-const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact = false, roundtableQuota, fastQuota }) => {
+const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact = false, roundtableQuota, fastQuota, isGuest = false, onLockedClick }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -75,15 +79,22 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
             const isFast = m.id === 'fast';
             const itemRemaining = isRoundtable ? rtRemaining : isFast ? fastRemaining : null;
             const itemExhausted = isRoundtable ? rtExhausted : isFast ? fastExhausted : false;
+            // Guests can only use Auto. Fast / Roundtable are visible but locked.
+            const lockedForGuest = isGuest && (isFast || isRoundtable);
             return (
               <button
                 key={m.id}
                 onClick={() => {
+                  if (lockedForGuest) {
+                    onLockedClick?.(m.id);
+                    setOpen(false);
+                    return;
+                  }
                   if (itemExhausted) return;
                   onModeChange(m.id);
                   setOpen(false);
                 }}
-                className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${itemExhausted ? 'opacity-50 cursor-not-allowed' : ''} ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
+                className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${itemExhausted && !lockedForGuest ? 'opacity-50 cursor-not-allowed' : ''} ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
               >
                 <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400'}`}>
                   <MIcon />
@@ -92,17 +103,23 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
                   <p className={`text-[12px] font-semibold ${isActive ? 'text-gray-900' : 'text-gray-700'}`}>{m.label}</p>
                   <p className="text-[10px] text-gray-400 leading-tight">{m.desc}</p>
                 </div>
-                {/* Quota badge — far right */}
-                {itemRemaining !== null && (
+                {/* Lock badge (guest) > quota badge > active check */}
+                {lockedForGuest ? (
+                  <span className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full leading-none shrink-0 bg-amber-50 text-amber-700">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                    </svg>
+                    Sign in
+                  </span>
+                ) : itemRemaining !== null ? (
                   <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full leading-none shrink-0 ${itemExhausted ? 'bg-gray-100 text-gray-400' : 'bg-green-50 text-green-600'}`}>
                     {`${itemRemaining} left`}
                   </span>
-                )}
-                {isActive && itemRemaining === null && (
+                ) : isActive ? (
                   <svg className="w-3.5 h-3.5 text-gray-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                   </svg>
-                )}
+                ) : null}
               </button>
             );
           })}

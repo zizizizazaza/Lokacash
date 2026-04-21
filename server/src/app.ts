@@ -31,6 +31,9 @@ import voiceRoutes from './routes/voice.js';
 import agentsRoutes from './routes/agents.js';
 import eventsRoutes from './routes/events.js';
 import skillRoutes from './routes/skill.js';
+import subscriptionRoutes from './routes/subscription.js';
+import guestRoutes from './routes/guest.js';
+import configRoutes from './routes/config.js';
 import path from 'path';
 import prisma from './db.js';
 
@@ -71,7 +74,15 @@ app.use(cors({
   credentials: true,
 }));
 
-// Body parsing
+// Stripe webhook must receive the raw body so signature verification works.
+// Mount raw-parser for ONLY this path BEFORE the global JSON parser.
+app.use('/api/subscription/webhook', express.raw({ type: 'application/json', limit: '2mb' }), (req, _res, next) => {
+  // Stash raw body on req so the route handler can use it for signature check
+  (req as unknown as { rawBody: Buffer }).rawBody = req.body as Buffer;
+  next();
+});
+
+// Body parsing (applies to all other routes)
 app.use(express.json({ limit: '10mb' }));
 
 // Global rate limit
@@ -117,6 +128,9 @@ app.use('/api/stripe', stripeRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/agents', agentsRoutes);
 app.use('/api/events', eventsRoutes);
+app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/guest', guestRoutes);
+app.use('/api/config', configRoutes);
 // Public skill API for external AI agents — no auth (internal testing).
 // Mounted under /api so it inherits the reverse-proxy path in production
 // (e.g. https://nftkashai.online/lokacash/api/skill/v1/*).

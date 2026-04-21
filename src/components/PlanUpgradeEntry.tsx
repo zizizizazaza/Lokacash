@@ -35,17 +35,21 @@ export const PlanUpgradeEntry: React.FC<Props> = ({ size = 'md', className = '',
     const pad = size === 'sm' ? 'px-2.5 py-1.5 text-[11px]' : 'px-4 py-2 text-[13px]';
     const gap = size === 'sm' ? 'gap-1' : 'gap-2';
 
+    // Guests see the same Upgrade CTA as Free users — they can browse the
+    // Settings pricing page, and auth is enforced only at the payment step.
+    const tier: 'free' | 'pro' | 'max' = plan === 'guest' ? 'free' : plan;
+
     // ── Rail variant: collapsed sidebar, icon-only button with hover tooltip ──
     if (size === 'rail') {
-        const tip = plan === 'free' ? 'Upgrade Plan' : plan === 'pro' ? 'Go Max' : 'Max plan';
+        const tip = tier === 'free' ? 'Upgrade Plan' : tier === 'pro' ? 'Go Max' : 'Max plan';
         const borderColor =
-            plan === 'free' ? 'border-gray-300 hover:border-gray-900' :
-            plan === 'pro' ? 'border-gray-200 text-gray-500 hover:border-gray-400 hover:text-gray-900' :
+            tier === 'free' ? 'border-gray-300 hover:border-gray-900' :
+            tier === 'pro' ? 'border-gray-200 text-gray-500 hover:border-gray-400 hover:text-gray-900' :
             'text-[#b45309]';
-        const style = plan === 'max'
+        const style = tier === 'max'
             ? { borderColor: '#f5d58a', background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 55%, #fff7ed 100%)' }
             : undefined;
-        const extra = plan === 'free' ? 'upgrade-shimmer-outline' : '';
+        const extra = tier === 'free' ? 'upgrade-shimmer-outline' : '';
         return (
             <button
                 onClick={go}
@@ -58,7 +62,7 @@ export const PlanUpgradeEntry: React.FC<Props> = ({ size = 'md', className = '',
         );
     }
 
-    if (plan === 'free') {
+    if (tier === 'free') {
         return (
             <button
                 onClick={go}
@@ -73,7 +77,7 @@ export const PlanUpgradeEntry: React.FC<Props> = ({ size = 'md', className = '',
         );
     }
 
-    if (plan === 'pro') {
+    if (tier === 'pro') {
         return (
             <button
                 onClick={go}

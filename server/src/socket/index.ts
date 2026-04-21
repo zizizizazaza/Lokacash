@@ -15,6 +15,8 @@ import {
   runConsensusEngine,
   sortConsensusAgentEntries,
 } from '../services/consensus.service.js';
+import { consumeQuota } from '../services/subscription.service.js';
+import { consumeGuestAuto, GUEST_CONFIG } from '../services/guest.service.js';
 import * as crypto from 'crypto';
 import {
   createModuleEmitter,
@@ -78,6 +80,80 @@ const SOCIAL_HANDLE_STOPWORDS = new Set([
 
 function toSafeNumber(n: unknown): number {
   return typeof n === 'number' && Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Decide which execution tier a user's Auto-mode query should use.
+ *
+ * Returns one of:
+ *   'simple'     — plain LLM answer, no tools (free, or both buckets exhausted)
+ *   'fast'       — standard Super Agent: search + Web3 + synthesis (default complex path)
+ *   'roundtable' — multi-agent debate + deep research report (expensive)
+ *
+ * Design principle: Roundtable is OPT-IN. A single-agent Fast response
+ * already gives users a well-reasoned directional call. We only escalate
+ * to the 5x-more-expensive Roundtable when the user **explicitly** signals
+ * they want multi-perspective depth. Three scenarios:
+ *
+ *   1. Multi-entity comparison  — "A vs B", "对比 A 和 B" — inherently
+ *      needs multiple specialists weighing in.
+ *   2. Explicit deep-analysis ask — "deep dive", "full analysis",
+ *      "多视角", "深度分析" — user is literally requesting depth.
+ *   3. Explicit bull-vs-bear / debate framing — "bull case AND bear case",
+ *      "多空博弈", "正反观点", "辩论" — the query is shaped as a debate.
+ *
+ * Single-asset directional asks ("能不能追多 SOL", "该不该抄底 BTC",
+ * "是否开多", "should I buy Tesla") stay on Fast. Directional calls are
+ * Fast's sweet spot; Roundtable adds minutes of latency for an answer
+ * Fast already gives well.
+ */
+type AutoPlanLike = {
+  isSimpleChat?: boolean;
+  queryType?: string;
+};
+
+export function decideAutoMode(plan: AutoPlanLike, userContent: string): 'simple' | 'fast' | 'roundtable' {
+  if (plan.isSimpleChat) return 'simple';
+
+  // Guru Council is LITERALLY a debate panel — user explicitly chose it.
+  if (plan.queryType === 'guru-council') return 'roundtable';
+
+  const msg = userContent || '';
+
+  // ── Trigger 1: Multi-entity comparison structure ──────────────────
+  // "X vs Y", "X versus Y", "compare X and Y", "which is better between X and Y"
+  // "对比 X 和 Y", "X 与 Y 哪个更好", "X 和 Y 谁更强"
+  const enMultiEntity =
+    /\b(vs\.?|versus)\b/i.test(msg) ||
+    /\bcompare\s+[\w$]+\s+(and|with|to|vs)\s+[\w$]+\b/i.test(msg) ||
+    /\bwhich\s+(is|one is|would be)\s+(better|stronger|safer|preferable|the\s+better)\b/i.test(msg);
+  const zhMultiEntity =
+    /(对比|比较).{1,30}(和|与)/.test(msg) ||                               // "对比 A 和 B"
+    /(和|与).{1,15}(对比|比较|相比)/.test(msg) ||                           // "A 和 B 对比"
+    /(和|与).{1,15}(哪个|谁)\s?(更|比较)\s?(好|强|合适)/.test(msg) ||          // "A 和 B 哪个更好"
+    /(哪个|谁)\s?(更|比较)\s?(好|强|稳|合适|值得|靠谱|适合投资)/.test(msg);   // "谁更值得投资"
+
+  // ── Trigger 2: Explicit deep-analysis request ─────────────────────
+  const enDeep =
+    /\b(deep[- ]?dive|thorough\s+(analysis|review)|comprehensive\s+(analysis|review|breakdown)|full\s+analysis|in[- ]?depth|multi[- ]?perspective|multi[- ]?angle|all\s+angles|roundtable|panel\s+analysis)\b/i.test(msg);
+  const zhDeep =
+    /(深入分析|深度分析|全面分析|完整分析|详细分析|多视角|多方(?:观点|视角|意见)|多角度|全方位分析|专家(?:团|组|小组|会诊)|圆桌|roundtable)/i.test(msg);
+
+  // ── Trigger 3: Explicit bull-vs-bear / debate / consensus framing ──
+  const enDebate =
+    /\b(pros and cons|bull\s+case\s+(and|vs\.?|versus)\s+bear\s+case|bear\s+case\s+(and|vs\.?|versus)\s+bull\s+case|bull\s+vs\.?\s+bear|bear\s+vs\.?\s+bull|debate|divergent\s+views)\b/i.test(msg);
+  const zhDebate =
+    /(多空(?:博弈|分歧|对决|争议)|正反(?:观点|分析|论据|面)|多方博弈|辩论|(?:多|空)头(?:观点|视角|论据|立场)(?:和|与|vs)(?:多|空)头(?:观点|视角|论据|立场)|多空(?:观点|视角))/i.test(msg);
+
+  if (
+    enMultiEntity || zhMultiEntity ||
+    enDeep || zhDeep ||
+    enDebate || zhDebate
+  ) {
+    return 'roundtable';
+  }
+
+  return 'fast';
 }
 
 function candidateTokensFromQuery(userContent: string): string[] {
@@ -523,41 +599,79 @@ export function setupSocket(server: HttpServer) {
     path: '/api/socket.io',
   });
 
-  // JWT authentication middleware for WebSocket
+  // JWT authentication middleware for WebSocket.
+  // Tokenless connections are accepted as guests when ENABLE_GUEST_MODE is on;
+  // guests are limited to Auto mode in the agent:chat handler below.
   io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-    if (!token) {
+    const guestIdRaw = socket.handshake.auth?.guestId || socket.handshake.query?.guestId;
+
+    if (token) {
+      try {
+        const payload = await verifyToken(token as string);
+        (socket as any).userId = payload.userId || payload.sub?.replace('did:privy:', '');
+        (socket as any).isGuest = false;
+        return next();
+      } catch {
+        return next(new Error('Invalid or expired token'));
+      }
+    }
+
+    if (!GUEST_CONFIG.enabled) {
       return next(new Error('Authentication required'));
     }
-    try {
-      const payload = await verifyToken(token as string);
-      (socket as any).userId = payload.userId || payload.sub?.replace('did:privy:', '');
-      next();
-    } catch {
-      next(new Error('Invalid or expired token'));
+
+    const guestId = typeof guestIdRaw === 'string' && guestIdRaw.trim() ? guestIdRaw.trim() : null;
+    if (!guestId) {
+      return next(new Error('Missing guestId for unauthenticated connection'));
     }
+    // Length sanity — client uses crypto.randomUUID() (36 chars).
+    if (guestId.length < 8 || guestId.length > 128) {
+      return next(new Error('Invalid guestId'));
+    }
+
+    // Synthetic userId so downstream socket.join/emitToUser/emitters work
+    // without per-call branching. Any DB write that uses this as a FK must
+    // be guarded by `if (!isGuest)` — see agent:chat handler.
+    (socket as any).userId = `guest:${guestId}`;
+    (socket as any).isGuest = true;
+    (socket as any).guestId = guestId;
+    // Best-effort IP from handshake; proxies may require X-Forwarded-For handling upstream.
+    (socket as any).guestIp =
+      (socket.handshake.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
+      socket.handshake.address ||
+      null;
+    next();
   });
 
   io.on('connection', (socket) => {
     const userId = (socket as any).userId as string;
-    console.log(`🔌 Client connected: ${socket.id} (user: ${userId})`);
+    const isGuest = Boolean((socket as any).isGuest);
+    const guestId = (socket as any).guestId as string | undefined;
+    const guestIp = (socket as any).guestIp as string | undefined;
 
-    // Auto-join the user's personal room
+    if (isGuest) {
+      console.log(`🔌 Guest connected: ${socket.id} (guestId=${guestId} synth=${userId})`);
+    } else {
+      console.log(`🔌 Client connected: ${socket.id} (user: ${userId})`);
+    }
+
+    // Every socket joins its own room so emitToUser routes correctly.
+    // For guests this is `user:guest:<uuid>` — isolated from real users.
     socket.join(`user:${userId}`);
 
-    // ── Online status ──
-    onlineUsers.add(userId);
-    // Broadcast to all connected clients (friends will filter client-side)
-    socket.broadcast.emit('user:online', { userId });
+    if (!isGuest) {
+      // ── Online status (authenticated users only) ──
+      onlineUsers.add(userId);
+      socket.broadcast.emit('user:online', { userId });
 
-    // ── Auto-join group rooms from DB ──
-    // This is vastly superior to relying on frontend `join-group` emits, as it intrinsically survives 
-    // WebSocket disconnects/reconnects without dropping frames or losing synchrony.
-    prisma.groupMember.findMany({ where: { userId } })
-      .then(members => {
-        members.forEach(m => socket.join(`group:${m.groupId}`));
-      })
-      .catch(err => console.error('Failed to auto-join DB groups:', err));
+      // ── Auto-join group rooms from DB ──
+      prisma.groupMember.findMany({ where: { userId } })
+        .then(members => {
+          members.forEach(m => socket.join(`group:${m.groupId}`));
+        })
+        .catch(err => console.error('Failed to auto-join DB groups:', err));
+    }
 
     // Join group chat room (validated - userId is already authenticated)
     socket.on('join-group', (groupId: string) => {
@@ -906,6 +1020,11 @@ Text: "${query}"`;
       const hasImages = images.length > 0;
       if (!userContent.trim() && !hasImages) return;
 
+      // Preserve the user's original mode choice — `data.mode` may be mutated
+      // downstream by the Auto-routing block so we can't rely on it later.
+      const requestedMode: 'auto' | 'fast' | 'roundtable' =
+        data.mode === 'fast' || data.mode === 'roundtable' ? data.mode : 'auto';
+
       const sessionId = data.sessionId || crypto.randomUUID();
       const dedupImageKey = images.map((img) => img.url).join('|');
 
@@ -922,6 +1041,62 @@ Text: "${query}"`;
       if (chatDedupMap.size > 100) {
         for (const [k, v] of chatDedupMap) {
           if (now - v > 10000) chatDedupMap.delete(k);
+        }
+      }
+
+      // ── Guest gate: only Auto is available without login ──
+      if (isGuest) {
+        if (data.mode !== 'auto') {
+          socket.emit('agent:chat:error', {
+            sessionId,
+            error: 'login_required',
+            mode: data.mode,
+            hint: 'Sign in to unlock Fast and Roundtable modes.',
+          });
+          return;
+        }
+        try {
+          const guestResult = await consumeGuestAuto(guestId as string, guestIp || null);
+          if (!guestResult.allowed) {
+            socket.emit('agent:chat:error', {
+              sessionId,
+              error: guestResult.error,
+              mode: 'auto',
+              resetAt: guestResult.resetAt.toISOString(),
+              hint: 'Sign in for a free account — you\'ll get more Auto turns plus Fast and Roundtable.',
+            });
+            console.log(`[agent:chat] Guest quota exhausted: guestId=${guestId} err=${guestResult.error} resetAt=${guestResult.resetAt.toISOString()}`);
+            return;
+          }
+          console.log(`[agent:chat] Guest auto consumed: guestId=${guestId} remaining=${guestResult.remaining}`);
+        } catch (err) {
+          console.error('[agent:chat] Guest quota check failed, allowing through:', (err as Error).message);
+          // Fail-open so a DB blip doesn't block the free tier.
+        }
+      }
+
+      // ── Quota guard: Fast and Roundtable modes are metered; Auto is free. ──
+      // User-facing PRD rule: selecting Fast or Roundtable consumes exactly one
+      // quota credit up-front, regardless of downstream routing decisions. If
+      // the user is out of quota, abort before any work starts.
+      if (!isGuest && (data.mode === 'fast' || data.mode === 'roundtable')) {
+        try {
+          const quotaResult = await consumeQuota(userId, data.mode);
+          if (!quotaResult.allowed) {
+            socket.emit('agent:chat:error', {
+              sessionId,
+              error: 'quota_exhausted',
+              mode: quotaResult.mode,
+              resetAt: quotaResult.resetAt.toISOString(),
+              hint: 'Upgrade your plan or switch to Auto mode.',
+            });
+            console.log(`[agent:chat] Quota exhausted: user=${userId} mode=${data.mode} resetAt=${quotaResult.resetAt.toISOString()}`);
+            return;
+          }
+          console.log(`[agent:chat] Quota consumed: user=${userId} mode=${data.mode} remaining=${quotaResult.remaining}`);
+        } catch (err) {
+          console.error('[agent:chat] Quota check failed, allowing through:', (err as Error).message);
+          // Fail-open on quota-service errors so a DB blip doesn't block users.
         }
       }
 
@@ -944,7 +1119,9 @@ Text: "${query}"`;
       const emitter = createModuleEmitter(userId, sessionId);
 
       let latestUserMessageId: string | null = null;
-      if (!data.hidden) {
+      // Guests have no DB presence (no User row, no ChatMessage history).
+      // Their conversation lives entirely in localStorage on the client.
+      if (!data.hidden && !isGuest) {
         try {
           const userMeta = hasImages ? JSON.stringify({ images }) : null;
           const createdUser = await prisma.chatMessage.create({
@@ -1059,6 +1236,80 @@ Text: "${query}"`;
 
       if (!hasImages && data.mode === 'roundtable') {
         plan.isSimpleChat = false;
+      }
+
+      // Guests are capped at the simple-chat path regardless of what the
+      // orchestrator decided. The 5/day guest quota pays for a plain LLM
+      // answer, not search + Web3 + synthesis.
+      if (isGuest) {
+        plan.isSimpleChat = true;
+      }
+
+      // ═════════════════════════════════════════════════════════════════
+      // Auto mode: semantic routing + dual-bucket quota cascade.
+      //
+      // Per product spec: Auto analyzes the query semantically and picks
+      // Fast or Roundtable. It charges the corresponding bucket. If the
+      // preferred bucket is empty, it tries the other. If BOTH are empty,
+      // it gracefully degrades to a simple no-agent LLM answer so the
+      // user is never blocked — just gets a lighter response.
+      //
+      // Guests and explicit Fast/Roundtable picks skip this block entirely.
+      // ═════════════════════════════════════════════════════════════════
+      let autoResolvedTier: 'simple' | 'fast' | 'roundtable' | null = null;
+      let autoDegraded = false;
+      if (!isGuest && requestedMode === 'auto') {
+        const preferredTier = decideAutoMode(plan, userContent);
+
+        if (preferredTier === 'simple') {
+          console.log(`[agent:chat] Auto routed → simple (no quota charged) sessionId=${sessionId} queryType=${plan.queryType}`);
+          autoResolvedTier = 'simple';
+          // plan.isSimpleChat already true; nothing to change.
+        } else {
+          // Try preferred bucket, then the other, then degrade to simple.
+          let consumedTier: 'fast' | 'roundtable' | null = null;
+
+          try {
+            const primary = await consumeQuota(userId, preferredTier);
+            if (primary.allowed) {
+              consumedTier = preferredTier;
+              console.log(`[agent:chat] Auto→${preferredTier} (preferred) user=${userId} remaining=${primary.remaining} queryType=${plan.queryType}`);
+            } else {
+              const fallbackTier = preferredTier === 'fast' ? 'roundtable' : 'fast';
+              const secondary = await consumeQuota(userId, fallbackTier);
+              if (secondary.allowed) {
+                consumedTier = fallbackTier;
+                console.log(`[agent:chat] Auto→${fallbackTier} (fallback, ${preferredTier} exhausted) user=${userId} remaining=${secondary.remaining}`);
+              } else {
+                console.log(`[agent:chat] Auto→simple (both buckets exhausted) user=${userId} primary_reset=${primary.resetAt.toISOString()} fallback_reset=${secondary.resetAt.toISOString()}`);
+              }
+            }
+          } catch (err) {
+            console.error('[agent:chat] Auto quota cascade failed, allowing through as simple:', (err as Error).message);
+            consumedTier = null; // fail-open degrades to simple
+          }
+
+          if (consumedTier === 'roundtable') {
+            data.mode = 'roundtable'; // flip downstream checks into deep-research path
+            plan.isSimpleChat = false;
+            autoResolvedTier = 'roundtable';
+          } else if (consumedTier === 'fast') {
+            data.mode = 'fast';
+            plan.isSimpleChat = false;
+            autoResolvedTier = 'fast';
+          } else {
+            // Both exhausted — degrade to simple chat (no agent, no tools).
+            plan.isSimpleChat = true;
+            autoResolvedTier = 'simple';
+            autoDegraded = true;
+            // Tell the client so UI can show a subtle "running in lite mode" hint.
+            socket.emit('agent:chat:quota_degraded', {
+              sessionId,
+              reason: 'both_buckets_exhausted',
+              hint: "You're out of Fast and Roundtable quota — running in lite mode (no agents). Upgrade to restore full analysis.",
+            });
+          }
+        }
       }
 
       // Guardrail: image-heavy stock questions can be misrouted as general when digest is terse.
@@ -1190,20 +1441,41 @@ Text: "${query}"`;
         emitter.emitProgress(clarification);
         emitter.emitModule('done', 'completed', { duration: 0 });
         emitter.emitStreamDone(clarification);
-        try {
-          await prisma.chatMessage.create({
-            data: { userId, sessionId, role: 'assistant', content: clarification, agentId: 'superagent' }
-          });
-        } catch (_) {}
+        if (!isGuest) {
+          try {
+            await prisma.chatMessage.create({
+              data: { userId, sessionId, role: 'assistant', content: clarification, agentId: 'superagent' }
+            });
+          } catch (_) {}
+        }
         activeChatSessions.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
       }
 
-      socket.emit('agent:chat:routed', { 
-        sessionId, 
-        mode: (!hasImages && data.mode === 'roundtable') ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
+      // Emit the mode that actually ran. `mode` is the ChatMode the UI
+      // can render (must stay compatible: 'roundtable' | 'fast' | 'auto').
+      // `actualTier` + `requested` + `autoResolved` + `degraded` are the
+      // new source-of-truth fields for accurate badges / telemetry.
+      const actualTier: 'simple' | 'fast' | 'roundtable' =
+        (!hasImages && data.mode === 'roundtable') ? 'roundtable' :
+        plan.isSimpleChat ? 'simple' :
+        'fast';
+      // Legacy-compatible mode label for existing UI paths. Simple collapses
+      // to 'auto' here because the UI has no separate 'simple' chip and
+      // 'auto' matches how users perceive a model-only reply.
+      const legacyMode: 'roundtable' | 'fast' | 'auto' =
+        actualTier === 'roundtable' ? 'roundtable' :
+        actualTier === 'simple' ? 'auto' :
+        'fast';
+      socket.emit('agent:chat:routed', {
+        sessionId,
+        mode: legacyMode,
+        actualTier,
+        requested: requestedMode,
+        autoResolved: requestedMode === 'auto' ? autoResolvedTier : null,
+        degraded: autoDegraded,
       });
 
       const streamToChat = (chunk: string) => {
@@ -1271,11 +1543,13 @@ Text: "${query}"`;
             chatAbortControllers.delete(sessionId);
             return;
           }
-          try {
-            await prisma.chatMessage.create({
-              data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
-            });
-          } catch (e) { }
+          if (!isGuest) {
+            try {
+              await prisma.chatMessage.create({
+                data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
+              });
+            } catch (e) { }
+          }
           emitter.emitModule('done', 'completed', { duration: simpleDur });
           emitter.emitStreamDone(fullContent);
         } catch (streamErr: any) {
@@ -2745,32 +3019,47 @@ The HTML must:
       }
 
       const buildLocalSynthesisFallback = (cause: string): string => {
-        const compact = contextString
-          .replace(/\r/g, '')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
-        const preview = compact.length > 1400 ? `${compact.slice(0, 1400)}\n...(truncated)` : compact;
         const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+        // Count useful data fetched so the user knows their quota wasn't wasted,
+        // WITHOUT leaking the raw prompt / conversation history / raw post bodies.
+        const sourceCount = finalSocialSources?.length || 0;
+        // Short, human-readable upstream hint — avoid dumping HTML or stack traces.
+        const shortCause = (() => {
+          const raw = String(cause || '').trim();
+          if (/502\b|Bad Gateway/i.test(raw)) return isZh ? '上游网关暂时不可用 (502)' : 'upstream gateway unavailable (502)';
+          if (/504\b|Gateway Time-?out/i.test(raw)) return isZh ? '上游响应超时 (504)' : 'upstream timeout (504)';
+          if (/429\b|rate limit/i.test(raw)) return isZh ? '模型限流 (429)' : 'rate limited (429)';
+          if (/terminated|ECONNRESET|socket hang up/i.test(raw)) return isZh ? '连接中断' : 'connection dropped';
+          // Strip HTML tags and collapse whitespace so "terminated …<html>…502 Bad Gateway…" becomes readable.
+          return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120) || (isZh ? '未知错误' : 'unknown error');
+        })();
+
         if (isZh) {
           return [
-            '## 临时降级说明',
-            `最终合成阶段遇到上游模型错误（${cause}）。当前先返回降级摘要，避免你白等。`,
+            '## 合成失败',
+            '',
+            `刚才生成最终总结时模型返回错误（${shortCause}），已重试 2 次仍未成功。`,
+            sourceCount > 0
+              ? `本次搜索/抓取已成功获取 **${sourceCount}** 条数据（保留在上下文中）。`
+              : '',
             '',
             '### 建议',
-            '- 你可以直接回复“继续深度总结”，我会基于当前已抓取数据再次合成。',
-            '- 如果连续失败，建议稍后重试或切换模型。',
-            preview ? `\n### 已抓取数据摘要（截断）\n${preview}` : '',
-          ].join('\n');
+            '- 直接回复「**继续**」或「**重试总结**」即可基于已抓取数据再次合成，不需要重新搜索。',
+            '- 如连续失败，稍后重试或在输入栏左下切换模型。',
+          ].filter(Boolean).join('\n');
         }
         return [
-          '## Temporary Fallback',
-          `Final synthesis failed due to upstream model error (${cause}). Returning a degraded summary so the run does not fail silently.`,
+          '## Synthesis Failed',
+          '',
+          `The final summarizer returned an error (${shortCause}) after 2 retry attempts.`,
+          sourceCount > 0
+            ? `Search/fetch succeeded — **${sourceCount}** sources are preserved in context.`
+            : '',
           '',
           '### Next Step',
-          '- Reply with "continue synthesis" to retry based on fetched data.',
-          '- If this keeps failing, retry later or switch model/provider.',
-          preview ? `\n### Retrieved Context (truncated)\n${preview}` : '',
-        ].join('\n');
+          '- Reply **"continue"** or **"retry synthesis"** to re-run on the fetched data (no re-fetching needed).',
+          '- If this keeps failing, retry later or switch model from the input bar.',
+        ].filter(Boolean).join('\n');
       };
 
       const synthesizeFallbackContent = async (cause: string): Promise<string> => {
@@ -3086,27 +3375,29 @@ Research context:\n${synFullContent}${langInstruction}`;
         const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
         flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
 
-        await prisma.chatMessage.create({
-          data: {
-            userId,
-            sessionId,
-            role: 'assistant',
-            content: finalDbContent,
-            agentId: 'superagent',
-            metadata: JSON.stringify({
-              thinkingFlow: {
-                modules: flowModules,
-                isActive: false,
-                route: 'Super Agent Orchestrator',
-                ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
-              },
-              consensusResult: savedConsensusResult ?? undefined,
-              quoteCard: savedQuoteCard ?? undefined,
-              xProfileCard: savedXProfileCard ?? undefined,
-              sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
-            })
-          }
-        });
+        if (!isGuest) {
+          await prisma.chatMessage.create({
+            data: {
+              userId,
+              sessionId,
+              role: 'assistant',
+              content: finalDbContent,
+              agentId: 'superagent',
+              metadata: JSON.stringify({
+                thinkingFlow: {
+                  modules: flowModules,
+                  isActive: false,
+                  route: 'Super Agent Orchestrator',
+                  ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
+                },
+                consensusResult: savedConsensusResult ?? undefined,
+                quoteCard: savedQuoteCard ?? undefined,
+                xProfileCard: savedXProfileCard ?? undefined,
+                sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
+              })
+            }
+          });
+        }
         logSynthesisFinalText('primary', finalDbContent);
 
         emitter.emitModule('done', 'completed', { duration: dur });
@@ -3189,26 +3480,28 @@ Research context:\n${synFullContent}${langInstruction}`;
           data: { duration: dur, degraded: true, cause: 'synthesis_error' },
         });
 
-        await prisma.chatMessage.create({
-          data: {
-            userId,
-            sessionId,
-            role: 'assistant',
-            content: fallbackContent,
-            agentId: 'superagent',
-            metadata: JSON.stringify({
-              thinkingFlow: {
-                modules: fallbackModules,
-                isActive: false,
-                route: 'Super Agent Orchestrator',
-              },
-              quoteCard: savedQuoteCard ?? undefined,
-              xProfileCard: savedXProfileCard ?? undefined,
-              degraded: true,
-              degradedReason: errMsg,
-            }),
-          },
-        });
+        if (!isGuest) {
+          await prisma.chatMessage.create({
+            data: {
+              userId,
+              sessionId,
+              role: 'assistant',
+              content: fallbackContent,
+              agentId: 'superagent',
+              metadata: JSON.stringify({
+                thinkingFlow: {
+                  modules: fallbackModules,
+                  isActive: false,
+                  route: 'Super Agent Orchestrator',
+                },
+                quoteCard: savedQuoteCard ?? undefined,
+                xProfileCard: savedXProfileCard ?? undefined,
+                degraded: true,
+                degradedReason: errMsg,
+              }),
+            },
+          });
+        }
         logSynthesisFinalText('fallback', fallbackContent);
 
         streamToChat(fallbackContent);

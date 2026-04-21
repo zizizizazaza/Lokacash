@@ -287,6 +287,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
   const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
   useEffect(() => {
+    // Guests see Fast/Roundtable as locked (ModeSelector isGuest prop),
+    // so the quota badges are irrelevant for them — skip the auth-gated call.
+    if (!api.isAuthenticated) {
+      setRoundtableQuota(null);
+      setFastQuota(null);
+      return;
+    }
     api.getQuota()
       .then(q => {
         setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
@@ -542,7 +549,14 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
             {/* Input toolbar */}
             <div className="flex items-center justify-between px-3 pb-3">
               <div className="flex items-center gap-1">
-                <ModeSelector mode={mode} onModeChange={setMode} roundtableQuota={roundtableQuota} fastQuota={fastQuota} />
+                <ModeSelector
+                  mode={mode}
+                  onModeChange={setMode}
+                  roundtableQuota={roundtableQuota}
+                  fastQuota={fastQuota}
+                  isGuest={!api.isAuthenticated}
+                  onLockedClick={() => window.dispatchEvent(new Event('show-auth-modal'))}
+                />
                 {/* Selected Agent tag — sits right next to mode selector */}
                 {selectedAgent && (() => {
                   const ag = QUICK_ACTIONS.find(a => a.id === selectedAgent);

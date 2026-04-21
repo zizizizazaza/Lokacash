@@ -2,6 +2,8 @@ import prisma from '../db.js';
 import { recordCreditEvent, ISSUER_EVENTS, INVESTOR_EVENTS } from './credit.service.js';
 import { notifyMany } from './notification.service.js';
 import { getIO } from '../socket/index.js';
+import { sweepExpiredQuotas } from './subscription.service.js';
+import { sweepGuestQuotas } from './guest.service.js';
 
 // Interval handles for cleanup
 let overdueInterval: ReturnType<typeof setInterval> | null = null;
@@ -10,6 +12,8 @@ let proposalInterval: ReturnType<typeof setInterval> | null = null;
 let fundraiseInterval: ReturnType<typeof setInterval> | null = null;
 let endingSoonInterval: ReturnType<typeof setInterval> | null = null;
 let redemptionInterval: ReturnType<typeof setInterval> | null = null;
+let subscriptionResetInterval: ReturnType<typeof setInterval> | null = null;
+let guestQuotaSweepInterval: ReturnType<typeof setInterval> | null = null;
 
 // ==================== Expired Fundraise Detection ====================
 // Auto-fail fundraises that pass durationDays without reaching Soft Cap
@@ -457,6 +461,27 @@ export function startScheduler() {
   // Process redemption queue every 30 minutes
   redemptionInterval = setInterval(processRedemptionQueue, 30 * 60 * 1000);
 
+  // Roll subscription quota windows forward for idle users every hour.
+  // Active users get lazy-reset on read; this handles the inactive tail.
+  subscriptionResetInterval = setInterval(async () => {
+    try {
+      const count = await sweepExpiredQuotas();
+      if (count > 0) console.log(`[Scheduler] Rolled subscription quota windows for ${count} users`);
+    } catch (err) {
+      console.error('[Scheduler] Subscription quota sweep failed:', err);
+    }
+  }, 60 * 60 * 1000);
+
+  // Same idea for guest quota windows (per-guest and per-IP tables).
+  guestQuotaSweepInterval = setInterval(async () => {
+    try {
+      const count = await sweepGuestQuotas();
+      if (count > 0) console.log(`[Scheduler] Rolled guest quota windows for ${count} records`);
+    } catch (err) {
+      console.error('[Scheduler] Guest quota sweep failed:', err);
+    }
+  }, 60 * 60 * 1000);
+
   // Run once immediately on startup (after 5s delay for DB warmup)
   setTimeout(() => {
     checkExpiredFundraises();
@@ -465,6 +490,8 @@ export function startScheduler() {
     checkHoldTimeMilestones();
     finalizeExpiredProposals();
     processRedemptionQueue();
+    sweepExpiredQuotas().catch((err) => console.error('[Scheduler] Initial quota sweep failed:', err));
+    sweepGuestQuotas().catch((err) => console.error('[Scheduler] Initial guest quota sweep failed:', err));
   }, 5000);
 }
 
@@ -475,5 +502,7 @@ export function stopScheduler() {
   if (holdTimeInterval) clearInterval(holdTimeInterval);
   if (proposalInterval) clearInterval(proposalInterval);
   if (redemptionInterval) clearInterval(redemptionInterval);
+  if (subscriptionResetInterval) clearInterval(subscriptionResetInterval);
+  if (guestQuotaSweepInterval) clearInterval(guestQuotaSweepInterval);
   console.log('[Scheduler] Background jobs stopped');
 }
