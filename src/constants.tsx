@@ -137,13 +137,26 @@ export const QUICK_ACTIONS = [
   { id: 'portfolio', icon: ActionIcons.Portfolio, label: 'Review Portfolio' },
 ];
 
-export const USE_CASES = [
-  { id: 'invest', title: 'Is NVIDIA Still a Buy After Q4?', desc: 'Multi-agent consensus on earnings, valuation, and market timing', prompt: 'Help me analyze NVIDIA\'s recent stock performance and whether it\'s worth investing now', tags: ['Stock', 'Earnings'] },
-  { id: 'research', title: 'SE Asia Food Delivery Landscape', desc: 'Market sizing, key players, and growth trends across the region', prompt: 'Research the competitive landscape of the Southeast Asian food delivery market', tags: ['Industry', 'Market Size'] },
-  { id: 'compete', title: 'AI Agent Demand in the Last 30 Days', desc: 'Track how market demand shifted across categories recently', prompt: 'Search and analyze how AI Agent demand has changed in the last 30 days across different categories', tags: ['Trends', '30-Day'] },
-  { id: 'evaluate', title: 'Startup Due Diligence Report', desc: 'Team background check, business model, and tech feasibility', prompt: 'Evaluate this startup — analyze team background, business model, and technical feasibility', tags: ['Team', 'Feasibility'] },
-  { id: 'collab', title: 'Q2 Roadmap → Task Breakdown', desc: 'Turn a product roadmap into assigned tasks with deadlines', prompt: 'Help me break down the Q2 product roadmap into actionable tasks with owners and deadlines', tags: ['Tasks', 'Planning'] },
-  { id: 'predict', title: 'Polymarket Opportunities Now', desc: 'Which prediction markets have the best risk-reward right now?', prompt: 'Which prediction markets on Polymarket are worth paying attention to right now?', tags: ['Odds', 'Sentiment'] },
+export type UseCaseDomain = 'stocks' | 'web3';
+
+export const USE_CASES: Array<{
+  id: string;
+  title: string;
+  desc: string;
+  prompt: string;
+  tags: string[];
+  domain: UseCaseDomain;
+}> = [
+  // ── Stocks ──
+  { id: 'invest',   domain: 'stocks', title: 'Is NVIDIA Still a Buy After Q4?',       desc: 'Multi-agent consensus on earnings, valuation, and market timing',       prompt: "Help me analyze NVIDIA's recent stock performance and whether it's worth investing now",          tags: ['Stock', 'Earnings'] },
+  { id: 'ai-moat',  domain: 'stocks', title: 'AI Infrastructure Moat',                desc: 'Which AI infra companies have real defensibility vs hype',              prompt: 'Which AI infrastructure companies have the best moat right now?',                                  tags: ['AI', 'Moat'] },
+  { id: 'research', domain: 'stocks', title: 'SE Asia Food Delivery Landscape',       desc: 'Market sizing, key players, and growth trends across the region',       prompt: 'Research the competitive landscape of the Southeast Asian food delivery market',                   tags: ['Industry', 'Market Size'] },
+  { id: 'evaluate', domain: 'stocks', title: 'Startup Due Diligence Report',          desc: 'Team background check, business model, and tech feasibility',           prompt: 'Evaluate this startup — analyze team background, business model, and technical feasibility',       tags: ['Team', 'Feasibility'] },
+  // ── Web3 ──
+  { id: 'l2-traction', domain: 'web3', title: 'Which L2s Have Real Traction?',        desc: 'Usage data, TVL growth, and real-user signals across L2s this quarter', prompt: 'Which L2s are gaining real user traction this quarter? Look at on-chain activity and TVL trends.', tags: ['L2', 'On-Chain'] },
+  { id: 'compete',   domain: 'web3', title: 'AI Agent Demand · 30-Day Trend',         desc: 'Track how AI-agent narrative demand shifted on-chain recently',          prompt: 'Search and analyze how AI Agent demand has changed in the last 30 days across different categories', tags: ['Narrative', '30-Day'] },
+  { id: 'predict',   domain: 'web3', title: 'Polymarket Opportunities Now',           desc: 'Which prediction markets have the best risk-reward right now?',         prompt: 'Which prediction markets on Polymarket are worth paying attention to right now?',                  tags: ['Odds', 'Sentiment'] },
+  { id: 'l1-compare',domain: 'web3', title: 'Sui vs Aptos · Tokenomics Deep Dive',    desc: 'Compare supply schedules, staking yields, and validator economics',     prompt: 'Evaluate Sui vs Aptos — which L1 has better tokenomics and long-term defensibility?',              tags: ['L1', 'Tokenomics'] },
 ];
 
 export const FEATURED_AGENTS = [

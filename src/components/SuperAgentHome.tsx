@@ -28,6 +28,31 @@ interface SuperAgentHomeProps {
   onRequireLogin?: () => void;
 }
 
+// ─── Domain (Stocks / Web3) toggle — from teammate's feat/only-super-agent ─────
+type Domain = 'stocks' | 'web3';
+const DOMAIN_STORAGE_KEY = 'loka_home_domain';
+const DOMAIN_THEME: Record<Domain, { accent: string; accentSoft: string; ring: string; label: string }> = {
+  stocks: { accent: '#10b981', accentSoft: 'rgba(16, 185, 129, 0.12)', ring: 'rgba(16, 185, 129, 0.35)', label: 'Stocks' },
+  web3:   { accent: '#8b5cf6', accentSoft: 'rgba(139, 92, 246, 0.12)', ring: 'rgba(139, 92, 246, 0.35)', label: 'Web3'   },
+};
+
+const DomainIcon: React.FC<{ domain: Domain; className?: string }> = ({ domain, className = 'w-4 h-4' }) => {
+  if (domain === 'stocks') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <path d="M3 17l5-5 4 4 4-6 5 5" />
+        <path d="M21 21H3" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" />
+      <path d="M12 7l-6 3.5M12 7l6 3.5M12 22V13M12 13L6 10.5M12 13l6-2.5" />
+    </svg>
+  );
+};
+
 // ─── Home Feed: Crypto Trending + Upcoming Events Calendar ─────────────
 interface TrendingCoinItem {
   id: string;
@@ -283,6 +308,25 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const prevNewChatRef = useRef<number | null>(null);
   const iflytekRef = useRef<IFlytekStreamer | null>(null);
 
+  // ── Domain toggle (Stocks ⇆ Web3) ──────────────────────────────
+  const [domain, setDomain] = useState<Domain>(() => {
+    if (typeof window === 'undefined') return 'stocks';
+    const stored = window.localStorage.getItem(DOMAIN_STORAGE_KEY);
+    return stored === 'web3' ? 'web3' : 'stocks';
+  });
+  const [showWelcome, setShowWelcome] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    // Force welcome via ?welcome=1 for testing
+    if (window.location.search.includes('welcome=1')) return true;
+    return window.localStorage.getItem(DOMAIN_STORAGE_KEY) === null;
+  });
+  const domainTheme = DOMAIN_THEME[domain];
+  const pickDomain = (d: Domain) => {
+    setDomain(d);
+    try { window.localStorage.setItem(DOMAIN_STORAGE_KEY, d); } catch {}
+    setShowWelcome(false);
+  };
+
   // Roundtable quota
   const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
   const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
@@ -394,13 +438,24 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     e.target.value = '';
   };
 
-  const PLACEHOLDERS = [
-    'Ask about any asset, market, or investing idea…',
-    'Is NVIDIA still a strong buy after Q4?',
-    'Compare Tesla vs BYD fundamentals for 2026',
-    'Which AI infrastructure companies have the best moat?',
-    'Build me a diversified portfolio for a 3-year horizon',
-  ];
+  const PLACEHOLDERS = domain === 'stocks'
+    ? [
+        'Ask about any stock, sector, or investing idea…',
+        'Which AI infrastructure companies have the best moat?',
+        'Is NVIDIA still a strong buy after Q4?',
+        'Compare Tesla vs BYD fundamentals for 2026',
+        'Build me a diversified portfolio for a 3-year horizon',
+      ]
+    : [
+        'Ask about any token, protocol, or on-chain trend…',
+        'Which L2s are gaining real user traction this quarter?',
+        'Should I HODL or sell my BTC above $100K?',
+        'Evaluate Sui vs Aptos — which L1 has better tokenomics?',
+        'Which prediction markets on Polymarket have edge right now?',
+      ];
+
+  // Reset placeholder index + rotating counter when domain flips
+  useEffect(() => { setPhIdx(0); }, [domain]);
 
   // ── Synchronous "New Chat" detection ─────────────────────
   // Detect new-chat navigation DURING RENDER (before SuperAgentChat can mount).
@@ -456,22 +511,106 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-y-auto">
-      {/* ── Upgrade banner — top-right ── */}
-      <div className="hidden md:flex justify-end px-6 pt-4 pb-0">
-        <PlanUpgradeEntry size="md" hideIfMax />
+    <div className="flex-1 flex flex-col h-full overflow-y-auto" style={{ ['--domain-accent' as any]: domainTheme.accent, ['--domain-accent-soft' as any]: domainTheme.accentSoft }}>
+      {/* ── First-visit full-surface domain picker ── */}
+      {showWelcome && (
+        <div className="flex-1 flex flex-col items-center justify-center px-6 py-10" style={{ animation: 'fade-up 0.4s var(--ease-out-expo) both' }}>
+          <div className="max-w-[860px] w-full">
+            <h1 className="text-[32px] md:text-[44px] font-extrabold tracking-tight text-gray-900 leading-[1.1] text-center mb-12 md:mb-14">
+              Where would you like to start?
+            </h1>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {(['stocks', 'web3'] as Domain[]).map(d => {
+                const theme = DOMAIN_THEME[d];
+                const samples = USE_CASES.filter(u => u.domain === d).slice(0, 3);
+                const tagline = d === 'stocks'
+                  ? 'Equities, earnings, and industry research.'
+                  : 'Tokens, on-chain signals, and prediction markets.';
+                return (
+                  <button
+                    key={d}
+                    onClick={() => pickDomain(d)}
+                    className="group text-left bg-white rounded-2xl border border-gray-200 p-7 transition-all duration-200"
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = theme.accent; e.currentTarget.style.boxShadow = `0 8px 28px ${theme.ring}`; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = ''; e.currentTarget.style.boxShadow = ''; }}
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: theme.accentSoft, color: theme.accent }}>
+                        <DomainIcon domain={d} className="w-[18px] h-[18px]" />
+                      </div>
+                      <div className="text-[20px] font-bold text-gray-900">{theme.label}</div>
+                    </div>
+
+                    <p className="text-[13px] text-gray-500 mb-6">{tagline}</p>
+
+                    <div className="space-y-2">
+                      {samples.map(s => (
+                        <div key={s.id} className="text-[13px] text-gray-700 leading-snug">
+                          <span className="text-gray-300">&ldquo;</span>{s.title}<span className="text-gray-300">&rdquo;</span>
+                        </div>
+                      ))}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={() => setShowWelcome(false)}
+              className="block mx-auto mt-10 text-[12px] text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              Skip for now
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!showWelcome && (<>
+      {/* ── Top bar: Domain toggle + Upgrade ── */}
+      <div className="flex items-center justify-between gap-3 px-4 md:px-6 pt-4 pb-0">
+        <div
+          role="tablist"
+          aria-label="Asset domain"
+          className="inline-flex items-center gap-1 p-1 rounded-full bg-gray-100/80 border border-gray-200/80"
+        >
+          {(['stocks', 'web3'] as Domain[]).map(d => {
+            const active = domain === d;
+            const theme = DOMAIN_THEME[d];
+            return (
+              <button
+                key={d}
+                role="tab"
+                aria-selected={active}
+                onClick={() => pickDomain(d)}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-[12px] font-semibold transition-all"
+                style={active
+                  ? { background: theme.accent, color: '#fff', boxShadow: `0 2px 10px ${theme.ring}` }
+                  : { color: '#6b7280' }}
+              >
+                <DomainIcon domain={d} className="w-3.5 h-3.5" />
+                <span>{theme.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="hidden md:block">
+          <PlanUpgradeEntry size="md" hideIfMax />
+        </div>
       </div>
       {/* ── Hero + Input ── */}
-      <div className="hero-zone flex flex-col items-center pt-8 md:pt-16 pb-6 px-4">
+      <div className="hero-zone flex flex-col items-center pt-6 md:pt-10 pb-6 px-4">
         <div className="max-w-[640px] w-full space-y-7" style={{ position: 'relative', zIndex: 1 }}>
           {/* Title */}
           <div className="text-center hero-title space-y-2">
             <h1 className="text-[38px] md:text-[46px] font-extrabold tracking-tight leading-[1.15]">
               <span className="text-gray-900">Where would you like to </span>
-              <span style={{ color: 'var(--accent)' }}>invest?</span>
+              <span style={{ color: domainTheme.accent }}>invest?</span>
             </h1>
             <p className="text-[14px] text-gray-400 font-normal">
-              Multi-agent AI built for investment intelligence.
+              {domain === 'stocks'
+                ? 'Multi-agent AI for stocks, sectors & macro intelligence.'
+                : 'Multi-agent AI for tokens, protocols & on-chain signals.'}
             </p>
           </div>
 
@@ -694,18 +833,20 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       {!selectedAgent && (
         <div className="px-4 pb-10 pt-8 max-w-[640px] w-full mx-auto">
           <div className="flex items-center gap-2 mb-4">
-            <span style={{ display: 'inline-block', width: 3, height: 14, borderRadius: 2, backgroundColor: 'var(--accent)', flexShrink: 0 }} />
-            <h2 className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">Explore Use Cases</h2>
+            <span style={{ display: 'inline-block', width: 3, height: 14, borderRadius: 2, backgroundColor: domainTheme.accent, flexShrink: 0 }} />
+            <h2 className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">
+              {domain === 'stocks' ? 'Stocks · Explore Use Cases' : 'Web3 · Explore Use Cases'}
+            </h2>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-            {USE_CASES.map(uc => (
+            {USE_CASES.filter(uc => uc.domain === domain).map(uc => (
               <button
                 key={uc.id}
                 onClick={() => setChatMessage(uc.prompt)}
                 className="usecase-card group text-left bg-white border border-gray-100 rounded-xl p-3 cursor-pointer"
               >
-                <div className="w-6 h-6 rounded-md bg-gray-50 flex items-center justify-center text-gray-400 mb-2">{UseCaseIcons[uc.id] ? React.createElement(UseCaseIcons[uc.id]) : null}</div>
+                <div className="w-6 h-6 rounded-md flex items-center justify-center mb-2" style={{ background: domainTheme.accentSoft, color: domainTheme.accent }}>{UseCaseIcons[uc.id] ? React.createElement(UseCaseIcons[uc.id]) : null}</div>
                 <h3 className="text-[12px] font-semibold text-gray-900 mb-0.5 leading-snug">{uc.title}</h3>
                 <p className="text-[11px] text-gray-400 leading-snug mb-2">{uc.desc}</p>
                 <div className="flex flex-wrap gap-1">
@@ -719,8 +860,9 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         </div>
       )}
 
-      {/* ── Events Calendar — recently listed on OKX (public, no auth) ── */}
-      {!selectedAgent && (
+      {/* ── Events Calendar — crypto-only content (Crypto Trending + catalysts).
+           Hidden in Stocks domain since CoinGecko/CoinMarketCal data is irrelevant there. ── */}
+      {!selectedAgent && domain === 'web3' && (
         <EventsCalendar onPick={(prompt) => setChatMessage(prompt)} />
       )}
 
@@ -781,6 +923,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           </div>
         );
       })()}
+      </>)}
 
     </div>
   );
