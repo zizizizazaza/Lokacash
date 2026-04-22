@@ -192,6 +192,27 @@ const AnimStyles = () => (
       animation: ticker-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
     }
 
+    /* ── Stepper: connector flow (prev done → current active) ── */
+    @keyframes stepper-connector-flow {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(200%); }
+    }
+    /* ── Stepper: check mark draw-in ── */
+    @keyframes stepper-check-draw {
+      0%   { stroke-dashoffset: 24; }
+      100% { stroke-dashoffset: 0; }
+    }
+    /* ── Stepper: active ring pulse ── */
+    @keyframes stepper-active-ring {
+      0%   { transform: scale(0.6); opacity: 0.8; }
+      70%  { transform: scale(1.25); opacity: 0; }
+      100% { transform: scale(1.25); opacity: 0; }
+    }
+    /* ── Stepper: spinner rotation ── */
+    @keyframes stepper-spin {
+      to { transform: rotate(360deg); }
+    }
+
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {

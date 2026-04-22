@@ -308,9 +308,14 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const [welcomeStep, setWelcomeStep] = useState<0 | 1>(0);
   const domainTheme = DOMAIN_THEME[domain];
   const pickDomain = (d: Domain) => {
+    if (d === domain) return;
     setDomain(d);
     try { window.localStorage.setItem(DOMAIN_STORAGE_KEY, d); } catch {}
     setShowWelcome(false);
+    // Switching domain closes any open agent pill and its scenario, so
+    // the Stocks/Web3 views never bleed into each other.
+    setSelectedAgent(null);
+    setSelectedScenario(null);
   };
   const dismissWelcome = () => setShowWelcome(false);
 
@@ -751,13 +756,50 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
   return (
     <div
-      className="flex-1 flex flex-col h-full overflow-y-auto relative"
+      className={`flex-1 flex flex-col h-full overflow-y-auto relative${domain === 'stocks' ? ' stocks-classic' : ''}`}
       style={{
         ['--domain-accent' as any]: domainTheme.accent,
         ['--domain-accent-soft' as any]: domainTheme.accentSoft,
         ...(domain === 'web3' ? { backgroundColor: '#FFFFFF' } : {}),
       }}
     >
+      {/* ── Stocks page: classical / editorial styling (scoped) ── */}
+      {domain === 'stocks' && (
+        <style>{`
+          .stocks-classic .hero-title h1 {
+            /* Wider, weightier serif — avoids the "tall & skinny" look */
+            font-family: 'Playfair Display', 'Noto Serif SC', 'Songti SC', Georgia, 'Times New Roman', ui-serif, serif;
+            font-weight: 700;
+            letter-spacing: -0.015em;
+            font-size: 34px;
+            line-height: 1.15;
+          }
+          @media (min-width: 768px) {
+            .stocks-classic .hero-title h1 { font-size: 40px; }
+          }
+          .stocks-classic .hero-title .hero-rule {
+            display: inline-block;
+            width: 44px;
+            height: 1px;
+            background: #cbd5e1;
+            margin: 4px auto 14px;
+          }
+          .stocks-classic .hero-title p {
+            font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+            font-style: normal;
+            font-weight: 400;
+            color: #64748b;
+            font-size: 13.5px;
+            letter-spacing: 0.01em;
+          }
+          .stocks-classic .usecase-card h3 {
+            font-family: 'Playfair Display', Georgia, 'Times New Roman', ui-serif, serif;
+            font-weight: 600;
+            font-size: 15px;
+            letter-spacing: -0.005em;
+          }
+        `}</style>
+      )}
       {/* ── Web3 ambient: canvas dot-wave (inspired by variant.com/community) ── */}
       {domain === 'web3' && (
         <>
@@ -817,12 +859,14 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         </div>
       </div>
       {/* ── Hero + Input ── */}
-      <div className="hero-zone flex flex-col items-center pt-6 md:pt-10 pb-6 px-4 relative" style={{ zIndex: 10, ...(domain === 'web3' ? { background: 'transparent', backgroundImage: 'none' } : {}) }}>
+      <div className="hero-zone flex flex-col items-center pt-14 md:pt-20 pb-6 px-4 relative" style={{ zIndex: 10, ...(domain === 'web3' ? { background: 'transparent', backgroundImage: 'none' } : {}) }}>
         <div className="max-w-[640px] w-full space-y-7" style={{ position: 'relative', zIndex: 1 }}>
           {/* Title */}
           <div className="text-center hero-title space-y-2">
             <h1 className="text-[38px] md:text-[46px] font-extrabold tracking-tight leading-[1.15] text-gray-900">
-              Where would you like to invest?
+              {domain === 'stocks'
+                ? 'Where would you like to invest?'
+                : 'Where is the on-chain alpha?'}
             </h1>
             <p className="text-[14px] text-gray-400 font-normal">
               {domain === 'stocks'
@@ -967,7 +1011,20 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           </div>
 
           {/* Agent Guide — only when an agent is selected */}
-          {selectedAgent && AGENT_GUIDES[selectedAgent] && (
+          {selectedAgent && AGENT_GUIDES[selectedAgent] && (() => {
+            // Scenario IDs that only make sense in one domain. Anything
+            // not listed here is shown in both domains.
+            const STOCKS_ONLY_SCENARIOS = new Set(['stock', 'public', 'usstock', 'ashare']);
+            const WEB3_ONLY_SCENARIOS   = new Set(['crypto', 'project']);
+            const filterScenarios = (scenarios: NonNullable<typeof AGENT_GUIDES[string]['scenarios']>) =>
+              scenarios.filter(s => {
+                if (domain === 'stocks' && WEB3_ONLY_SCENARIOS.has(s.id)) return false;
+                if (domain === 'web3'   && STOCKS_ONLY_SCENARIOS.has(s.id)) return false;
+                return true;
+              });
+            const rawScenarios = AGENT_GUIDES[selectedAgent].scenarios;
+            const scenarios = rawScenarios ? filterScenarios(rawScenarios) : undefined;
+            return (
             <div className="hero-guide space-y-3" style={{ animation: 'fade-up 0.35s var(--ease-out-expo) both' }}>
 
               {/* Guru carousel — only for guru-council, wider than input box */}
@@ -977,9 +1034,9 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                 </div>
               )}
 
-              {AGENT_GUIDES[selectedAgent].scenarios && (
+              {scenarios && scenarios.length > 0 && (
                 <div className="flex flex-wrap gap-2">
-                  {AGENT_GUIDES[selectedAgent].scenarios!.map(s => (
+                  {scenarios.map(s => (
                     <button
                       key={s.id}
                       onClick={() => setSelectedScenario(selectedScenario === s.id ? null : s.id)}
@@ -994,8 +1051,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
               {(() => {
                 const guide = AGENT_GUIDES[selectedAgent];
-                const prompts = guide.scenarios
-                  ? guide.scenarios.find(s => s.id === selectedScenario)?.prompts ?? []
+                const prompts = scenarios
+                  ? scenarios.find(s => s.id === selectedScenario)?.prompts ?? []
                   : guide.prompts ?? [];
                 if (!prompts.length) return null;
                 return (
@@ -1014,7 +1071,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                 );
               })()}
             </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Agent pills — outside max-w-640, full width row */}

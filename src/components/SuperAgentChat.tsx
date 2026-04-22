@@ -1411,14 +1411,13 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
                 d3.zoomIdentity.translate(tx, ty).scale(scale),
             );
         };
-        // ── Staged reveal animation (only when animate=true, i.e. first generation) ──
-        // Historical messages open fully visible — no fade-in.
-        const MAX_STAGE = 4;
-        const STEP_MS = 900;
-        const FADE_MS = 550;
         // Schedule fit once the force layout has settled. For animated reveals
         // we wait until the last stage finished fading in, so every node has
         // settled into position before we measure the bounds.
+        // ── Staged reveal animation constants (must be declared before fitDelay uses them) ──
+        const MAX_STAGE = 4;
+        const STEP_MS = 900;
+        const FADE_MS = 550;
         const fitDelay = animate ? (400 + 4 * STEP_MS + 700) : 900;
         const fitTimer = setTimeout(() => fitToBounds(40), fitDelay);
         // Also refit if the container resizes
@@ -1426,6 +1425,9 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
             ? new ResizeObserver(() => fitToBounds(40))
             : null;
         if (ro && containerRef.current) ro.observe(containerRef.current);
+
+        // ── Staged reveal animation (only when animate=true, i.e. first generation) ──
+        // Historical messages open fully visible — no fade-in.
         const timers: ReturnType<typeof setTimeout>[] = [];
         if (!animate) {
             // Show everything immediately
@@ -1793,6 +1795,129 @@ const CANNED_THINKING_MESSAGES: Record<string, string[]> = {
         'Structuring the argument',
     ],
 };
+
+// ─── PlanPipeline — compact stage pipeline (reused by Roundtable header) ──
+// Pushes "process as result" into the left column instead of burying it in
+// the right panel. English only — we intentionally ignore backend-provided
+// `planningMessage` which may be Chinese.
+const PlanPipeline: React.FC<{ thinking: ThinkingFlow; compact?: boolean }> = ({ thinking, compact }) => {
+    const isRt = thinking.routedMode === 'roundtable';
+
+    const stages = useMemo(() => {
+        if (isRt) {
+            const dataArr = thinking.rtDataSearch || [];
+            const dataActive = dataArr.some(s => s.status === 'active');
+            const dataDone = dataArr.length > 0 && dataArr.every(s => s.status === 'done');
+            const roundsArr = thinking.rtRounds || [];
+            const roundsActive = roundsArr.some(r => r.status === 'active');
+            const roundsDone = roundsArr.length > 0 && roundsArr.every(r => r.status === 'done');
+            return [
+                { key: 'summon', label: 'Summon',
+                    done: thinking.rtPreparationStatus === 'done',
+                    active: thinking.rtPreparationStatus !== 'done' && !dataActive && !roundsActive },
+                { key: 'research', label: 'Research',
+                    done: dataDone, active: dataActive },
+                { key: 'debate', label: 'Debate',
+                    done: roundsDone, active: roundsActive },
+                { key: 'consensus', label: 'Consensus',
+                    done: thinking.rtConsensus?.status === 'done',
+                    active: thinking.rtConsensus?.status === 'active' },
+                { key: 'report', label: 'Report',
+                    done: thinking.rtReportStatus === 'done',
+                    active: thinking.rtReportStatus === 'active' },
+            ];
+        }
+        const trace = thinking.toolTrace || [];
+        const anyRunning = trace.some(t => t.status === 'running');
+        const anyDone = trace.some(t => t.status === 'done');
+        return [
+            { key: 'route', label: 'Route',
+                done: !!thinking.routedMode, active: !thinking.routedMode && thinking.isActive },
+            { key: 'research', label: 'Research',
+                done: anyDone && !anyRunning && !thinking.isActive,
+                active: anyRunning },
+            { key: 'respond', label: 'Respond',
+                done: !thinking.isActive,
+                active: thinking.isActive && !anyRunning && !!thinking.routedMode },
+        ];
+    }, [thinking, isRt]);
+
+    if (stages.every(s => !s.done && !s.active)) return null;
+
+    const txtCls = compact ? 'text-[10px]' : 'text-[10.5px]';
+
+    return (
+        <div className="inline-flex items-center gap-1.5">
+            {stages.map((s, i) => {
+                const state: 'done' | 'active' | 'pending' = s.done ? 'done' : s.active ? 'active' : 'pending';
+                const prev = i > 0 ? stages[i - 1] : null;
+                // Connector filled only when prev step is done. If current step is active,
+                // animate a gradient sweep from prev (green) → current (gray) to visualize progress.
+                const connectorFilled = !!prev && prev.done;
+                const connectorAnimating = connectorFilled && state === 'active';
+                return (
+                    <React.Fragment key={s.key}>
+                        {i > 0 && (
+                            connectorAnimating ? (
+                                <span className="relative h-px w-4 rounded-full overflow-hidden bg-gray-200">
+                                    {/* base tint so it's not fully grey */}
+                                    <span className="absolute inset-0 bg-emerald-500/20" />
+                                    {/* moving shimmer */}
+                                    <span
+                                        className="absolute inset-y-0 left-0 w-1/2 rounded-full bg-gradient-to-r from-transparent via-emerald-500 to-transparent"
+                                        style={{ animation: 'stepper-connector-flow 1.4s ease-in-out infinite' }}
+                                    />
+                                </span>
+                            ) : (
+                                <span className={`h-px w-4 rounded-full transition-colors duration-500 ${connectorFilled ? 'bg-emerald-500' : 'bg-gray-200'}`} />
+                            )
+                        )}
+                        <span className="inline-flex items-center gap-1">
+                            {state === 'done' ? (
+                                <span className="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-emerald-500 text-white shrink-0 shadow-[0_0_0_2px_rgba(16,185,129,0.12)]">
+                                    <svg className="w-[8px] h-[8px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={4} strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M5 13l4 4L19 7" style={{ strokeDasharray: 24, strokeDashoffset: 0, animation: 'stepper-check-draw 0.35s ease-out' }} />
+                                    </svg>
+                                </span>
+                            ) : state === 'active' ? (
+                                <span className="relative flex items-center justify-center w-3.5 h-3.5 shrink-0">
+                                    {/* outer expanding ring */}
+                                    <span className="absolute inset-0 rounded-full border-2 border-gray-900/25" style={{ animation: 'stepper-active-ring 1.6s ease-in-out infinite' }} />
+                                    {/* rotating arc */}
+                                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 24 24" style={{ animation: 'stepper-spin 1.2s linear infinite' }}>
+                                        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"
+                                            className="text-gray-900" strokeDasharray="14 42" />
+                                    </svg>
+                                    {/* center solid dot */}
+                                    <span className="relative w-1.5 h-1.5 rounded-full bg-gray-900" />
+                                </span>
+                            ) : (
+                                <span className="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0" />
+                            )}
+                            <span className={`${txtCls} tracking-wide transition-colors ${
+                                state === 'done' ? 'text-gray-600 font-medium'
+                                : state === 'active' ? 'text-gray-900 font-semibold'
+                                : 'text-gray-400'
+                            }`}>{s.label}</span>
+                        </span>
+                    </React.Fragment>
+                );
+            })}
+        </div>
+    );
+};
+
+// Kept as a no-op alias so older imports in this file don't break during the
+// merge into RoundtableGraphInline. Safe to remove in a follow-up cleanup.
+class PlanCardBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+    constructor(props: { children: React.ReactNode }) {
+        super(props);
+        this.state = { hasError: false };
+    }
+    static getDerivedStateFromError() { return { hasError: true }; }
+    componentDidCatch(err: unknown, info: unknown) { console.error('[PlanCard crashed]', err, info); }
+    render() { return this.state.hasError ? null : this.props.children; }
+}
 
 // ─── ThinkingInlineTrigger (Grok-style with staged progress rows) ──────
 const ThinkingInlineTrigger: React.FC<{
@@ -2191,32 +2316,428 @@ const TerminalLogPanel: React.FC<{ thinking: ThinkingFlow | null }> = ({ thinkin
     );
 };
 
-// ─── RoundtableGraphInline (collapsible card in chat column) ────────
-const RoundtableGraphInline: React.FC<{
-    isLive: boolean;
-    defaultOpen?: boolean;
-}> = ({ isLive, defaultOpen = true }) => {
-    const [open, setOpen] = useState(defaultOpen);
+// ─── RoundtableWorkbench ─────────────────────────────────────────
+// Unified workbench card (replaces RoundtableGraphInline):
+//   left column  = rich agent roster (avatar + name + role + bio + tags)
+//   right column = tabs (Graph | Debate) — no redundant top bar
+const ROUNDTABLE_AGENT_PROFILES: Record<string, { bio: string; tags: string[]; skills: string[]; framework: string }> = {
+    fundamental_specialist: { bio: 'Deep-dives into financial statements, earnings quality, and intrinsic value.', tags: ['Financials', 'Earnings', 'Valuation'], skills: ['DCF Modeling', 'Ratio Analysis', 'Earnings Quality'], framework: 'Bottom-up fundamental analysis with emphasis on margin of safety.' },
+    valuation_specialist:    { bio: 'Builds multi-scenario valuation models to determine fair value ranges.', tags: ['DCF', 'Comparable', 'Models'], skills: ['DCF', 'Relative Valuation', 'Sum-of-Parts'], framework: 'Multi-model convergence with scenario-weighted fair value.' },
+    macro_specialist:        { bio: 'Tracks macro trends, interest rates, and policy shifts that move markets.', tags: ['Macro', 'Rates', 'Policy'], skills: ['Macro Forecasting', 'Cross-Asset', 'Policy Analysis'], framework: 'Top-down macro overlay with cross-asset correlation analysis.' },
+    risk_specialist:         { bio: 'Identifies tail risks, stress-tests portfolios, and models downside scenarios.', tags: ['Risk', 'Hedging', 'Stress Test'], skills: ['VaR', 'Stress Testing', 'Scenario Analysis'], framework: 'Risk-first approach with pre-mortem analysis and Monte Carlo simulations.' },
+    allocation_specialist:   { bio: 'Optimizes asset allocation across ETFs, sectors, and geographies.', tags: ['ETF', 'Allocation', 'Diversification'], skills: ['MPT', 'Factor Exposure', 'Rebalancing'], framework: 'Modern portfolio theory with factor-based tilts.' },
+    fund_specialist:         { bio: 'Evaluates fund performance, manager quality, and fee structures.', tags: ['Funds', 'Alpha', 'Selection'], skills: ['Fund Screening', 'Alpha Analysis', 'Fee Optimization'], framework: 'Quantitative fund selection with qualitative manager assessment.' },
+    options_specialist:      { bio: 'Designs options strategies and analyzes Greeks for risk/reward optimization.', tags: ['Options', 'Greeks', 'Volatility'], skills: ['Options Pricing', 'Greeks Analysis', 'Vol Surface'], framework: 'Volatility-driven strategy selection with Greeks-based risk management.' },
+    crypto_specialist:       { bio: 'Analyzes crypto assets, on-chain data, and DeFi protocol metrics.', tags: ['Crypto', 'On-Chain', 'DeFi'], skills: ['On-Chain Analysis', 'Token Economics', 'Protocol Metrics'], framework: 'On-chain data analysis combined with token economic modeling.' },
+    macro_enhanced:          { bio: 'Advanced macro analysis with emphasis on regime changes and cross-asset flows.', tags: ['Deep Macro', 'Regimes', 'Flows'], skills: ['Regime Detection', 'Flow Analysis', 'Cycle Mapping'], framework: 'Multi-layer macro regime identification with flow-of-funds tracking.' },
+    risk_enhanced:           { bio: 'Fractal risk modeling with advanced tail-risk and correlation-breakdown detection.', tags: ['Fractal', 'Tail Risk', 'Correlation'], skills: ['Fractal Analysis', 'Extreme Value Theory', 'Contagion Modeling'], framework: 'Non-linear risk modeling using fractal geometry and extreme value theory.' },
+    event_driven:            { bio: 'Identifies catalysts, earnings surprises, and event-driven trading opportunities.', tags: ['Events', 'Catalysts', 'M&A'], skills: ['Event Detection', 'Catalyst Mapping', 'Timeline Analysis'], framework: 'Event timeline analysis with probability-weighted outcome modeling.' },
+    sentiment_focus:         { bio: 'Gauges market sentiment from social media, news flow, and positioning data.', tags: ['Sentiment', 'Social', 'NLP'], skills: ['NLP Sentiment', 'Social Listening', 'Positioning Analysis'], framework: 'Multi-source sentiment aggregation with contrarian signal detection.' },
+    portfolio_view:          { bio: 'Evaluates how positions fit within an overall portfolio context.', tags: ['Portfolio', 'Fit', 'Impact'], skills: ['Position Sizing', 'Correlation Analysis', 'Rebalancing'], framework: 'Portfolio-aware evaluation with correlation-adjusted sizing.' },
+    buffett_style:           { bio: 'Value-investing lens — wide moats, durable economics, and margin of safety.', tags: ['Value', 'Moats', 'Long-term'], skills: ['Moat Analysis', 'Owner Earnings', 'Margin of Safety'], framework: 'Buy wonderful businesses at fair prices, hold forever.' },
+    munger_style:            { bio: 'Mental-models multidisciplinary thinking with inversion and circle of competence.', tags: ['Mental Models', 'Inversion', 'Quality'], skills: ['Inversion', 'Lollapalooza Effects', 'Circle of Competence'], framework: 'Multidisciplinary mental models with inversion checks.' },
+    dalio_style:             { bio: 'All-weather regime thinking — balance risk across macro environments.', tags: ['All-Weather', 'Regime', 'Macro'], skills: ['Risk Parity', 'Macro Cycles', 'Diversification'], framework: 'Balance risk across growth/inflation regimes — all-weather.' },
+    soros_style:             { bio: 'Reflexivity-driven macro bets when market beliefs and fundamentals diverge.', tags: ['Reflexivity', 'Macro', 'Asymmetric'], skills: ['Reflexivity Detection', 'Macro Thesis', 'Asymmetric Bets'], framework: 'Find reflexive feedback loops — bet when conviction is high.' },
+    lynch_style:             { bio: 'Invest in what you know — find fast growers at reasonable prices.', tags: ['GARP', 'Growth', 'Stock Picking'], skills: ['Fast Grower Detection', 'PEG Analysis', 'Stock Categories'], framework: 'Invest in what you understand — find fast growers at reasonable valuation.' },
+    graham_style:            { bio: 'Classic deep-value screening — NCAV, net-net, Mr. Market psychology.', tags: ['Deep Value', 'NCAV', 'Mr. Market'] , skills: ['Net-Net Screening', 'Margin of Safety', 'Mr. Market Discipline'], framework: 'Defensive investing — wide margin of safety, Mr. Market as servant.' },
+};
+
+// ─── RoundtableAgentModal — click an agent card to expand full details ──
+const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> = ({ agentId, onClose }) => {
+    const agent = SUMMON_POOL.find(a => a.id === agentId);
+    const profile = ROUNDTABLE_AGENT_PROFILES[agentId];
+    useEffect(() => {
+        const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', onEsc);
+        return () => window.removeEventListener('keydown', onEsc);
+    }, [onClose]);
+    if (!agent) return null;
+    const isMaster = agent.group === 'master';
     return (
-        <div className="mb-3 rounded-xl border border-gray-200 bg-white overflow-hidden">
-            <button
-                onClick={() => setOpen(o => !o)}
-                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 transition-colors"
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+            <div
+                className={`bg-white rounded-2xl shadow-2xl w-[360px] max-h-[85vh] overflow-hidden mx-4 relative ${isMaster ? 'master-card-shine' : ''}`}
+                style={isMaster ? { background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 45%, #fff7ed 100%)' } : undefined}
+                onClick={e => e.stopPropagation()}
             >
-                <svg className={`w-3.5 h-3.5 text-gray-400 shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-                <svg className="w-3.5 h-3.5 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M4 6h16M4 10h16M4 14h10M4 18h10" /></svg>
-                <span className="text-[12px] font-semibold text-gray-700">Roundtable Graph</span>
-                {isLive && <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-blue-500"><span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />live</span>}
-            </button>
-            {open && (
-                <div className="relative border-t border-gray-100" style={{ height: 520 }}>
-                    <KnowledgeGraphView data={buildKnowledgeGraph()} animate={isLive} />
+                {/* Colored top bar tied to agent color */}
+                <div className="h-1" style={{ background: `linear-gradient(90deg, ${agent.color}, ${agent.color}60)` }} />
+                <div className="relative px-5 pt-5 pb-4 border-b border-gray-100">
+                    <button onClick={onClose} className="absolute top-3 right-3 p-1 rounded-full hover:bg-gray-100 transition-colors">
+                        <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                    <div className="flex items-center gap-3">
+                        <div className="rounded-full p-[2px] shrink-0" style={{ background: `linear-gradient(135deg, ${agent.color}, ${agent.color}88)` }}>
+                            <div className="rounded-full border-2 border-white overflow-hidden">
+                                <AgentAvatarImg nameOrId={agent.id} size={52} />
+                            </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <h3 className="text-[15px] font-bold text-gray-900 truncate">{agent.name}</h3>
+                            <p className="text-[11px] text-gray-500 mt-0.5">{agent.role}</p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+                        <span className={`text-[9px] px-2 py-[2px] rounded-full font-semibold tracking-wide uppercase ${
+                            agent.group === 'system' ? 'bg-blue-50 text-blue-500 border border-blue-100' :
+                            isMaster ? 'bg-amber-50 text-amber-600 border border-amber-200' :
+                            'bg-emerald-50 text-emerald-600 border border-emerald-100'
+                        }`}>{agent.group === 'system' ? 'Core' : isMaster ? 'Master' : 'Specialist'}</span>
+                        {profile?.tags.map((tag, i) => (
+                            <span key={i} className="text-[9.5px] px-1.5 py-[2px] rounded-md bg-gray-100 text-gray-500 font-medium">{tag}</span>
+                        ))}
+                    </div>
                 </div>
+                {profile && (
+                    <div className="px-5 py-4 space-y-4 overflow-y-auto max-h-[60vh]">
+                        <div>
+                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">About</h4>
+                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.bio}</p>
+                        </div>
+                        <div>
+                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">Skills</h4>
+                            <div className="flex flex-wrap gap-1.5">
+                                {profile.skills.map((s, i) => (
+                                    <span key={i} className="px-2 py-[3px] bg-blue-50 border border-blue-100 rounded-md text-[10.5px] text-blue-600 font-medium">{s}</span>
+                                ))}
+                            </div>
+                        </div>
+                        <div>
+                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">Thinking Framework</h4>
+                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.framework}</p>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+const RoundtableWorkbench: React.FC<{
+    thinking: ThinkingFlow;
+    isLive: boolean;
+}> = ({ thinking, isLive }) => {
+    const agentIds = thinking.selectedAgentIds || [];
+    const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
+    const pickedExtras = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
+    const allAgents = useMemo(() => {
+        const out = [...systemAgents];
+        const seen = new Set(systemAgents.map(a => a.id));
+        for (const a of pickedExtras) {
+            if (!seen.has(a.id)) { out.push(a); seen.add(a.id); }
+        }
+        return out;
+    }, [agentIds]);
+
+    const [activeAgentId, setActiveAgentId] = useState<string>(allAgents[0]?.id || '');
+    const [tab, setTab] = useState<'graph' | 'debate' | 'log'>('graph');
+    const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+    const [fullscreen, setFullscreen] = useState(false);
+    const debateScrollRef = useRef<HTMLDivElement | null>(null);
+
+    // Close fullscreen on ESC
+    useEffect(() => {
+        if (!fullscreen) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [fullscreen]);
+
+    // Keep active agent valid when roster changes
+    useEffect(() => {
+        if (!allAgents.find(a => a.id === activeAgentId) && allAgents[0]) {
+            setActiveAgentId(allAgents[0].id);
+        }
+    }, [allAgents, activeAgentId]);
+
+    const rounds = thinking.rtRounds || [];
+    const totalOps = rounds.reduce((n, r) => n + r.agents.length, 0);
+
+    // Scroll active agent's first utterance into view when on Debate tab
+    useEffect(() => {
+        if (tab !== 'debate' || !activeAgentId || !debateScrollRef.current) return;
+        const el = debateScrollRef.current.querySelector<HTMLDivElement>(`[data-agent="${activeAgentId}"]`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, [activeAgentId, tab]);
+
+    if (!allAgents.length) return null;
+
+    const statusDot = (s?: 'pending' | 'active' | 'done') =>
+        s === 'done' ? 'bg-emerald-500'
+        : s === 'active' ? 'bg-blue-500 animate-pulse'
+        : 'bg-gray-300';
+
+    const verdictPillCls = (v?: string) => {
+        if (!v) return 'bg-gray-100 text-gray-500';
+        const up = v.toLowerCase();
+        if (up.includes('bull') || up.includes('buy')) return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-500/20';
+        if (up.includes('bear') || up.includes('sell')) return 'bg-red-50 text-red-700 ring-1 ring-red-500/20';
+        return 'bg-gray-100 text-gray-600 ring-1 ring-gray-200';
+    };
+
+    return (
+        <div className="mb-8">
+            <div
+                className={fullscreen
+                    ? "fixed inset-0 z-[70] bg-slate-50 overflow-hidden flex"
+                    : "rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-100 via-slate-50 to-slate-100/70 shadow-[0_2px_14px_-3px_rgba(71,85,105,0.16)] overflow-hidden flex"}
+                style={fullscreen ? undefined : { height: 600 }}
+            >
+            {/* ── LEFT: Rich agent roster ── */}
+            <div className="w-[260px] shrink-0 border-r border-slate-200/70 flex flex-col bg-slate-100/50 backdrop-blur-sm">
+                <div className="px-4 pt-3 pb-2 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
+                    <span className="text-[11px] font-semibold tracking-[0.06em] uppercase text-gray-700">Agent Room</span>
+                    <span className="text-[10px] font-semibold text-gray-400 tabular-nums">({allAgents.length})</span>
+                </div>
+                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1.5">
+                    {allAgents.map(a => {
+                        const state = rounds.length > 0
+                            ? rounds[rounds.length - 1].agents.find(x => x.agentId === a.id)?.status
+                            : (isLive ? 'active' : 'pending');
+                        const profile = ROUNDTABLE_AGENT_PROFILES[a.id];
+                        const isMaster = a.group === 'master';
+                        return (
+                            <div
+                                key={a.id}
+                                className={`group relative w-full rounded-xl cursor-pointer overflow-hidden transition-all ${
+                                    isMaster ? 'master-card-shine' : ''
+                                } hover:bg-white hover:shadow-sm hover:-translate-y-px`}
+                                style={isMaster ? { background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 45%, #fff7ed 100%)' } : undefined}
+                                onClick={() => setExpandedAgent(a.id)}
+                            >
+                                <div className="flex items-start gap-2.5 p-2.5 relative">
+                                    {/* Colored ring around avatar */}
+                                    <div className="relative shrink-0">
+                                        <div
+                                            className="rounded-full p-[2px]"
+                                            style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
+                                        >
+                                            <div className="rounded-full border-2 border-white overflow-hidden">
+                                                <AgentAvatarImg nameOrId={a.id} size={38} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-[12px] font-bold truncate text-gray-800">{a.name}</p>
+                                        {profile?.bio && (
+                                            <p className="text-[10.5px] text-gray-500 leading-snug mt-0.5 line-clamp-2">{profile.bio}</p>
+                                        )}
+                                        {profile?.tags && profile.tags.length > 0 && (
+                                            <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                                                {profile.tags.slice(0, 3).map(t => (
+                                                    <span key={t} className="text-[9px] font-medium px-1.5 py-[1px] rounded-full bg-gray-100 text-gray-500">{t}</span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* ── RIGHT: tabs only (no redundant detail header) ── */}
+            <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex items-center border-b border-gray-100 px-3 shrink-0">
+                    {(['graph', 'debate', 'log'] as const).map(t => {
+                        const isActive = tab === t;
+                        const label = t === 'graph' ? 'Graph' : t === 'debate' ? 'Debate' : 'Activity Log';
+                        return (
+                            <button
+                                key={t}
+                                onClick={() => setTab(t)}
+                                className={`relative px-3 py-2.5 text-[12px] font-semibold transition-colors ${isActive ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600'}`}
+                            >
+                                <span className="flex items-center gap-1.5">
+                                    {label}
+                                    {t === 'debate' && totalOps > 0 && (
+                                        <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-gray-100 text-gray-500">{totalOps}</span>
+                                    )}
+                                    {t === 'log' && isLive && (
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    )}
+                                </span>
+                                {isActive && <span className="absolute left-3 right-3 -bottom-px h-[2px] bg-gray-900 rounded-full" />}
+                            </button>
+                        );
+                    })}
+                    {isLive && (
+                        <span className="ml-auto mr-2 inline-flex items-center gap-1 text-[10px] text-blue-500">
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />live
+                        </span>
+                    )}
+                    <button
+                        onClick={() => setFullscreen(f => !f)}
+                        className={`${isLive ? '' : 'ml-auto'} mr-1 w-7 h-7 rounded-md flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors`}
+                        title={fullscreen ? 'Exit fullscreen (ESC)' : 'Expand'}
+                    >
+                        {fullscreen ? (
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
+                            </svg>
+                        ) : (
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                            </svg>
+                        )}
+                    </button>
+                </div>
+
+                <div className="flex-1 min-h-0 relative">
+                    {tab === 'graph' ? (
+                        <div className="absolute inset-0">
+                            <KnowledgeGraphView data={buildKnowledgeGraph()} animate={isLive} />
+                        </div>
+                    ) : tab === 'log' ? (
+                        <div className="absolute inset-0 flex flex-col">
+                            <TerminalLogPanel thinking={thinking} />
+                        </div>
+                    ) : (
+                        <div ref={debateScrollRef} className="absolute inset-0 overflow-y-auto px-4 py-3">
+                            {rounds.length === 0 ? (
+                                <div className="h-full flex items-center justify-center">
+                                    <p className="text-[12px] text-gray-400 italic">Debate hasn't started yet…</p>
+                                </div>
+                            ) : (
+                                <div className={fullscreen ? "space-y-8" : "space-y-5"}>
+                                    {rounds.map(round => {
+                                        const roundLabel = round.round === 1 ? 'Thesis Formation' : round.round === 2 ? 'Cross Validation' : `Round ${round.round}`;
+                                        return (
+                                        <div key={round.round}>
+                                            <div className="flex items-center gap-2 mb-2.5 sticky top-0 py-1 z-10">
+                                                <span className="text-[10px] font-semibold tracking-[0.08em] uppercase text-gray-500">
+                                                    <span className="text-gray-400">Round {round.round} · </span>{roundLabel}
+                                                </span>
+                                                {round.status === 'active' && (
+                                                    <span className="inline-flex items-center gap-1 text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-blue-500/10 text-blue-600">
+                                                        <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />live
+                                                    </span>
+                                                )}
+                                                {round.status === 'done' && (
+                                                    <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-emerald-500/10 text-emerald-700">done</span>
+                                                )}
+                                            </div>
+                                            <div className={fullscreen ? "space-y-5" : "space-y-3"}>
+                                                {round.agents.map(a => {
+                                                    const pool = SUMMON_POOL.find(p => p.id === a.agentId);
+                                                    const isActiveAgent = a.agentId === activeAgentId;
+                                                    const accentColor = pool?.color || '#6B7280';
+                                                    // Position: Bullish → left, Bearish → right. Others default to left.
+                                                    const verdictLower = (a.verdict || '').toLowerCase();
+                                                    const isBearish = verdictLower.includes('bear') || verdictLower.includes('sell');
+                                                    const side: 'left' | 'right' = isBearish ? 'right' : 'left';
+                                                    return (
+                                                        <div
+                                                            key={`${round.round}-${a.agentId}`}
+                                                            data-agent={a.agentId}
+                                                            className={`flex items-start gap-2.5 ${side === 'right' ? 'flex-row-reverse' : ''}`}
+                                                        >
+                                                            {/* Avatar with colored gradient ring — matches left roster */}
+                                                            <button
+                                                                onClick={() => setActiveAgentId(a.agentId)}
+                                                                className="shrink-0 rounded-full p-[2px]"
+                                                                style={{ background: `linear-gradient(135deg, ${accentColor}, ${accentColor}88)` }}
+                                                                title={pool?.name || a.agentName}
+                                                            >
+                                                                <div className="rounded-full border-2 border-white overflow-hidden">
+                                                                    <AgentAvatarImg nameOrId={a.agentId} size={30} />
+                                                                </div>
+                                                            </button>
+                                                            <div className={`min-w-0 max-w-[78%] pt-0.5 flex flex-col ${side === 'right' ? 'items-end' : 'items-start'}`}>
+                                                                {/* Name + meta row (outside bubble, social-chat style) */}
+                                                                <div className={`flex items-center gap-1.5 mb-1 px-1 flex-wrap leading-none ${side === 'right' ? 'flex-row-reverse' : ''}`}>
+                                                                    <span className="text-[11px] font-semibold text-gray-700">{pool?.name || a.agentName}</span>
+                                                                    {a.verdict && (
+                                                                        <span className={`text-[9.5px] font-bold px-1.5 py-[1px] rounded-full ${verdictPillCls(a.verdict)}`}>
+                                                                            {a.verdict}
+                                                                        </span>
+                                                                    )}
+                                                                    {a.changedMind && (
+                                                                        <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-amber-500/10 text-amber-700">changed mind</span>
+                                                                    )}
+                                                                </div>
+                                                                {/* Bubble — content only */}
+                                                                {a.reasoning && (
+                                                                    <div
+                                                                        className={`inline-block max-w-full border border-gray-200/80 bg-white px-3 py-2 transition-shadow rounded-2xl ${side === 'right' ? 'rounded-tr-md' : 'rounded-tl-md'} ${isActiveAgent ? 'shadow-sm' : ''}`}
+                                                                    >
+                                                                        <p className="text-[11.5px] leading-relaxed text-gray-700 whitespace-pre-wrap">{a.reasoning}</p>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            </div>
+            </div>
+            {/* Status caption below the workbench */}
+            {(() => {
+                const reportStatus = thinking.rtReportStatus;
+                const consensusStatus = thinking.rtConsensus?.status;
+                const roundsArr = thinking.rtRounds || [];
+                const debating = roundsArr.some(r => r.status === 'active');
+                const researching = (thinking.rtDataSearch || []).some(s => s.status === 'active');
+                const agentCount = allAgents.length;
+                const agentWord = agentCount === 1 ? 'Agent' : 'Agents';
+                let label = '';
+                let done = false;
+                if (reportStatus === 'done') { label = `${agentCount} ${agentWord} finished the debate — report ready`; done = true; }
+                else if (reportStatus === 'active') label = `Consensus reached — ${agentCount} ${agentWord} finalizing the report…`;
+                else if (consensusStatus === 'active') label = `${agentCount} ${agentWord} reaching consensus…`;
+                else if (debating) label = `${agentCount} ${agentWord} debating at the roundtable…`;
+                else if (researching) label = 'Gathering background research…';
+                else if (thinking.rtPreparationStatus === 'done' && isLive) label = `${agentCount} ${agentWord} assembled — debate starting`;
+                if (!label) return null;
+                return (
+                    <div className="mt-5 flex items-center gap-2.5 px-1">
+                        {/* Avatar stack */}
+                        <div className="flex -space-x-1.5">
+                            {allAgents.slice(0, 6).map(a => (
+                                <div
+                                    key={a.id}
+                                    className="w-5 h-5 rounded-full border-[1.5px] border-white overflow-hidden shadow-sm"
+                                    title={a.name}
+                                    style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
+                                >
+                                    <AgentAvatarImg nameOrId={a.id} size={18} />
+                                </div>
+                            ))}
+                            {allAgents.length > 6 && (
+                                <div className="w-5 h-5 rounded-full border-[1.5px] border-white bg-gray-200 flex items-center justify-center text-[9px] font-semibold text-gray-600 shadow-sm">
+                                    +{allAgents.length - 6}
+                                </div>
+                            )}
+                        </div>
+                        {!done && isLive && (
+                            <span className="relative flex w-1.5 h-1.5 shrink-0">
+                                <span className="absolute inline-flex h-full w-full rounded-full bg-violet-500 opacity-60 animate-ping" />
+                                <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-violet-500" />
+                            </span>
+                        )}
+                        <span className={`text-[11.5px] font-medium tracking-wide ${done ? 'text-gray-600' : 'text-gray-500'}`}>{label}</span>
+                    </div>
+                );
+            })()}
+            {expandedAgent && (
+                <RoundtableAgentModal agentId={expandedAgent} onClose={() => setExpandedAgent(null)} />
             )}
         </div>
     );
 };
 
+// Legacy alias kept for any lingering references during the refactor.
+const RoundtableGraphInline = RoundtableWorkbench;
 
 // ─── ThinkingProcessSidePanel (modular right panel) ─────────
 const ThinkingProcessSidePanel: React.FC<{
@@ -3276,13 +3797,9 @@ const ThinkingProcessSidePanel: React.FC<{
             </div>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {isRoundtable ? (
-                    <RoundtableProcessView />
-                ) : (
-                    orderedModules.map((item) => (
-                        <div key={item.key}>{item.element}</div>
-                    ))
-                )}
+                {orderedModules.map((item) => (
+                    <div key={item.key}>{item.element}</div>
+                ))}
             </div>
         </div>
     );
@@ -5160,15 +5677,23 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         </div>
                                                     </div>
                                                 )}
-                                                {/* Inline Roundtable Graph — collapsible, per message */}
+                                                {/* Bare stage pipeline — no card wrapper, sits between the thinking trigger and the workbench */}
+                                                {thinkingProcesses[i]?.routedMode === 'roundtable' && (
+                                                    <div className="mb-3 mt-1">
+                                                        <PlanPipeline thinking={thinkingProcesses[i]} />
+                                                    </div>
+                                                )}
+                                                {/* Roundtable Workbench — left roster + right (detail + Graph/Debate tabs) */}
                                                 {thinkingProcesses[i]?.routedMode === 'roundtable'
-                                                  && (((thinkingProcesses[i]!.rtRounds?.length ?? 0) > 0)
-                                                      || thinkingProcesses[i]!.rtPreparationStatus === 'done'
-                                                      || (thinkingProcesses[i]!.rtDataSearch?.length ?? 0) > 0) && (
-                                                    <RoundtableGraphInline
-                                                        isLive={!!thinkingProcesses[i]?.isActive}
-                                                        defaultOpen={i === messages.length - 1}
-                                                    />
+                                                  && (thinkingProcesses[i]!.rtPreparationStatus === 'done'
+                                                      || ((thinkingProcesses[i]!.rtRounds?.length ?? 0) > 0)
+                                                      || ((thinkingProcesses[i]!.rtDataSearch?.length ?? 0) > 0)) && (
+                                                    <PlanCardBoundary>
+                                                        <RoundtableWorkbench
+                                                            thinking={thinkingProcesses[i]!}
+                                                            isLive={!!thinkingProcesses[i]?.isActive}
+                                                        />
+                                                    </PlanCardBoundary>
                                                 )}
                                                 {msg.content === '__cancelled__' ? (() => {
                                                     const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
@@ -5920,16 +6445,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                                     placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up question...'}
                                     disabled={isStreaming || voiceState !== 'idle'}
-                                    className="w-full bg-transparent outline-none resize-none text-[13.5px] text-gray-900 placeholder:text-gray-400 px-4 pt-2 pb-0.5 leading-snug overflow-y-auto"
-                                    style={{ minHeight: '32px', maxHeight: '160px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
+                                    className="w-full bg-transparent outline-none resize-none text-[14px] text-gray-900 placeholder:text-gray-400 px-4 pt-3.5 pb-1 leading-relaxed overflow-y-auto"
+                                    style={{ minHeight: '46px', maxHeight: '180px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
-                                <div className="flex items-center justify-between px-2.5 pb-2">
+                                <div className="flex items-center justify-between px-3 pb-2.5">
                                     {/* Left: mode selector + agent selector */}
                                     <div className="flex items-center gap-1">
                                         <div className="relative" ref={chatModeRef}>
                                             <button
                                                 onClick={() => setChatModeOpen(v => !v)}
-                                                className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] font-medium text-gray-500 hover:bg-gray-100 transition-all"
+                                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-gray-500 hover:bg-gray-100 transition-all"
                                             >
                                                 {React.createElement(currentChatMode.icon)}
                                                 {currentChatMode.label}
@@ -5969,13 +6494,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     </div>
                                     {/* Right: action buttons */}
                                     <div className="flex items-center gap-0.5">
-                                        <button onClick={() => chatFileRef.current?.click()} className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all" title="Attach file">
+                                        <button onClick={() => chatFileRef.current?.click()} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all" title="Attach file">
                                             <InputIcons.Attach />
                                         </button>
                                         <button
                                             onClick={handleVoiceClick}
                                             title={voiceState === 'recording' ? 'Stop recording' : 'Voice input'}
-                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${voiceState === 'recording'
+                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${voiceState === 'recording'
                                                 ? 'text-red-500 bg-red-50 hover:bg-red-100'
                                                 : voiceState === 'transcribing'
                                                     ? 'text-gray-300 cursor-not-allowed'
@@ -5992,7 +6517,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
                                             disabled={!isStreaming && !inputText.trim()}
-                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ml-0.5 ${isStreaming
+                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ml-0.5 ${isStreaming
                                                     ? 'bg-gray-900 text-white hover:bg-gray-700'
                                                     : inputText.trim()
                                                         ? 'bg-gray-900 text-white hover:bg-gray-800'
@@ -6015,111 +6540,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
                 {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
                 {(() => { if (showThinkingPanel) console.log('[RT-DEBUG] panel check', { chatMode, routedMode: currentThinking?.routedMode, rtPanelExpanded, activeGraphMsgIdx }); return null; })()}
-                {showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && !rtPanelExpanded && (
-                    <div className="w-[500px] shrink-0 p-3 pl-0">
-                        <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
-                        {/* Header */}
-                        <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
-                            <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
-                            <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
-                            <div className="flex-1" />
-                            <button onClick={() => setShowThinkingPanel(false)}
-                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                        </div>
-                        {/* Process body */}
-                        <div className="flex-1 min-h-0 overflow-hidden">
-                            {currentThinking ? (
-                                <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
-                            ) : (
-                                <div className="h-full flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
-                            )}
-                        </div>
-                        {/* Terminal dock (bottom, collapsible) */}
-                        <div className={`shrink-0 border-t border-gray-200 flex flex-col ${terminalDockOpen ? '' : ''}`} style={{ height: terminalDockOpen ? 140 : 28 }}>
-                            <button
-                                onClick={() => setTerminalDockOpen(o => !o)}
-                                className="flex items-center gap-2 px-3 h-7 shrink-0 bg-[#0b0f14] text-gray-300 hover:bg-[#111821] transition-colors"
-                                title={terminalDockOpen ? 'Hide activity log' : 'Show activity log'}
-                            >
-                                <svg className={`w-3 h-3 text-gray-500 transition-transform ${terminalDockOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 9l6 6 6-6" /></svg>
-                                <svg className="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" /></svg>
-                                <span className="text-[11px] font-semibold text-gray-200 tracking-wide">Activity Log</span>
-                                {currentThinking?.isActive && terminalDockOpen && (
-                                    <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-emerald-400"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />live</span>
-                                )}
-                            </button>
-                            {terminalDockOpen && (
-                                <div className="flex-1 min-h-0 flex flex-col">
-                                    <TerminalLogPanel thinking={currentThinking} />
-                                </div>
-                            )}
-                        </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* ── Fullscreen Roundtable Panel (Process 1/3 + Graph 2/3) ── */}
-                {rtPanelExpanded && showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && (
-                    <div className="fixed inset-0 z-50 bg-white flex flex-col">
-                        {/* Header bar */}
-                        <div className="flex items-center px-5 py-3 border-b border-gray-100 shrink-0">
-                            <span className="text-[14px] font-bold text-gray-900">Roundtable Analysis</span>
-                            <div className="flex-1" />
-                            <button onClick={() => setRtPanelExpanded(false)}
-                                className="w-8 h-8 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all mr-1.5"
-                                title="Collapse">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" /></svg>
-                            </button>
-                            <button onClick={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }}
-                                className="w-8 h-8 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                        </div>
-                        {/* Full-width Process with Terminal docked at bottom */}
-                        <div className="flex flex-col flex-1 min-h-0">
-                            <div className="px-4 py-3 border-b border-gray-50 shrink-0">
-                                <span className="text-[13px] font-bold text-gray-800">Process</span>
-                            </div>
-                            <div className="flex-1 min-h-0 overflow-hidden">
-                                {currentThinking ? (
-                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }} hideHeader chatMode={chatMode} />
-                                ) : (
-                                    <div className="h-full flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
-                                )}
-                            </div>
-                            {/* Terminal dock */}
-                            <div className="shrink-0 border-t border-gray-200 flex flex-col" style={{ height: terminalDockOpen ? 160 : 28 }}>
-                                <button
-                                    onClick={() => setTerminalDockOpen(o => !o)}
-                                    className="flex items-center gap-2 px-3 h-7 shrink-0 bg-[#0b0f14] text-gray-300 hover:bg-[#111821] transition-colors"
-                                    title={terminalDockOpen ? 'Hide activity log' : 'Show activity log'}
-                                >
-                                    <svg className={`w-3 h-3 text-gray-500 transition-transform ${terminalDockOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 9l6 6 6-6" /></svg>
-                                    <svg className="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" /></svg>
-                                    <span className="text-[11px] font-semibold text-gray-200 tracking-wide">Activity Log</span>
-                                    {currentThinking?.isActive && terminalDockOpen && (
-                                        <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-emerald-400"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />live</span>
-                                    )}
-                                </button>
-                                {terminalDockOpen && (
-                                    <div className="flex-1 min-h-0 flex flex-col">
-                                        <TerminalLogPanel thinking={currentThinking} />
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* Non-roundtable: original Thinking Process Side Panel — floating card */}
-                {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && currentThinking.routedMode !== 'roundtable' && (
-                    <div className="w-[380px] shrink-0 p-3 pl-0">
+                {/* ── Unified Process Panel (floating card, same for all modes) ── */}
+                {showThinkingPanel && currentThinking && (
+                    <div className="w-[440px] shrink-0 p-3 pl-0">
                         <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
                             <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
                                 <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
-                                <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
+                                <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Process</span>
                                 <div className="flex-1" />
                                 <button onClick={() => setShowThinkingPanel(false)}
                                     className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
@@ -6127,12 +6554,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 </button>
                             </div>
                             <div className="flex-1 min-h-0 overflow-hidden">
-                                <ThinkingProcessSidePanel
-                                    thinking={currentThinking}
-                                    onClose={() => setShowThinkingPanel(false)}
-                                    chatMode={chatMode}
-                                    hideHeader
-                                />
+                                <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
                             </div>
                         </div>
                     </div>
