@@ -4992,7 +4992,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     };
 
     return (
-        <div className="flex flex-col h-full bg-white overflow-hidden">
+        <div className="flex h-full bg-white overflow-hidden">
             <style>{`
                 @keyframes voice-bar { 0%,100%{height:3px} 50%{height:10px} }
                 .voice-bar { min-height: 3px; display:inline-block; border-radius:9999px; background:#9ca3af; }
@@ -5002,16 +5002,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 @keyframes summon-dot { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
                 @keyframes summon-glow { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } 50% { box-shadow: 0 0 12px 2px rgba(34,197,94,0.25); } }
             `}</style>
-            {/* ══ Header: chat title ══ */}
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
-                <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-                <PlanUpgradeEntry size="sm" hideIfMax />
-            </div>
 
-            {/* ══ Content Row ══ */}
+            {/* ══ Content Row — two independent full-height columns ══ */}
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
+                    {/* Chat column header (above chat content only) */}
+                    <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+                        <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
+                        <PlanUpgradeEntry size="sm" hideIfMax />
+                    </div>
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
                         <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
                             <div className={`flex items-start gap-6 xl:gap-8 ${showToc ? '' : 'justify-center'}`}>
