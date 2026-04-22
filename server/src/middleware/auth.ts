@@ -27,7 +27,7 @@ const jwksDispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : new Agent();
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-async function fetchJwks(uri: string) {
+async function fetchJwks(uri: string): Promise<{ keys: any }> {
   const res = await undiciFetch(uri, {
     dispatcher: jwksDispatcher,
     headers: {
@@ -37,7 +37,7 @@ async function fetchJwks(uri: string) {
     },
   });
   if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status} ${res.statusText}`);
-  return res.json();
+  return (await res.json()) as { keys: any };
 }
 
 const client = jwksClient({
