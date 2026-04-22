@@ -5920,16 +5920,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                                     placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up question...'}
                                     disabled={isStreaming || voiceState !== 'idle'}
-                                    className="w-full bg-transparent outline-none resize-none text-[14px] text-gray-900 placeholder:text-gray-400 px-4 pt-3 pb-1.5 leading-relaxed overflow-y-auto"
-                                    style={{ minHeight: '42px', maxHeight: '200px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
+                                    className="w-full bg-transparent outline-none resize-none text-[13.5px] text-gray-900 placeholder:text-gray-400 px-4 pt-2 pb-0.5 leading-snug overflow-y-auto"
+                                    style={{ minHeight: '32px', maxHeight: '160px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
-                                <div className="flex items-center justify-between px-3 pb-3">
+                                <div className="flex items-center justify-between px-2.5 pb-2">
                                     {/* Left: mode selector + agent selector */}
                                     <div className="flex items-center gap-1">
                                         <div className="relative" ref={chatModeRef}>
                                             <button
                                                 onClick={() => setChatModeOpen(v => !v)}
-                                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-gray-500 hover:bg-gray-100 transition-all"
+                                                className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] font-medium text-gray-500 hover:bg-gray-100 transition-all"
                                             >
                                                 {React.createElement(currentChatMode.icon)}
                                                 {currentChatMode.label}
@@ -5968,14 +5968,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
                                     </div>
                                     {/* Right: action buttons */}
-                                    <div className="flex items-center gap-1">
-                                        <button onClick={() => chatFileRef.current?.click()} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all" title="Attach file">
+                                    <div className="flex items-center gap-0.5">
+                                        <button onClick={() => chatFileRef.current?.click()} className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all" title="Attach file">
                                             <InputIcons.Attach />
                                         </button>
                                         <button
                                             onClick={handleVoiceClick}
                                             title={voiceState === 'recording' ? 'Stop recording' : 'Voice input'}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${voiceState === 'recording'
+                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${voiceState === 'recording'
                                                 ? 'text-red-500 bg-red-50 hover:bg-red-100'
                                                 : voiceState === 'transcribing'
                                                     ? 'text-gray-300 cursor-not-allowed'
@@ -5984,7 +5984,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             disabled={voiceState === 'transcribing'}
                                         >
                                             {voiceState === 'recording' ? (
-                                                <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
                                             ) : (
                                                 <InputIcons.Mic />
                                             )}
@@ -5992,7 +5992,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
                                             disabled={!isStreaming && !inputText.trim()}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isStreaming
+                                            className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ml-0.5 ${isStreaming
                                                     ? 'bg-gray-900 text-white hover:bg-gray-700'
                                                     : inputText.trim()
                                                         ? 'bg-gray-900 text-white hover:bg-gray-800'
@@ -6000,9 +6000,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                 }`}
                                         >
                                             {isStreaming ? (
-                                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                                                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
                                             ) : (
-                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
+                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
                                             )}
                                         </button>
                                     </div>
