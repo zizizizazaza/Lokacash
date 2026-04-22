@@ -10,6 +10,7 @@ import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { api } from '../services/api';
 import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCompression';
 import PlanUpgradeEntry from './PlanUpgradeEntry';
+import Web3DotWave from './Web3DotWave';
 
 interface ChatImagePayload {
   url: string;
@@ -297,16 +298,21 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     const stored = window.localStorage.getItem(DOMAIN_STORAGE_KEY);
     return stored === 'web3' ? 'web3' : 'stocks';
   });
-  const [showWelcome, setShowWelcome] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return window.localStorage.getItem(DOMAIN_STORAGE_KEY) === null;
-  });
+  // DEBUG: force welcome modal every mount. Restore the commented-out
+  // initializer below to go back to "show only on first visit".
+  const [showWelcome, setShowWelcome] = useState<boolean>(true);
+  // const [showWelcome, setShowWelcome] = useState<boolean>(() => {
+  //   if (typeof window === 'undefined') return false;
+  //   return window.localStorage.getItem(DOMAIN_STORAGE_KEY) === null;
+  // });
+  const [welcomeStep, setWelcomeStep] = useState<0 | 1>(0);
   const domainTheme = DOMAIN_THEME[domain];
   const pickDomain = (d: Domain) => {
     setDomain(d);
     try { window.localStorage.setItem(DOMAIN_STORAGE_KEY, d); } catch {}
     setShowWelcome(false);
   };
+  const dismissWelcome = () => setShowWelcome(false);
 
   // Roundtable quota
   const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
@@ -478,107 +484,299 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   // the stale value (the useEffect above will clear it for subsequent renders).
   const effectiveChatMessage = isNewChatReset ? null : chatMessage;
 
-  if (effectiveChatMessage || sessionParam) {
-    return (
-      <SuperAgentChat
-        key={sessionParam || effectiveChatMessage || 'new'}
-        initialMessage={effectiveChatMessage || ''}
-        initialSessionId={sessionParam || undefined}
-        initialChatMode={sessionParam ? undefined : mode}
-        selectedAgentId={selectedAgent || undefined}
-        onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
-      />
-    );
-  }
+  // ── Welcome modal: 2-step market introduction ──
+  // Palette tuned for a calmer, finance-grade feel:
+  //   Stocks: slate ink + restrained blue accent (no bright neon).
+  //   Web3:   graphite black + warm gold / bitcoin-orange accent.
+  const WC_STOCK_INK = '#0f172a';       // slate-900
+  const WC_STOCK_BG  = '#f1f5f9';       // slate-100
+  const WC_STOCK_UP  = '#2563eb';       // blue-600 (gain accent)
+  const WC_STOCK_DN  = '#ef4444';       // red-500 (down)
+  const WC_WEB3_INK  = '#18181b';       // zinc-900
+  const WC_WEB3_BG   = '#f5f2ea';       // warm paper
+  const WC_BTC       = '#f7931a';       // bitcoin orange (flat)
+  const WC_ETH       = '#627eea';       // ethereum blue-violet (flat)
+  const WC_USDC      = '#2775ca';       // USDC blue (flat)
 
-  // ── Welcome modal: compact picker (sidebar visible behind) ──
+  const welcomeSteps = [
+    {
+      key: 'stocks' as Domain,
+      eyebrow: 'Stocks',
+      title: 'AI research for the ',
+      titleHighlight: 'Stock Market',
+      subtitle: 'Ask anything about stocks, sectors, or the macro — Loka routes your question to the right analyst agents.',
+      ink: WC_STOCK_INK,
+      bg: WC_STOCK_BG,
+      accent: WC_STOCK_UP, // blue — used for the big "STOCKS" label & CTA
+      // Use-case prompts — what the user can type in
+      prompts: [
+        'Is NVIDIA still a buy after Q4?',
+        'Compare Tesla vs BYD for 2026',
+        'Build a balanced AI-infra portfolio',
+        'Which semi names have the widest moats?',
+      ],
+      // Stock-themed illustration: ticker quote card, faint grid + price line, floating ticker chips
+      illustration: (
+        <svg viewBox="0 0 320 148" className="w-full h-full" aria-hidden>
+          {[30, 60, 90, 120].map(y => (
+            <line key={y} x1="0" y1={y} x2="320" y2={y} stroke={WC_STOCK_INK} strokeOpacity="0.06" strokeDasharray="2 4" />
+          ))}
+          <path d="M0,115 L30,102 L60,106 L90,88 L120,94 L150,74 L180,80 L210,60 L240,66 L270,44 L300,50 L320,34" fill="none" stroke={WC_STOCK_INK} strokeOpacity="0.18" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          {/* Ticker card — clean 3-band layout: header / price row / sparkline */}
+          <g transform="translate(26, 18)">
+            <rect x="0" y="0" width="180" height="108" rx="14" fill="#ffffff" stroke={WC_STOCK_INK} strokeOpacity="0.12" />
+            {/* Header band */}
+            <circle cx="24" cy="22" r="11" fill={WC_STOCK_INK} />
+            <text x="24" y="26.5" textAnchor="middle" fontSize="11" fontWeight="800" fill="#fff" fontFamily="ui-sans-serif, system-ui">N</text>
+            <text x="43" y="20" fontSize="12" fontWeight="800" fill={WC_STOCK_INK} fontFamily="ui-sans-serif, system-ui">NVDA</text>
+            <text x="43" y="31" fontSize="8" fontWeight="500" fill={WC_STOCK_INK} fillOpacity="0.55" fontFamily="ui-sans-serif, system-ui">NVIDIA · NASDAQ</text>
+            {/* Divider */}
+            <line x1="14" y1="43" x2="166" y2="43" stroke={WC_STOCK_INK} strokeOpacity="0.08" />
+            {/* Price row — price on left, pill on right, aligned */}
+            <text x="14" y="66" fontSize="20" fontWeight="800" fill={WC_STOCK_INK} fontFamily="ui-sans-serif, system-ui">945.20</text>
+            <g transform="translate(114, 52)">
+              <rect x="0" y="0" width="52" height="18" rx="9" fill={WC_STOCK_UP} fillOpacity="0.12" />
+              <path d="M9 12.5 L12 8 L15 12.5 Z" fill={WC_STOCK_UP} />
+              <text x="19" y="12.5" fontSize="9.5" fontWeight="700" fill={WC_STOCK_UP} fontFamily="ui-sans-serif, system-ui">+2.41%</text>
+            </g>
+            {/* Sparkline band — own zone at bottom, no overlap */}
+            <path d="M14,96 L26,92 L38,94 L50,86 L62,88 L74,80 L86,82 L98,76 L110,78 L122,72 L134,74 L146,66 L166,68" fill="none" stroke={WC_STOCK_UP} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            <circle cx="166" cy="68" r="2.5" fill={WC_STOCK_UP} />
+          </g>
+          {/* Floating ticker chips — right column, aligned to card bands */}
+          <g transform="translate(222, 24)">
+            <rect x="0" y="0" width="56" height="22" rx="11" fill="#fff" stroke={WC_STOCK_INK} strokeOpacity="0.12" />
+            <text x="10" y="14.5" fontSize="9" fontWeight="800" fill={WC_STOCK_INK} fontFamily="ui-sans-serif, system-ui">AAPL</text>
+            <text x="38" y="14.5" fontSize="8" fontWeight="700" fill={WC_STOCK_UP} fontFamily="ui-sans-serif, system-ui">▲</text>
+          </g>
+          <g transform="translate(236, 58)">
+            <rect x="0" y="0" width="56" height="22" rx="11" fill="#fff" stroke={WC_STOCK_INK} strokeOpacity="0.12" />
+            <text x="10" y="14.5" fontSize="9" fontWeight="800" fill={WC_STOCK_INK} fontFamily="ui-sans-serif, system-ui">TSLA</text>
+            <text x="38" y="14.5" fontSize="8" fontWeight="700" fill={WC_STOCK_DN} fontFamily="ui-sans-serif, system-ui">▼</text>
+          </g>
+          <g transform="translate(220, 94)">
+            <rect x="0" y="0" width="56" height="22" rx="11" fill="#fff" stroke={WC_STOCK_INK} strokeOpacity="0.12" />
+            <text x="10" y="14.5" fontSize="9" fontWeight="800" fill={WC_STOCK_INK} fontFamily="ui-sans-serif, system-ui">SPY</text>
+            <text x="38" y="14.5" fontSize="8" fontWeight="700" fill={WC_STOCK_UP} fontFamily="ui-sans-serif, system-ui">▲</text>
+          </g>
+        </svg>
+      ),
+    },
+    {
+      key: 'web3' as Domain,
+      eyebrow: 'Crypto',
+      title: 'Multi-agent AI for the ',
+      titleHighlight: 'Crypto Market',
+      subtitle: 'Ask anything about tokens, chains, or DeFi — backed by live on-chain data and multi-agent analysis.',
+      ink: WC_WEB3_INK,
+      bg: WC_WEB3_BG,
+      accent: WC_BTC, // bitcoin orange — used for the big "WEB3" label & CTA
+      prompts: [
+        'Should I HODL or sell BTC above $100K?',
+        'Solana vs Ethereum activity this quarter',
+        'Which L2s are gaining real user traction?',
+        'Find mispriced odds on Polymarket today',
+      ],
+      // Flat crypto coins from different angles — no gradients
+      illustration: (
+        <svg viewBox="0 0 320 148" className="w-full h-full" aria-hidden>
+          {/* BTC — large coin, head-on */}
+          <g transform="translate(68, 74)">
+            <circle cx="0" cy="0" r="38" fill={WC_BTC} />
+            <circle cx="0" cy="0" r="32" fill="none" stroke="#fff" strokeOpacity="0.35" strokeWidth="1.5" />
+            <text x="0" y="10" textAnchor="middle" fontSize="32" fontWeight="900" fill="#fff" fontFamily="ui-sans-serif, system-ui">₿</text>
+          </g>
+          {/* ETH — medium coin, tilted (ellipse = perspective) */}
+          <g transform="translate(180, 52) rotate(-12)">
+            <ellipse cx="0" cy="0" rx="30" ry="28" fill={WC_ETH} />
+            <ellipse cx="0" cy="0" rx="24" ry="22" fill="none" stroke="#fff" strokeOpacity="0.35" strokeWidth="1.5" />
+            <g>
+              <path d="M0,-14 L9,0 L0,4 L-9,0 Z" fill="#fff" />
+              <path d="M0,6 L9,1.5 L0,14 L-9,1.5 Z" fill="#fff" fillOpacity="0.7" />
+            </g>
+          </g>
+          {/* USDC — small flat coin */}
+          <g transform="translate(248, 96)">
+            <circle cx="0" cy="0" r="22" fill={WC_USDC} />
+            <circle cx="0" cy="0" r="18" fill="none" stroke="#fff" strokeOpacity="0.4" strokeWidth="1.2" />
+            <text x="0" y="6" textAnchor="middle" fontSize="14" fontWeight="900" fill="#fff" fontFamily="ui-sans-serif, system-ui">$</text>
+          </g>
+          {/* SOL — small round coin, lower-left, slightly tilted */}
+          <g transform="translate(28, 112) rotate(-8)">
+            <ellipse cx="0" cy="0" rx="20" ry="19" fill={WC_WEB3_INK} />
+            <ellipse cx="0" cy="0" rx="15" ry="14" fill="none" stroke="#fff" strokeOpacity="0.35" strokeWidth="1.2" />
+            <text x="0" y="5" textAnchor="middle" fontSize="14" fontWeight="900" fill="#fff" fontFamily="ui-sans-serif, system-ui">S</text>
+          </g>
+        </svg>
+      ),
+    },
+  ];
+  const welcomeCurrent = welcomeSteps[welcomeStep];
+  const welcomeIsLast = welcomeStep === welcomeSteps.length - 1;
   const welcomeModal = showWelcome ? (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center px-4"
-      style={{ background: 'rgba(17, 24, 39, 0.55)', backdropFilter: 'blur(8px)' }}
-      onClick={() => pickDomain('stocks')}
-    >
+    <div className="fixed inset-0 z-[100] flex items-center justify-center px-4" style={{ background: 'rgba(15, 23, 42, 0.55)', backdropFilter: 'blur(8px)' }}>
       <div
-        className="relative w-full max-w-[560px] rounded-3xl bg-white p-7 md:p-8"
-        style={{ boxShadow: '0 30px 80px rgba(0,0,0,0.25)', animation: 'fade-up 0.35s var(--ease-out-expo) both' }}
-        onClick={e => e.stopPropagation()}
+        key={welcomeStep}
+        className="relative bg-white rounded-[20px] max-w-[480px] w-full overflow-hidden"
+        style={{ animation: 'fade-up 0.4s var(--ease-out-expo) both', boxShadow: '0 24px 60px -12px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(15, 23, 42, 0.05)' }}
       >
-        <h2 className="text-[22px] md:text-[24px] font-extrabold text-gray-900 tracking-tight leading-tight">Pick your market</h2>
-        <p className="text-[13px] text-gray-500 mt-1 leading-snug">Choose where to start — you can switch anytime from the top bar.</p>
+        <button
+          onClick={dismissWelcome}
+          aria-label="Close"
+          className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 1L13 13M13 1L1 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+        </button>
 
-        <div className="grid grid-cols-2 gap-3 mt-5">
-          {/* Stocks */}
-          <button
-            onClick={() => pickDomain('stocks')}
-            className="group text-left rounded-2xl border border-gray-200 bg-white p-4 transition-all hover:-translate-y-0.5 hover:border-gray-900 hover:shadow-lg"
+        {/* Illustration header — flat color, no gradients */}
+        <div
+          className="relative h-[180px] overflow-hidden"
+          style={{ background: welcomeCurrent.bg, borderBottom: `1px solid ${welcomeCurrent.ink}10` }}
+        >
+          <div className="absolute inset-0 px-5 pt-6 pb-3 flex items-center justify-center">
+            <div className="w-full h-full">{welcomeCurrent.illustration}</div>
+          </div>
+          {/* Eyebrow chip — just the market name, no "Market 0x" */}
+          <div
+            className="absolute top-4 left-5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white text-[10px] font-bold tracking-[0.14em] uppercase"
+            style={{ color: welcomeCurrent.ink, border: `1px solid ${welcomeCurrent.ink}14` }}
           >
-            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#10b981', boxShadow: '0 0 6px rgba(16,185,129,0.6)' }} />
-              Markets · Live
-            </div>
-            <div className="text-[24px] font-extrabold text-gray-900 tracking-tight leading-none mb-3">Stocks</div>
-            <ul className="space-y-1 text-[11.5px] text-gray-600 mb-4">
-              <li className="flex items-center gap-1.5"><span className="text-gray-300">→</span>NVIDIA after Q4?</li>
-              <li className="flex items-center gap-1.5"><span className="text-gray-300">→</span>AI infra moat</li>
-              <li className="flex items-center gap-1.5"><span className="text-gray-300">→</span>Tesla vs BYD</li>
-            </ul>
-            <div className="w-full bg-gray-900 group-hover:bg-black text-white rounded-full px-3 py-2 flex items-center justify-center gap-1 text-[12px] font-semibold transition-colors">
-              Enter Stocks
-              <svg className="w-3 h-3 transition-transform group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            </div>
-          </button>
-
-          {/* Web3 */}
-          <button
-            onClick={() => pickDomain('web3')}
-            className="group text-left rounded-2xl p-4 transition-all hover:-translate-y-0.5 hover:shadow-xl"
-            style={{ background: '#0A0A0A' }}
-          >
-            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-3">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#BAFF29', boxShadow: '0 0 8px rgba(186,255,41,0.9)' }} />
-              On-chain · Synced
-            </div>
-            <div className="text-[24px] font-extrabold text-white tracking-tight leading-none mb-3">Web3</div>
-            <ul className="space-y-1 text-[11.5px] text-gray-300 mb-4">
-              <li className="flex items-center gap-1.5"><span style={{ color: '#BAFF29' }}>→</span>L2s with real traction</li>
-              <li className="flex items-center gap-1.5"><span style={{ color: '#BAFF29' }}>→</span>AI agent demand · 30d</li>
-              <li className="flex items-center gap-1.5"><span style={{ color: '#BAFF29' }}>→</span>Polymarket edge</li>
-            </ul>
-            <div
-              className="w-full rounded-full px-3 py-2 flex items-center justify-center gap-1 text-[12px] font-semibold text-gray-900 transition-all"
-              style={{ background: '#BAFF29' }}
-            >
-              Enter Web3
-              <svg className="w-3 h-3 transition-transform group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            </div>
-          </button>
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: welcomeCurrent.ink }} />
+            {welcomeCurrent.eyebrow}
+          </div>
         </div>
 
-        <button
-          onClick={() => pickDomain('stocks')}
-          className="block mx-auto mt-4 text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
-        >Skip — I'll choose later</button>
+        {/* Body */}
+        <div className="px-6 pt-6 pb-4">
+          <h2 className="text-[22px] font-extrabold tracking-tight leading-[1.2]" style={{ color: welcomeCurrent.ink }}>
+            {welcomeCurrent.title}
+            <span style={{ color: welcomeCurrent.accent }}>{welcomeCurrent.titleHighlight}</span>
+          </h2>
+          <p className="text-[13px] text-gray-500 mt-2 leading-relaxed">{welcomeCurrent.subtitle}</p>
+
+          {/* Use-case prompt chips — what to ask, not feature bullets */}
+          <div className="mt-4">
+            <div className="text-[10px] font-bold tracking-[0.14em] uppercase text-gray-400 mb-2">Try asking</div>
+            <div className="flex flex-wrap gap-1.5">
+              {welcomeCurrent.prompts.map((p, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11.5px] font-medium"
+                  style={{ background: `${welcomeCurrent.ink}0A`, color: welcomeCurrent.ink, border: `1px solid ${welcomeCurrent.ink}14` }}
+                >
+                  <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden>
+                    <path d="M1.5 5 L8.5 5 M5.5 2 L8.5 5 L5.5 8" stroke={welcomeCurrent.ink} strokeOpacity="0.45" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  {p}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 pb-5 pt-2 flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            {welcomeSteps.map((s, i) => {
+              const active = i === welcomeStep;
+              return (
+                <button
+                  key={s.key}
+                  onClick={() => setWelcomeStep(i as 0 | 1)}
+                  aria-label={`Go to step ${i + 1}`}
+                  className="h-1.5 rounded-full transition-all"
+                  style={{
+                    width: active ? 22 : 6,
+                    background: active ? welcomeCurrent.ink : '#e5e7eb',
+                  }}
+                />
+              );
+            })}
+            <span className="ml-2 text-[11px] font-medium text-gray-400 tabular-nums">
+              {welcomeStep + 1} / {welcomeSteps.length}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {welcomeStep > 0 && (
+              <button
+                onClick={() => setWelcomeStep((welcomeStep - 1) as 0 | 1)}
+                className="h-9 px-3.5 rounded-full text-[12px] font-bold text-gray-600 hover:bg-gray-100 transition-colors"
+              >
+                Back
+              </button>
+            )}
+            {!welcomeIsLast ? (
+              <button
+                onClick={() => setWelcomeStep((welcomeStep + 1) as 0 | 1)}
+                className="h-9 px-4 rounded-full text-[12px] font-bold text-white inline-flex items-center gap-1.5 transition-transform hover:-translate-y-0.5"
+                style={{ background: welcomeCurrent.accent }}
+              >
+                Next
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6H10M10 6L6 2M10 6L6 10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+            ) : (
+              <button
+                onClick={dismissWelcome}
+                className="h-9 px-4 rounded-full text-[12px] font-bold text-white inline-flex items-center gap-1.5 transition-transform hover:-translate-y-0.5"
+                style={{ background: welcomeCurrent.accent }}
+              >
+                Get started
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6H10M10 6L6 2M10 6L6 10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   ) : null;
 
+  if (effectiveChatMessage || sessionParam) {
+    return (
+      <>
+        {welcomeModal}
+        <SuperAgentChat
+          key={sessionParam || effectiveChatMessage || 'new'}
+          initialMessage={effectiveChatMessage || ''}
+          initialSessionId={sessionParam || undefined}
+          initialChatMode={sessionParam ? undefined : mode}
+          selectedAgentId={selectedAgent || undefined}
+          onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
+        />
+      </>
+    );
+  }
+
+
 
   return (
     <div
-      className="flex-1 flex flex-col h-full overflow-y-auto"
+      className="flex-1 flex flex-col h-full overflow-y-auto relative"
       style={{
         ['--domain-accent' as any]: domainTheme.accent,
         ['--domain-accent-soft' as any]: domainTheme.accentSoft,
-        ...(domain === 'web3' ? {
-          backgroundColor: '#F5F5EC',
-          backgroundImage: 'radial-gradient(circle, rgba(0,0,0,0.08) 1px, transparent 1px)',
-          backgroundSize: '18px 18px',
-        } : {}),
+        ...(domain === 'web3' ? { backgroundColor: '#FFFFFF' } : {}),
       }}
     >
+      {/* ── Web3 ambient: canvas dot-wave (inspired by variant.com/community) ── */}
+      {domain === 'web3' && (
+        <>
+          <Web3DotWave />
+          {/* soft vignette keeps center content readable over the waves */}
+          <div
+            aria-hidden
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              zIndex: 1,
+              background:
+                'radial-gradient(ellipse 55% 45% at 50% 42%, rgba(255,255,255,0.75) 0%, rgba(255,255,255,0.25) 50%, rgba(255,255,255,0) 78%)',
+            }}
+          />
+        </>
+      )}
       {welcomeModal}
       {/* ── Top bar: Domain toggle + Upgrade ── */}
-      <div className="flex items-center justify-between gap-3 px-4 md:px-6 pt-4 pb-0">
+      <div className="flex items-center justify-between gap-3 px-4 md:px-6 pt-4 pb-0 relative" style={{ zIndex: 10 }}>
         <div
           role="tablist"
           aria-label="Asset domain"
@@ -619,13 +817,12 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         </div>
       </div>
       {/* ── Hero + Input ── */}
-      <div className="hero-zone flex flex-col items-center pt-6 md:pt-10 pb-6 px-4" style={domain === 'web3' ? { background: 'transparent', backgroundImage: 'none' } : undefined}>
+      <div className="hero-zone flex flex-col items-center pt-6 md:pt-10 pb-6 px-4 relative" style={{ zIndex: 10, ...(domain === 'web3' ? { background: 'transparent', backgroundImage: 'none' } : {}) }}>
         <div className="max-w-[640px] w-full space-y-7" style={{ position: 'relative', zIndex: 1 }}>
           {/* Title */}
           <div className="text-center hero-title space-y-2">
-            <h1 className="text-[38px] md:text-[46px] font-extrabold tracking-tight leading-[1.15]">
-              <span className="text-gray-900">Where would you like to </span>
-              <span style={{ color: domainTheme.accent }}>invest?</span>
+            <h1 className="text-[38px] md:text-[46px] font-extrabold tracking-tight leading-[1.15] text-gray-900">
+              Where would you like to invest?
             </h1>
             <p className="text-[14px] text-gray-400 font-normal">
               {domain === 'stocks'
@@ -851,7 +1048,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
       {/* ── Use Cases — only on top-level, hidden when an agent is active ── */}
       {!selectedAgent && (
-        <div className="px-4 pb-10 pt-8 max-w-[960px] w-full mx-auto">
+        <div className="px-4 pb-10 pt-8 max-w-[960px] w-full mx-auto relative" style={{ zIndex: 10 }}>
           <div className="flex items-center gap-2 mb-4">
             <span style={{ display: 'inline-block', width: 3, height: 14, borderRadius: 2, backgroundColor: domainTheme.accent, flexShrink: 0 }} />
             <h2 className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">Explore Use Cases</h2>
