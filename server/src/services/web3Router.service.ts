@@ -333,8 +333,10 @@ function extractBaseCurrencies(cg: Web3ResearchResult): string[] {
 }
 
 function shouldSkipOkxForIntent(intent?: string): boolean {
-  // market / category / onchain / nft scans are CG-only
-  return intent === 'market_scan' || intent === 'category_scan' || intent === 'onchain_scan' || intent === 'nft_scan';
+  // Only NFT scans are truly useless for OKX (no NFT markets on OKX spot).
+  // For market / category / onchain intents we still try OKX when identifiable bases
+  // exist — OKX adds real-time spot depth / volume / funding data alongside CoinGecko.
+  return intent === 'nft_scan';
 }
 
 function fmtUsd(v: number | null | undefined): string {

@@ -110,10 +110,26 @@ function isTransientNetworkError(err: unknown): boolean {
   );
 }
 
-/** Fetch prices from CoinGecko free API (no API key needed) */
+function coingeckoCreds(): { baseUrl: string; headers: Record<string, string>; tier: 'pro' | 'demo' | 'public'; keyPreview: string } {
+  const pro = (process.env.COINGECKO_PRO_API_KEY || '').trim();
+  const demo = (process.env.COINGECKO_DEMO_API_KEY || '').trim();
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (pro) {
+    headers['x-cg-pro-api-key'] = pro;
+    return { baseUrl: 'https://pro-api.coingecko.com/api/v3', headers, tier: 'pro', keyPreview: pro.slice(0, 8) + '…' };
+  }
+  if (demo) {
+    headers['x-cg-demo-api-key'] = demo;
+    return { baseUrl: 'https://api.coingecko.com/api/v3', headers, tier: 'demo', keyPreview: demo.slice(0, 8) + '…' };
+  }
+  return { baseUrl: 'https://api.coingecko.com/api/v3', headers, tier: 'public', keyPreview: 'none' };
+}
+
+/** Fetch prices from CoinGecko (Pro if key set, else Public) */
 async function fetchFromCoinGecko(): Promise<Record<string, number> | null> {
   const ids = [...new Set(Object.values(COINGECKO_IDS))].join(',');
-  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`;
+  const { baseUrl, headers } = coingeckoCreds();
+  const url = `${baseUrl}/simple/price?ids=${ids}&vs_currencies=usd`;
   const timeoutMs = coingeckoFetchTimeoutMs();
 
   const dispatcher = getCoingeckoDispatcher();
@@ -121,7 +137,7 @@ async function fetchFromCoinGecko(): Promise<Record<string, number> | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const response = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
+        headers,
         signal: AbortSignal.timeout(timeoutMs),
         ...(dispatcher ? { dispatcher } : {}),
       });
@@ -201,6 +217,10 @@ export function startPriceService() {
     return;
   }
   const intervalMs = priceServicePollIntervalMs();
+  const creds = coingeckoCreds();
+  console.log(
+    `[CoinGecko] Tier=${creds.tier.toUpperCase()} baseUrl=${creds.baseUrl} key=${creds.keyPreview}`,
+  );
   console.log('[PriceService] Starting price feed...');
   if (intervalMs == null) {
     if (priceServiceBootFetch()) {

@@ -2001,26 +2001,8 @@ const ThinkingInlineTrigger: React.FC<{
 
     useEffect(() => { setTickerIdx(0); }, [allTickerItems.length]);
 
-    const isSimple = thinking.routedMode === 'fast';
-
-    // Simple mode: single line, no panel open
-    if (isSimple) {
-        return (
-            <div className="flex items-center gap-2 py-1.5 mb-2">
-                {thinking.isActive ? (
-                    <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                ) : (
-                    <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                )}
-                <span className="text-[13px] font-medium text-gray-400">{phaseLabel}</span>
-                {thinking.isActive && elapsedSec > 0 && (
-                    <span className="text-[12px] font-semibold text-gray-500 tabular-nums">{elapsedSec}s</span>
-                )}
-            </div>
-        );
-    }
-
-    // Full mode — arrow stays aligned to line 1 (items-center on the top row)
+    // Unified rich mode for all routed modes (fast / roundtable / undefined):
+    // clickable button to open Process panel + rotating ticker of live progress.
     return (
         <button onClick={onOpen} className="group py-1.5 mb-2 hover:opacity-80 transition-opacity text-left">
             {/* Top row: spinner/check + title + elapsed + arrow */}
@@ -5677,8 +5659,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         </div>
                                                     </div>
                                                 )}
-                                                {/* Bare stage pipeline — no card wrapper, sits between the thinking trigger and the workbench */}
-                                                {thinkingProcesses[i]?.routedMode === 'roundtable' && (
+                                                {/* Bare stage pipeline — shows for all modes:
+                                                    - Roundtable: 5 stages (Summon → Research → Debate → Consensus → Report)
+                                                    - Fast / Auto: 3 stages (Route → Research → Respond) */}
+                                                {!!thinkingProcesses[i]?.routedMode && (
                                                     <div className="mb-3 mt-1">
                                                         <PlanPipeline thinking={thinkingProcesses[i]} />
                                                     </div>
