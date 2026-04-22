@@ -207,6 +207,21 @@ const App: React.FC = () => {
   const appBg = isDark ? 'bg-[#0e0e0e]' : 'bg-gray-50/30';
   const mainBg = isDark ? 'bg-[#141414]' : 'bg-white md:bg-transparent';
 
+  // Standalone pages (no sidebar / main chrome). Render their own layout.
+  if (location.pathname.startsWith('/developers')) {
+    return (
+      <div className="h-screen w-screen flex flex-col overflow-hidden bg-white">
+        <AnimStyles />
+        <div className="flex-1 overflow-hidden">
+          <Routes>
+            <Route path="/developers" element={<ApiLanding />} />
+            <Route path="/developers/*" element={<ApiLanding />} />
+          </Routes>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`h-screen w-screen flex overflow-hidden ${appBg} selection:bg-gray-900 selection:text-white transition-colors duration-300`}>
 
@@ -250,7 +265,7 @@ const App: React.FC = () => {
             <Route path="/market/*" element={<Market />} />
             <Route path="/discover" element={<DiscoverPage />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/api" element={<ApiLanding />} />
+            <Route path="/developers" element={<ApiLanding />} />
             <Route path="/signal-radar" element={<SignalRadarToSuperAgentRedirect />} />
             <Route path="/portfolio" element={<Portfolio isWalletConnected={isLoggedIn} onConnect={() => setShowAuthModal(true)} onLogout={logout} defaultTab="personal" />} />
             <Route path="/enterprise" element={<Portfolio isWalletConnected={isLoggedIn} onConnect={() => setShowAuthModal(true)} onLogout={logout} defaultTab="enterprise" />} />

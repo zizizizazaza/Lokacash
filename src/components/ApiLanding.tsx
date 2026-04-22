@@ -344,7 +344,11 @@ const ApiLanding: React.FC = () => {
       {/* ── Sticky Nav (Flat) ── */}
       <div className={`sticky top-0 z-50 transition-all duration-300 ${scrolled ? 'bg-white/90 backdrop-blur-md shadow-sm border-b border-gray-200' : 'bg-transparent'}`}>
         <div className="max-w-[1400px] mx-auto px-4 sm:px-12 flex items-center justify-between h-14">
-          <span className={`font-black text-lg tracking-tight transition-opacity duration-300 ${scrolled ? 'opacity-100' : 'opacity-0'}`}>Loka</span>
+          <a href="/" className="flex items-center gap-2 group" title="Back to Loka">
+            <span className="font-black text-lg tracking-tight text-black group-hover:text-gray-600 transition-colors">Loka</span>
+            <span className="text-gray-300 text-sm">/</span>
+            <span className="text-sm font-semibold text-gray-500 group-hover:text-gray-700 transition-colors">Developers</span>
+          </a>
           <nav className={`hidden md:flex items-center gap-8 transition-opacity duration-300 ${scrolled ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
             {NAV_LINKS.map(link => (
               <button key={link.href} onClick={() => scrollToSection(link.href)}
