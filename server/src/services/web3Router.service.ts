@@ -556,37 +556,48 @@ export async function runWeb3RouterQuery(userQuery: string): Promise<Web3Researc
   }
 
   const remaining = ROUTER_BUDGET_MS - (Date.now() - startMs);
-  if (remaining <= 500) {
+
+  // Bases to fetch now: CG-resolved bases NOT already pre-warmed.
+  const lateBases = cgBases.filter((b) => !preWarmBases.includes(b));
+  const allRequestedBases = [...preWarmBases, ...lateBases];
+
+  // If budget is exhausted but we have pre-warmed data already in flight,
+  // still collect it (it ran in parallel and is likely already done).
+  // Only skip if there was nothing pre-warmed at all.
+  if (remaining <= 500 && preWarmBases.length === 0) {
     cg.raw.providers = providers;
     logs.push('okx_skipped_budget_exhausted');
     cg.raw.logs = logs;
     return cg;
   }
-
-  // Bases to fetch now: CG-resolved bases NOT already pre-warmed.
-  const lateBases = cgBases.filter((b) => !preWarmBases.includes(b));
-  const allRequestedBases = [...preWarmBases, ...lateBases];
+  // When budget is exhausted, skip fetching late bases but keep pre-warm results.
+  const effectiveLateBases = remaining <= 500 ? [] : lateBases;
+  if (remaining <= 500 && lateBases.length > 0) {
+    logs.push(`okx_late_skipped_budget:${lateBases.join(',')}`);
+  }
 
   let snapshots: Web3OkxSnapshot[] = [];
   let newsBundles: Web3OkxNewsBundle[] = [];
   try {
     const marketTask = Promise.all([
       preWarmMarketTask ?? Promise.resolve([] as Web3OkxSnapshot[]),
-      lateBases.length > 0 ? gatherOkxSnapshots(lateBases) : Promise.resolve([] as Web3OkxSnapshot[]),
+      effectiveLateBases.length > 0 ? gatherOkxSnapshots(effectiveLateBases) : Promise.resolve([] as Web3OkxSnapshot[]),
     ]).then(([a, b]) => [...a, ...b]);
 
     const newsTask = OKX_NEWS_ENABLED
       ? Promise.all([
           preWarmNewsTask ?? Promise.resolve([] as Web3OkxNewsBundle[]),
-          lateBases.length > 0 ? gatherOkxNewsBundles(lateBases) : Promise.resolve([] as Web3OkxNewsBundle[]),
+          effectiveLateBases.length > 0 ? gatherOkxNewsBundles(effectiveLateBases) : Promise.resolve([] as Web3OkxNewsBundle[]),
         ]).then(([a, b]) => [...a, ...b])
       : Promise.resolve([] as Web3OkxNewsBundle[]);
 
+    // Give pre-warmed tasks up to 2s to settle; late tasks use remaining budget.
+    const waitMs = remaining > 500 ? remaining : 2_000;
     const timeoutTask = new Promise<void>((resolve) =>
       setTimeout(() => {
         logs.push('okx_budget_timeout');
         resolve();
-      }, remaining),
+      }, waitMs),
     );
 
     await Promise.race([Promise.all([marketTask, newsTask]).then(() => {}), timeoutTask]);

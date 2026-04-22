@@ -4,6 +4,7 @@ import prisma from '../db.js';
 import { authRequired, type AuthRequest } from '../middleware/auth.js';
 import { adminRequired } from '../middleware/adminGuard.js';
 import { notify } from '../services/notification.service.js';
+import { applyPlan, type PlanTier } from '../services/subscription.service.js';
 
 const router = Router();
 
@@ -55,6 +56,20 @@ router.patch('/users/:id/role', async (req: AuthRequest, res, next) => {
       select: { id: true, email: true, name: true, role: true },
     });
     res.json(user);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Set subscription plan for any user (admin only — no payment required)
+const planSchema = z.object({ plan: z.enum(['free', 'pro', 'max']) });
+router.patch('/users/:id/plan', async (req: AuthRequest, res, next) => {
+  try {
+    const { plan } = planSchema.parse(req.body);
+    const updated = await applyPlan(req.params.id as string, plan as PlanTier, {
+      billingCycle: plan === 'free' ? null : 'monthly',
+    });
+    res.json({ ok: true, userId: req.params.id, plan: updated.plan, resetAt: updated.resetAt });
   } catch (err) {
     next(err);
   }

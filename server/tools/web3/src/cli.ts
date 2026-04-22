@@ -16,6 +16,12 @@ const REST_RETRY_BASE_DELAY_MS = Math.max(50, Number(process.env.COINGECKO_REST_
 const SPOT_CACHE_TTL_MS = Math.max(1_000, Number(process.env.WEB3_SPOT_CACHE_TTL_MS || '20000'));
 const EXCHANGE_FALLBACK_TIMEOUT_MS = Math.max(2_000, Number(process.env.WEB3_EXCHANGE_TIMEOUT_MS || '6000'));
 
+// ─── LLM Agent config ────────────────────────────────────────────────────────
+const LLM_BASE_URL = (process.env.LOKA_AI_BASE_URL || '').replace(/\/$/, '').replace(/\/chat\/completions$/, '');
+const LLM_API_KEY = process.env.LOKA_AI_API_KEY || '';
+const LLM_WEB3_MODEL = (process.env.LOKA_AI_WEB3_MODEL || process.env.LOKA_AI_MODEL || 'deepseek-v3').trim();
+const AGENT_MAX_TURNS = Math.max(2, Number(process.env.WEB3_AGENT_MAX_TURNS || '6'));
+
 type Web3Intent =
   | 'token_quote'
   | 'token_deep_dive'
@@ -23,7 +29,10 @@ type Web3Intent =
   | 'market_scan'
   | 'category_scan'
   | 'onchain_scan'
-  | 'nft_scan';
+  | 'nft_scan'
+  | 'global_scan'
+  | 'treasury_scan'
+  | 'exchange_scan';
 
 type McpTool = {
   name: string;
@@ -126,6 +135,69 @@ type SpotCacheEntry = {
   row: CoinMarketsRow;
   updatedAtMs: number;
   source: 'coingecko' | 'cache' | 'binance' | 'okx';
+};
+
+// ─── New endpoint types ──────────────────────────────────────────────────────
+
+type GlobalMarketData = {
+  active_cryptocurrencies?: number;
+  total_market_cap?: { usd?: number };
+  total_volume?: { usd?: number };
+  market_cap_percentage?: Record<string, number>;
+  market_cap_change_percentage_24h_usd?: number;
+};
+
+// [timestamp, open, high, low, close]
+type OhlcRow = [number, number, number, number, number];
+
+type NftDetail = {
+  id?: string;
+  name?: string;
+  symbol?: string;
+  asset_platform_id?: string;
+  contract_address?: string;
+  total_supply?: number;
+  number_of_unique_addresses?: number;
+  floor_price?: { usd?: number };
+  market_cap?: { usd?: number };
+  volume_24h?: { usd?: number };
+  floor_price_24h_percentage_change?: { usd?: number };
+  one_day_sales?: number;
+  ath?: { usd?: number };
+};
+
+type ExchangeEntry = {
+  id?: string;
+  name?: string;
+  country?: string;
+  trust_score?: number;
+  trust_score_rank?: number;
+  trade_volume_24h_btc?: number;
+};
+
+type TreasuryCompany = {
+  name?: string;
+  country?: string;
+  total_holdings?: number;
+  total_current_value_usd?: number;
+};
+
+type TreasuryData = {
+  total_holdings?: number;
+  total_value_usd?: number;
+  market_cap_dominance?: number;
+  companies?: TreasuryCompany[];
+};
+
+type OnchainPool = {
+  id?: string;
+  attributes?: {
+    name?: string;
+    base_token_price_usd?: string;
+    volume_usd?: { h24?: string };
+    reserve_in_usd?: string;
+    price_change_percentage?: { h24?: string };
+  };
 };
 
 const STOP_WORDS = new Set([
@@ -678,93 +750,7 @@ async function resolveAssets(query: string, limit = 3): Promise<ResolvedAsset[]>
   return resolved.slice(0, limit);
 }
 
-function classifyWeb3Intent(query: string): Web3Intent {
-  const lower = query.toLowerCase();
-  const compareLike = /(\bvs\b|compare|comparison|对比|比较|哪个好|哪个更强)/i.test(query);
-  const marketScanLike =
-    /top\b|trending|gainer|loser|scan|filter|筛选|榜单|热门|涨幅|跌幅|市值.*(超过|高于)|market\s*cap.*(above|over|greater)|24\s*h|24h/i.test(
-      query,
-    );
-  const categoryLike = /category|sector|theme|赛道|板块|生态|meme|defi|rwa|gamefi|layer\s*1|layer1|ai/i.test(lower);
-  const onchainLike = /onchain|dex|pool|liquidity|geckoterminal|链上|池子|流动性|dex/i.test(lower) || /链上|池子|流动性/.test(query);
-  const nftLike = /\bnft\b|floor price|floor|collection|nft地板价|nft合集/.test(lower) || /地板价|合集/.test(query);
-  const resolvedTerms = extractAssetTerms(query);
 
-  if (nftLike) return 'nft_scan';
-  if (onchainLike) return 'onchain_scan';
-  if (compareLike && resolvedTerms.length >= 2) return 'multi_asset_compare';
-  if (marketScanLike) return categoryLike && !/24\s*h|24h|涨幅|跌幅|市值/.test(lower) ? 'category_scan' : 'market_scan';
-  if (categoryLike && !resolvedTerms.length) return 'category_scan';
-  if (/price|quote|spot|市值|价格|现价|多少钱|多少/.test(lower) || /市值|价格|现价|多少钱|多少/.test(query)) {
-    return 'token_quote';
-  }
-  return 'token_deep_dive';
-}
-
-function parseUsdThreshold(query: string): number | undefined {
-  const lower = query.toLowerCase();
-  const english =
-    lower.match(/market\s*cap[^$\d]{0,30}(?:above|over|greater than|at least|>=?)\s*\$?\s*(\d+(?:\.\d+)?)\s*(billion|bn|b|million|mn|m|thousand|k)?/i) ||
-    lower.match(/over\s*\$?\s*(\d+(?:\.\d+)?)\s*(billion|bn|b|million|mn|m|thousand|k)\s*(?:market\s*cap)?/i);
-  if (english) {
-    const value = Number(english[1]);
-    const unit = (english[2] || '').toLowerCase();
-    if (unit === 'billion' || unit === 'bn' || unit === 'b') return value * 1e9;
-    if (unit === 'million' || unit === 'mn' || unit === 'm') return value * 1e6;
-    if (unit === 'thousand' || unit === 'k') return value * 1e3;
-    return value;
-  }
-  const chinese = query.match(/市值[^0-9]{0,20}(?:超过|高于|不少于|至少|大于|>=?)\s*(\d+(?:\.\d+)?)\s*(亿|万)?\s*(美元|美金|刀|usd)?/i);
-  if (chinese) {
-    const value = Number(chinese[1]);
-    const unit = chinese[2] || '';
-    if (unit === '亿') return value * 1e8;
-    if (unit === '万') return value * 1e4;
-    return value;
-  }
-  const standaloneChinese = query.match(/(\d+(?:\.\d+)?)\s*亿\s*(美元|美金)/i);
-  if (standaloneChinese && /市值/.test(query)) {
-    return Number(standaloneChinese[1]) * 1e8;
-  }
-  return undefined;
-}
-
-function parsePctThreshold(query: string): number | undefined {
-  const english =
-    query.match(/24\s*h(?:ours?)?[^%\d]{0,30}(?:gain|change|increase|rise|up)[^%\d]{0,30}(?:above|over|at least|>=?)\s*(\d+(?:\.\d+)?)%/i) ||
-    query.match(/24\s*h(?:ours?)?[^%\d]{0,30}(?:\+|>=?)\s*(\d+(?:\.\d+)?)%/i);
-  if (english) return Number(english[1]);
-  const chinese =
-    query.match(/24\s*(?:小时|h)[^%\d]{0,24}(?:涨幅|涨跌|涨跌幅)[^%\d]{0,24}(?:至少|达到|超过|高于|不低于|>=?)?[^%\d]{0,8}(\d+(?:\.\d+)?)%/i) ||
-    query.match(/过去24小时[^%\d]{0,24}(?:涨幅|涨跌幅)[^%\d]{0,24}(?:至少|达到|超过|高于|不低于|>=?)?[^%\d]{0,8}(\d+(?:\.\d+)?)%/i);
-  if (chinese) return Number(chinese[1]);
-  return undefined;
-}
-
-function parseTopN(query: string): number {
-  const english = query.match(/\btop\s*(\d{1,2})\b/i);
-  if (english) return Math.max(1, Math.min(20, Number(english[1])));
-  const chinese = query.match(/前\s*(\d{1,2})\s*(个|只|种)?/);
-  if (chinese) return Math.max(1, Math.min(20, Number(chinese[1])));
-  return 10;
-}
-
-function buildMarketScanFilters(query: string): MarketScanFilters {
-  const lower = query.toLowerCase();
-  const minMarketCapUsd = parseUsdThreshold(query);
-  const min24hChangePct = parsePctThreshold(query);
-  const useTrendingFeed = /\btrending\b|热门|hot|热度/i.test(query) && minMarketCapUsd == null && min24hChangePct == null;
-  let sort: MarketScanFilters['sort'] = 'total_volume_desc';
-  if (/\bmarket\s*cap\b|市值/.test(lower)) sort = 'market_cap_desc';
-  if (/涨幅|gainer|gain|涨得最多/.test(lower)) sort = 'price_change_percentage_24h_desc';
-  return {
-    minMarketCapUsd,
-    min24hChangePct,
-    topN: parseTopN(query),
-    sort,
-    useTrendingFeed,
-  };
-}
 
 async function fetchCoinsMarkets(params: Record<string, string | number | undefined>): Promise<CoinMarketsRow[]> {
   const qs = new URLSearchParams();
@@ -800,13 +786,6 @@ async function fetchCoinChart(
   }
 }
 
-function pickChartDays(query: string): number {
-  const d30 = /\b30d\b|30\s*day|30天/i.test(query);
-  if (d30) return 30;
-  const d14 = /\b14d\b|14\s*day|14天|两周/i.test(query);
-  if (d14) return 14;
-  return 7;
-}
 
 function summarizeChart(chart: { prices?: number[][]; total_volumes?: number[][] } | null): Record<string, unknown> {
   const prices = chart?.prices || [];
@@ -848,142 +827,66 @@ async function fetchTrendingMarkets(topN: number): Promise<CoinMarketsRow[]> {
   });
 }
 
-async function runMarketScan(query: string): Promise<Web3CliResult> {
-  const filters = buildMarketScanFilters(query);
-  const logs = [
-    `intent=market_scan`,
-    `filters.min_market_cap=${filters.minMarketCapUsd ?? 'n/a'}`,
-    `filters.min_24h_change=${filters.min24hChangePct ?? 'n/a'}`,
-    `filters.sort=${filters.sort}`,
-  ];
+// ─── New fetch helpers ───────────────────────────────────────────────────────
 
-  let rows: CoinMarketsRow[] = [];
-  if (filters.useTrendingFeed) {
-    rows = await fetchTrendingMarkets(filters.topN);
-    logs.push(`source=trending_feed count=${rows.length}`);
-  } else {
-    const pages = [1, 2];
-    for (const page of pages) {
-      const batch = await fetchCoinsMarkets({
-        vs_currency: 'usd',
-        order: filters.sort === 'price_change_percentage_24h_desc' ? 'market_cap_desc' : filters.sort,
-        per_page: 250,
-        page,
-        sparkline: 'false',
-        price_change_percentage: '24h',
-      });
-      rows.push(...batch);
-      if (rows.length >= 250 && filters.topN <= 10) break;
-    }
-    logs.push(`source=coins_markets scanned=${rows.length}`);
-  }
-
-  const filtered = rows.filter((row) => {
-    if (filters.minMarketCapUsd != null && (row.market_cap || 0) < filters.minMarketCapUsd) return false;
-    if (filters.min24hChangePct != null && (row.price_change_percentage_24h || -Infinity) < filters.min24hChangePct) return false;
-    return true;
-  });
-
-  const sorted = [...filtered].sort((a, b) => {
-    if (filters.sort === 'market_cap_desc') return (b.market_cap || 0) - (a.market_cap || 0);
-    if (filters.sort === 'price_change_percentage_24h_desc') {
-      return (b.price_change_percentage_24h || 0) - (a.price_change_percentage_24h || 0);
-    }
-    const volDelta = (b.total_volume || 0) - (a.total_volume || 0);
-    return volDelta !== 0 ? volDelta : (b.market_cap || 0) - (a.market_cap || 0);
-  });
-
-  const matches = sorted.slice(0, filters.topN);
-  const reportLines = [
-    '## Web3 市场扫描（CoinGecko）',
-    `Query: ${query}`,
-    `意图: market_scan`,
-    `筛选条件: 市值 >= ${fmtUsdCompact(filters.minMarketCapUsd)} | 24h 涨幅 >= ${
-      filters.min24hChangePct != null ? `${filters.min24hChangePct}%` : 'n/a'
-    } | 排序=${filters.sort}`,
-    '',
-  ];
-  if (!matches.length) {
-    reportLines.push('未找到满足条件的币种。');
-  } else {
-    matches.forEach((row, index) => {
-      reportLines.push(
-        `${index + 1}. ${row.name} (${row.symbol.toUpperCase()}) — 价格 ${fmtUsd(row.current_price)} | 24h ${fmtPct(
-          row.price_change_percentage_24h,
-        )} | 市值 ${fmtUsdCompact(row.market_cap)} | 24h 交易量 ${fmtUsdCompact(row.total_volume)}`,
-      );
-    });
-  }
-
-  return {
-    ok: true,
-    report: reportLines.join('\n'),
-    intent: 'market_scan',
-    via: 'rest',
-    assets: matches.map((row) => ({ id: row.id, symbol: row.symbol, name: row.name })),
-    market: {
-      scan: {
-        filters,
-        matches,
-        scannedCount: rows.length,
-      },
-    },
-    discovery: {},
-    onchain: {},
-    nft: {},
-    logs,
-    missingData: matches.length ? [] : ['market_scan_no_matches'],
-    resolvedId: matches[0]?.id,
-    spotPriceUsd: matches[0]?.current_price,
-    resolver: 'coins_markets_scan',
-  };
+async function fetchGlobalData(): Promise<GlobalMarketData | null> {
+  try {
+    const raw = (await fetchRestJson('/global')) as { data?: GlobalMarketData };
+    return raw?.data ?? null;
+  } catch { return null; }
 }
 
-async function runMultiAssetCompare(query: string): Promise<Web3CliResult> {
-  const resolved = await resolveAssets(query, 4);
-  const ids = resolved.map((item) => item.id).filter(Boolean);
-  const rows = ids.length
-    ? await fetchCoinsMarkets({
-        vs_currency: 'usd',
-        ids: ids.join(','),
-        order: 'market_cap_desc',
-        per_page: ids.length,
-        page: 1,
-        sparkline: 'false',
-        price_change_percentage: '24h',
-      })
-    : [];
-
-  const reportLines = ['## Web3 多币对比（CoinGecko）', `Query: ${query}`, ''];
-  if (!rows.length) {
-    reportLines.push('未解析到可对比的加密资产。');
-  } else {
-    rows.forEach((row, index) => {
-      reportLines.push(
-        `${index + 1}. ${row.name} (${row.symbol.toUpperCase()}) — 价格 ${fmtUsd(row.current_price)} | 24h ${fmtPct(
-          row.price_change_percentage_24h,
-        )} | 市值 ${fmtUsdCompact(row.market_cap)} | 排名 #${row.market_cap_rank || 'n/a'}`,
-      );
-    });
-  }
-
-  return {
-    ok: true,
-    report: reportLines.join('\n'),
-    intent: 'multi_asset_compare',
-    via: 'rest',
-    assets: rows.map((row) => ({ id: row.id, symbol: row.symbol, name: row.name })),
-    market: { compare: rows },
-    discovery: {},
-    onchain: {},
-    nft: {},
-    logs: [`intent=multi_asset_compare`, `resolved_assets=${resolved.map((item) => item.id).join(',') || 'none'}`],
-    missingData: rows.length ? [] : ['multi_asset_compare_no_assets'],
-    resolvedId: rows[0]?.id,
-    spotPriceUsd: rows[0]?.current_price,
-    resolver: resolved[0]?.source,
-  };
+async function fetchOhlcData(geckoId: string, days: number): Promise<OhlcRow[]> {
+  try {
+    const raw = await fetchRestJson(`/coins/${encodeURIComponent(geckoId)}/ohlc?vs_currency=usd&days=${days}`);
+    return Array.isArray(raw) ? (raw as OhlcRow[]) : [];
+  } catch { return []; }
 }
+
+async function searchNftId(query: string): Promise<string | null> {
+  try {
+    const raw = (await fetchRestJson(`/search?query=${encodeURIComponent(query)}`)) as {
+      nfts?: Array<{ id?: string; name?: string }>;
+    };
+    return raw?.nfts?.[0]?.id ?? null;
+  } catch { return null; }
+}
+
+async function fetchNftDetail(nftId: string): Promise<NftDetail | null> {
+  try {
+    return (await fetchRestJson(`/nfts/${encodeURIComponent(nftId)}`)) as NftDetail;
+  } catch { return null; }
+}
+
+async function fetchExchanges(limit = 10): Promise<ExchangeEntry[]> {
+  try {
+    const raw = await fetchRestJson(`/exchanges?per_page=${limit}&page=1`);
+    return Array.isArray(raw) ? (raw as ExchangeEntry[]) : [];
+  } catch { return []; }
+}
+
+async function fetchTreasuryHoldings(coinId: 'bitcoin' | 'ethereum'): Promise<TreasuryData | null> {
+  try {
+    return (await fetchRestJson(`/companies/public_treasury/${coinId}`)) as TreasuryData;
+  } catch { return null; }
+}
+
+async function fetchOnchainTopPools(network: string, limit = 5): Promise<OnchainPool[]> {
+  try {
+    const raw = (await fetchRestJson(`/onchain/networks/${encodeURIComponent(network)}/pools?page=1`)) as { data?: OnchainPool[] };
+    return (raw?.data ?? []).slice(0, limit);
+  } catch { return []; }
+}
+
+async function fetchOnchainTokenPools(network: string, tokenAddress: string, limit = 5): Promise<OnchainPool[]> {
+  try {
+    const raw = (await fetchRestJson(
+      `/onchain/networks/${encodeURIComponent(network)}/tokens/${encodeURIComponent(tokenAddress)}/pools?page=1`,
+    )) as { data?: OnchainPool[] };
+    return (raw?.data ?? []).slice(0, limit);
+  } catch { return []; }
+}
+
 
 async function runTokenQuote(query: string): Promise<Web3CliResult> {
   const resolved = await resolveAsset(query);
@@ -1084,142 +987,6 @@ async function runTokenQuote(query: string): Promise<Web3CliResult> {
   };
 }
 
-async function runTokenDeepDive(query: string): Promise<Web3CliResult> {
-  const resolved = await resolveAsset(query);
-  if (!resolved) {
-    return {
-      ok: true,
-      report: `## Web3 数据\n未能从查询中解析出明确币种：${query}`,
-      intent: 'token_deep_dive',
-      via: 'rest',
-      assets: [],
-      market: {},
-      discovery: {},
-      onchain: {},
-      nft: {},
-      logs: ['intent=token_deep_dive', 'resolver=none'],
-      missingData: ['token_unresolved'],
-    };
-  }
-
-  const days = pickChartDays(query);
-  let rows: CoinMarketsRow[] = [];
-  const deepDiveLogs: string[] = [];
-  let deepDiveVia: 'rest' | 'hybrid' = 'rest';
-  let deepDiveResolver = resolved.source;
-  try {
-    rows = await fetchCoinsMarkets({
-      vs_currency: 'usd',
-      ids: resolved.id,
-      order: 'market_cap_desc',
-      per_page: 1,
-      page: 1,
-      sparkline: 'false',
-      price_change_percentage: '24h',
-    });
-    if (rows[0]) setCachedSpotRow(rows[0]);
-  } catch (e) {
-    const msg = (e as Error).message;
-    deepDiveLogs.push(`coingecko_spot_error=${truncate(msg, 180)}`);
-    const cached = getCachedSpotRow(resolved.id);
-    if (cached) {
-      rows = [cached];
-      deepDiveVia = 'hybrid';
-      deepDiveResolver = 'coingecko-cache';
-      deepDiveLogs.push('fallback=cache');
-    } else {
-      const fallback = await fetchExchangeFallbackSpot(resolved);
-      if (fallback) {
-        rows = [
-          {
-            id: resolved.id,
-            symbol: (resolved.symbol || '').toLowerCase(),
-            name: resolved.name || resolved.id,
-            current_price: fallback.priceUsd,
-          } as CoinMarketsRow,
-        ];
-        deepDiveVia = 'hybrid';
-        deepDiveResolver = `${fallback.source}-fallback`;
-        deepDiveLogs.push(`fallback=${fallback.source}`);
-      }
-    }
-  }
-  const [detail, chart] = await Promise.all([fetchCoinDetail(resolved.id), fetchCoinChart(resolved.id, days)]);
-
-  const row = rows[0];
-  const chartSummary = summarizeChart(chart);
-  const homepage = detail?.links?.homepage?.find((link) => typeof link === 'string' && link.trim()) || '';
-  const description = truncate(detail?.description?.en || '', 280);
-
-  const reportLines = [
-    deepDiveVia === 'hybrid' ? '## Web3 深度快照（多源兜底）' : '## Web3 深度快照（CoinGecko）',
-    `资产: ${(row?.name || detail?.name || resolved.name || resolved.id) ?? resolved.id} (${(
-      row?.symbol ||
-      detail?.symbol ||
-      resolved.symbol ||
-      ''
-    ).toUpperCase()}) / ${resolved.id}`,
-    `现价: ${fmtUsd(row?.current_price)}`,
-    `24h 涨跌: ${fmtPct(row?.price_change_percentage_24h)}`,
-    `市值: ${fmtUsdCompact(row?.market_cap)}`,
-    `24h 交易量: ${fmtUsdCompact(row?.total_volume)}`,
-    `排名: #${row?.market_cap_rank || detail?.market_cap_rank || 'n/a'}`,
-  ];
-  if (deepDiveVia === 'hybrid') {
-    reportLines.push(`数据说明: CoinGecko 实时接口不可用，已使用 ${deepDiveResolver} 兜底现价。`);
-  }
-  if (Object.keys(chartSummary).length) {
-    reportLines.push(
-      `${days}d 区间: ${fmtUsd(chartSummary.minUsd as number)} -> ${fmtUsd(chartSummary.maxUsd as number)} | 期间涨跌 ${fmtPct(
-        chartSummary.changePct as number,
-      )}`,
-    );
-  }
-  if (detail?.categories?.length) {
-    reportLines.push(`分类: ${detail.categories.slice(0, 5).join(', ')}`);
-  }
-  if (detail?.links?.twitter_screen_name) {
-    reportLines.push(`Twitter/X: @${detail.links.twitter_screen_name}`);
-  }
-  if (homepage) {
-    reportLines.push(`官网: ${homepage}`);
-  }
-  if (description) {
-    reportLines.push(`简介: ${description}`);
-  }
-
-  const missingData: string[] = [];
-  if (!row) missingData.push('spot_snapshot_missing');
-  if (!detail) missingData.push('coin_detail_missing');
-  if (!Object.keys(chartSummary).length) missingData.push('chart_missing');
-
-  return {
-    ok: true,
-    report: reportLines.join('\n'),
-    intent: 'token_deep_dive',
-    via: deepDiveVia,
-    assets: [{ id: resolved.id, symbol: row?.symbol || resolved.symbol, name: row?.name || resolved.name }],
-    market: {
-      spot: row || {},
-      detail: detail || {},
-      history: chartSummary,
-    },
-    discovery: {},
-    onchain: {},
-    nft: {},
-    logs: [
-      `intent=token_deep_dive`,
-      `resolved_id=${resolved.id}`,
-      `resolver=${resolved.source}`,
-      `history_days=${days}`,
-      ...deepDiveLogs,
-    ],
-    missingData,
-    resolvedId: resolved.id,
-    spotPriceUsd: row?.current_price,
-    resolver: deepDiveResolver,
-  };
-}
 
 async function resolveCategoryId(query: string): Promise<{ categoryId: string; name: string } | null> {
   const raw = (await fetchRestJson('/coins/categories/list')) as Array<{ category_id?: string; name?: string }>;
@@ -1247,69 +1014,6 @@ async function resolveCategoryId(query: string): Promise<{ categoryId: string; n
   return best?.categoryId ? { categoryId: best.categoryId, name: best.name } : null;
 }
 
-async function runCategoryScan(query: string): Promise<Web3CliResult> {
-  const resolvedCategory = await resolveCategoryId(query);
-  if (!resolvedCategory) {
-    return {
-      ok: true,
-      report: `## Web3 分类扫描\n未能从查询中识别出明确赛道：${query}`,
-      intent: 'category_scan',
-      via: 'rest',
-      assets: [],
-      market: {},
-      discovery: {},
-      onchain: {},
-      nft: {},
-      logs: ['intent=category_scan', 'category=none'],
-      missingData: ['category_unresolved'],
-    };
-  }
-
-  const rows = await fetchCoinsMarkets({
-    vs_currency: 'usd',
-    category: resolvedCategory.categoryId,
-    order: 'market_cap_desc',
-    per_page: parseTopN(query),
-    page: 1,
-    sparkline: 'false',
-    price_change_percentage: '24h',
-  });
-
-  const reportLines = [
-    '## Web3 分类扫描（CoinGecko）',
-    `Query: ${query}`,
-    `分类: ${resolvedCategory.name} (${resolvedCategory.categoryId})`,
-    '',
-  ];
-  if (!rows.length) {
-    reportLines.push('该分类下未获取到币种列表。');
-  } else {
-    rows.forEach((row, index) => {
-      reportLines.push(
-        `${index + 1}. ${row.name} (${row.symbol.toUpperCase()}) — 价格 ${fmtUsd(row.current_price)} | 24h ${fmtPct(
-          row.price_change_percentage_24h,
-        )} | 市值 ${fmtUsdCompact(row.market_cap)}`,
-      );
-    });
-  }
-
-  return {
-    ok: true,
-    report: reportLines.join('\n'),
-    intent: 'category_scan',
-    via: 'rest',
-    assets: rows.map((row) => ({ id: row.id, symbol: row.symbol, name: row.name })),
-    market: { category: rows },
-    discovery: { category: resolvedCategory },
-    onchain: {},
-    nft: {},
-    logs: [`intent=category_scan`, `category=${resolvedCategory.categoryId}`, `count=${rows.length}`],
-    missingData: rows.length ? [] : ['category_empty'],
-    resolvedId: rows[0]?.id,
-    spotPriceUsd: rows[0]?.current_price,
-    resolver: 'category_scan',
-  };
-}
 
 function scoreTool(name: string, desc: string): number {
   const t = `${name} ${desc || ''}`.toLowerCase();
@@ -1480,6 +1184,229 @@ function formatToolResult(result: { content?: { type: string; text?: string }[];
   return body || JSON.stringify(result, null, 2);
 }
 
+// ─── LLM Agent ────────────────────────────────────────────────────────────────
+
+const WEB3_TOOLS = [
+  { type: 'function', function: { name: 'search_crypto_asset', description: 'Resolve a crypto token by name, symbol ($BTC), or contract address (0x…) to its CoinGecko ID. Call this first before other token tools.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Token name, ticker, or contract address' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'get_token_price_and_market', description: 'Get real-time price, market cap, 24h volume, 24h % change for one or more tokens. Requires CoinGecko IDs from search_crypto_asset.', parameters: { type: 'object', properties: { ids: { type: 'string', description: 'Comma-separated CoinGecko IDs, e.g. "bitcoin,ethereum"' } }, required: ['ids'] } } },
+  { type: 'function', function: { name: 'get_token_detail', description: 'Get detailed token info: description, categories, official website, Twitter, GitHub, contract addresses on all chains, community sentiment.', parameters: { type: 'object', properties: { id: { type: 'string', description: 'CoinGecko ID, e.g. "bitcoin"' } }, required: ['id'] } } },
+  { type: 'function', function: { name: 'get_price_history', description: 'Get price history and OHLC candlestick data for a token over N days (7/14/30).', parameters: { type: 'object', properties: { id: { type: 'string', description: 'CoinGecko ID' }, days: { type: 'number', description: 'Number of days: 7, 14, or 30' } }, required: ['id', 'days'] } } },
+  { type: 'function', function: { name: 'get_market_rankings', description: 'Get top coins ranked by market cap, volume, or 24h gain. Can filter by minimum market cap.', parameters: { type: 'object', properties: { sort: { type: 'string', enum: ['market_cap_desc', 'total_volume_desc', 'price_change_percentage_24h_desc'] }, top_n: { type: 'number', description: 'Number of results (default 10, max 20)' }, min_market_cap_usd: { type: 'number', description: 'Minimum market cap filter in USD (optional)' } }, required: ['sort'] } } },
+  { type: 'function', function: { name: 'get_trending_coins', description: 'Get currently trending/hot coins on CoinGecko.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'get_global_market_overview', description: 'Get global crypto market: total market cap, BTC/ETH dominance, 24h change, active asset count.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'get_institutional_holdings', description: 'Get public companies and institutions that hold Bitcoin or Ethereum on their balance sheet (MicroStrategy, Tesla, etc.).', parameters: { type: 'object', properties: { coin: { type: 'string', enum: ['bitcoin', 'ethereum'], description: 'Which coin to check' } }, required: ['coin'] } } },
+  { type: 'function', function: { name: 'get_exchange_rankings', description: 'Get top centralized exchanges ranked by trust score and 24h trading volume.', parameters: { type: 'object', properties: { limit: { type: 'number', description: 'Number of exchanges (default 10)' } } } } },
+  { type: 'function', function: { name: 'get_nft_collection', description: 'Get NFT collection floor price, market cap, 24h volume, holder count, and sales data.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'NFT collection name or search query' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'get_onchain_pools', description: 'Get DEX/on-chain liquidity pool data for a token via GeckoTerminal. Shows pool TVL, 24h volume, price.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Token name, symbol, or contract address' }, network: { type: 'string', description: 'Chain: eth, base, solana, bsc, arbitrum (optional, auto-detected)' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'get_category_coins', description: 'Get top coins in a crypto sector/category such as DeFi, AI, Gaming, RWA, Meme, Layer-1.', parameters: { type: 'object', properties: { category: { type: 'string', description: 'Category name, e.g. "defi", "ai", "meme", "gaming", "rwa", "layer-1"' }, top_n: { type: 'number', description: 'Number of results (default 10)' } }, required: ['category'] } } },
+];
+
+type LLMMessage = {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+  name?: string;
+};
+
+async function callLLMForWeb3(messages: LLMMessage[]): Promise<{
+  content: string | null;
+  tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+  finish_reason: string;
+}> {
+  if (!LLM_BASE_URL || !LLM_API_KEY) throw new Error('LOKA_AI_BASE_URL / LOKA_AI_API_KEY not set');
+  const res = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+    body: JSON.stringify({ model: LLM_WEB3_MODEL, messages, tools: WEB3_TOOLS, tool_choice: 'auto', max_tokens: 2048 }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`LLM ${res.status}: ${body.slice(0, 200)}`);
+  }
+  const data = await res.json() as { choices: Array<{ finish_reason: string; message: { content: string | null; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> } }> };
+  const choice = data.choices[0];
+  return { content: choice.message.content, tool_calls: choice.message.tool_calls, finish_reason: choice.finish_reason };
+}
+
+async function executeWeb3Tool(name: string, args: Record<string, unknown>): Promise<string> {
+  try {
+    switch (name) {
+      case 'search_crypto_asset': {
+        const r = await resolveAsset(String(args.query || ''));
+        return r ? JSON.stringify({ id: r.id, symbol: r.symbol, name: r.name }) : JSON.stringify({ error: 'not_found' });
+      }
+      case 'get_token_price_and_market': {
+        const rows = await fetchCoinsMarkets({ vs_currency: 'usd', ids: String(args.ids || ''), order: 'market_cap_desc', per_page: 10, page: 1, sparkline: 'false', price_change_percentage: '24h' });
+        return JSON.stringify(rows.map(r => ({ id: r.id, symbol: r.symbol, name: r.name, price_usd: r.current_price, market_cap_usd: r.market_cap, volume_24h_usd: r.total_volume, change_24h_pct: r.price_change_percentage_24h, rank: r.market_cap_rank, high_24h: r.high_24h, low_24h: r.low_24h, ath: r.ath, circulating_supply: r.circulating_supply, total_supply: r.total_supply })));
+      }
+      case 'get_token_detail': {
+        const d = await fetchCoinDetail(String(args.id || ''));
+        if (!d) return JSON.stringify({ error: 'not_found' });
+        return JSON.stringify({ id: d.id, symbol: d.symbol, name: d.name, categories: d.categories?.slice(0, 8), description: truncate(d.description?.en || '', 500), website: d.links?.homepage?.[0], twitter: d.links?.twitter_screen_name, github: d.links?.repos_url?.github?.[0], platforms: d.platforms, sentiment_up_pct: d.sentiment_votes_up_percentage, sentiment_down_pct: d.sentiment_votes_down_percentage });
+      }
+      case 'get_price_history': {
+        const days = Math.min(30, Math.max(1, Number(args.days || 7)));
+        const id = String(args.id || '');
+        const [chart, ohlc] = await Promise.all([fetchCoinChart(id, days), fetchOhlcData(id, days)]);
+        const summary = summarizeChart(chart);
+        const ohlcSummary = ohlc.length >= 2 ? { period_high_usd: Math.max(...ohlc.map(c => c[2])), period_low_usd: Math.min(...ohlc.map(c => c[3])), candles: ohlc.length } : null;
+        return JSON.stringify({ days, summary, ohlc: ohlcSummary });
+      }
+      case 'get_market_rankings': {
+        const topN = Math.min(20, Math.max(1, Number(args.top_n || 10)));
+        const sort = String(args.sort || 'market_cap_desc') as 'market_cap_desc' | 'total_volume_desc' | 'price_change_percentage_24h_desc';
+        const minCap = args.min_market_cap_usd ? Number(args.min_market_cap_usd) : undefined;
+        let rows = await fetchCoinsMarkets({ vs_currency: 'usd', order: sort === 'price_change_percentage_24h_desc' ? 'market_cap_desc' : sort, per_page: 250, page: 1, sparkline: 'false', price_change_percentage: '24h' });
+        if (minCap) rows = rows.filter(r => (r.market_cap || 0) >= minCap);
+        if (sort === 'price_change_percentage_24h_desc') rows = [...rows].sort((a, b) => (b.price_change_percentage_24h || 0) - (a.price_change_percentage_24h || 0));
+        return JSON.stringify(rows.slice(0, topN).map(r => ({ rank: r.market_cap_rank, name: r.name, symbol: r.symbol, price_usd: r.current_price, market_cap_usd: r.market_cap, volume_24h_usd: r.total_volume, change_24h_pct: r.price_change_percentage_24h })));
+      }
+      case 'get_trending_coins': {
+        const rows = await fetchTrendingMarkets(10);
+        return JSON.stringify(rows.map(r => ({ name: r.name, symbol: r.symbol, price_usd: r.current_price, change_24h_pct: r.price_change_percentage_24h, market_cap_usd: r.market_cap })));
+      }
+      case 'get_global_market_overview': {
+        const g = await fetchGlobalData();
+        if (!g) return JSON.stringify({ error: 'unavailable' });
+        return JSON.stringify({ total_market_cap_usd: g.total_market_cap?.usd, total_volume_24h_usd: g.total_volume?.usd, btc_dominance_pct: g.market_cap_percentage?.btc, eth_dominance_pct: g.market_cap_percentage?.eth, market_cap_change_24h_pct: g.market_cap_change_percentage_24h_usd, active_cryptocurrencies: g.active_cryptocurrencies });
+      }
+      case 'get_institutional_holdings': {
+        const coin = args.coin === 'ethereum' ? 'ethereum' : 'bitcoin' as 'bitcoin' | 'ethereum';
+        const data = await fetchTreasuryHoldings(coin);
+        if (!data) return JSON.stringify({ error: 'unavailable' });
+        return JSON.stringify({ coin, total_holdings: data.total_holdings, total_value_usd: data.total_value_usd, dominance_pct: data.market_cap_dominance, top_companies: data.companies?.slice(0, 10).map(c => ({ name: c.name, country: c.country, holdings: c.total_holdings, value_usd: c.total_current_value_usd })) });
+      }
+      case 'get_exchange_rankings': {
+        const limit = Math.min(20, Math.max(1, Number(args.limit || 10)));
+        const exchanges = await fetchExchanges(limit);
+        return JSON.stringify(exchanges.map(ex => ({ name: ex.name, country: ex.country, trust_score: ex.trust_score, trust_rank: ex.trust_score_rank, volume_24h_btc: ex.trade_volume_24h_btc })));
+      }
+      case 'get_nft_collection': {
+        const nftId = await searchNftId(String(args.query || ''));
+        if (!nftId) return JSON.stringify({ error: 'nft_not_found' });
+        const d = await fetchNftDetail(nftId);
+        if (!d) return JSON.stringify({ error: 'nft_detail_unavailable', nft_id: nftId });
+        return JSON.stringify({ id: nftId, name: d.name, symbol: d.symbol, chain: d.asset_platform_id, contract: d.contract_address, floor_price_usd: d.floor_price?.usd, floor_change_24h_pct: d.floor_price_24h_percentage_change?.usd, market_cap_usd: d.market_cap?.usd, volume_24h_usd: d.volume_24h?.usd, unique_holders: d.number_of_unique_addresses, total_supply: d.total_supply, sales_24h: d.one_day_sales, ath_usd: d.ath?.usd });
+      }
+      case 'get_onchain_pools': {
+        const resolved = await resolveAsset(String(args.query || ''));
+        const detail = resolved ? await fetchCoinDetail(resolved.id) : null;
+        const { network: detectedNet, address } = resolvePrimaryContract(detail);
+        const network = String(args.network || detectedNet || 'eth');
+        const pools = address ? await fetchOnchainTokenPools(network, address) : await fetchOnchainTopPools(network);
+        if (!pools.length) return JSON.stringify({ error: 'no_pools_found', network });
+        return JSON.stringify({ token: resolved ? { id: resolved.id, symbol: resolved.symbol, name: resolved.name } : null, network, address: address || null, pools: pools.slice(0, 5).map(p => ({ name: p.attributes?.name, price_usd: p.attributes?.base_token_price_usd, volume_24h_usd: p.attributes?.volume_usd?.h24, liquidity_usd: p.attributes?.reserve_in_usd, price_change_24h_pct: p.attributes?.price_change_percentage?.h24 })) });
+      }
+      case 'get_category_coins': {
+        const topN = Math.min(20, Math.max(1, Number(args.top_n || 10)));
+        const resolved = await resolveCategoryId(String(args.category || ''));
+        if (!resolved) return JSON.stringify({ error: 'category_not_found', query: args.category });
+        const rows = await fetchCoinsMarkets({ vs_currency: 'usd', category: resolved.categoryId, order: 'market_cap_desc', per_page: topN, page: 1, sparkline: 'false', price_change_percentage: '24h' });
+        return JSON.stringify({ category: resolved.name, category_id: resolved.categoryId, coins: rows.map(r => ({ name: r.name, symbol: r.symbol, price_usd: r.current_price, market_cap_usd: r.market_cap, change_24h_pct: r.price_change_percentage_24h })) });
+      }
+      default:
+        return JSON.stringify({ error: `unknown_tool: ${name}` });
+    }
+  } catch (err) {
+    return JSON.stringify({ error: (err as Error).message });
+  }
+}
+
+const AGENT_SYSTEM = `You are a Web3 data collection agent for Loka investment research platform.
+Use the provided tools to gather cryptocurrency data, then write a structured data report in Chinese markdown.
+Rules:
+- ALWAYS call search_crypto_asset first to resolve a token before calling any other token tool
+- ALWAYS call get_token_price_and_market for every identified token — even for overview/intro queries — to include real-time price, market cap, volume, and 24h change
+- Call additional tools as needed for the specific query (e.g. get_token_detail for project info, get_price_history for trend)
+- Write your final report starting with "## Web3 数据" in Chinese markdown, with all key metrics
+- Do NOT give trading advice — report facts only
+- If data is unavailable, state so clearly`;
+
+async function runAgentLoop(query: string): Promise<Web3CliResult> {
+  const messages: LLMMessage[] = [
+    { role: 'system', content: AGENT_SYSTEM },
+    { role: 'user', content: query },
+  ];
+  let inferredIntent: Web3Intent = 'token_deep_dive';
+  let resolvedId: string | undefined;
+  let spotPriceUsd: number | undefined;
+  const resolvedAssets: Array<{ id?: string; symbol?: string; name?: string }> = [];
+  const toolsUsed: string[] = [];
+  let finalReport = '';
+
+  for (let turn = 0; turn < AGENT_MAX_TURNS; turn++) {
+    let resp: Awaited<ReturnType<typeof callLLMForWeb3>>;
+    try {
+      resp = await callLLMForWeb3(messages);
+    } catch (err) {
+      console.error(`[web3-agent] LLM call failed turn=${turn}: ${(err as Error).message}`);
+      return runLegacyMcpQuery(query, inferredIntent);
+    }
+
+    const assistantMsg: LLMMessage = { role: 'assistant', content: resp.content };
+    if (resp.tool_calls?.length) assistantMsg.tool_calls = resp.tool_calls;
+    messages.push(assistantMsg);
+
+    if (resp.finish_reason === 'stop' || !resp.tool_calls?.length) {
+      finalReport = resp.content || '';
+      break;
+    }
+
+    const toolMsgs: LLMMessage[] = [];
+    for (const tc of resp.tool_calls) {
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+      console.error(`[web3-agent] turn=${turn} tool="${tc.function.name}" args=${JSON.stringify(args)}`);
+      const result = await executeWeb3Tool(tc.function.name, args);
+      toolsUsed.push(tc.function.name);
+
+      try {
+        const parsed = JSON.parse(result);
+        if (tc.function.name === 'search_crypto_asset' && parsed.id) {
+          resolvedId = resolvedId || parsed.id;
+          resolvedAssets.push({ id: parsed.id, symbol: parsed.symbol, name: parsed.name });
+        }
+        if (tc.function.name === 'get_token_price_and_market' && Array.isArray(parsed) && parsed[0]?.price_usd) {
+          spotPriceUsd = spotPriceUsd ?? parsed[0].price_usd;
+          if (!resolvedId && parsed[0].id) { resolvedId = parsed[0].id; resolvedAssets.push({ id: parsed[0].id, symbol: parsed[0].symbol, name: parsed[0].name }); }
+        }
+      } catch { /* ignore */ }
+
+      if (tc.function.name === 'get_global_market_overview') inferredIntent = 'global_scan';
+      else if (tc.function.name === 'get_institutional_holdings') inferredIntent = 'treasury_scan';
+      else if (tc.function.name === 'get_exchange_rankings') inferredIntent = 'exchange_scan';
+      else if (tc.function.name === 'get_market_rankings' || tc.function.name === 'get_trending_coins') inferredIntent = 'market_scan';
+      else if (tc.function.name === 'get_category_coins') inferredIntent = 'category_scan';
+      else if (tc.function.name === 'get_onchain_pools') inferredIntent = 'onchain_scan';
+      else if (tc.function.name === 'get_nft_collection') inferredIntent = 'nft_scan';
+
+      toolMsgs.push({ role: 'tool', tool_call_id: tc.id, content: result });
+    }
+    messages.push(...toolMsgs);
+  }
+
+  if (!finalReport) finalReport = '## Web3 数据\n数据收集完成，但未能生成最终报告。';
+
+  return {
+    ok: true,
+    report: finalReport,
+    intent: inferredIntent,
+    via: 'rest',
+    resolvedId,
+    spotPriceUsd,
+    resolver: 'llm-agent',
+    assets: resolvedAssets,
+    market: {},
+    discovery: {},
+    onchain: inferredIntent === 'onchain_scan' ? { agent: true } : {},
+    nft: inferredIntent === 'nft_scan' ? { agent: true } : {},
+    logs: [`mode=agent`, `intent=${inferredIntent}`, `tools=${toolsUsed.join(',') || 'none'}`, `turns=${toolsUsed.length}`],
+    missingData: [],
+  };
+}
+
 async function runLegacyMcpQuery(query: string, intent: Web3Intent): Promise<Web3CliResult> {
   const usePro = Boolean(process.env.COINGECKO_PRO_API_KEY);
   const base = (process.env.COINGECKO_MCP_URL || (usePro ? PRO_MCP : PUBLIC_MCP)).trim();
@@ -1601,20 +1528,13 @@ async function runLegacyMcpQuery(query: string, intent: Web3Intent): Promise<Web
 }
 
 async function runWeb3Pipeline(query: string): Promise<Web3CliResult> {
-  const intent = classifyWeb3Intent(query);
-  console.error(`[web3-cli] intent=${intent} query="${truncate(query, 140)}"`);
-  if (intent === 'market_scan') return runMarketScan(query);
-  if (intent === 'multi_asset_compare') return runMultiAssetCompare(query);
-  if (intent === 'category_scan') return runCategoryScan(query);
-  if (intent === 'token_quote') {
-    const deepDive = await runTokenDeepDive(query);
-    return {
-      ...deepDive,
-      logs: [...deepDive.logs, 'upgraded_from=token_quote'],
-    };
+  if (LLM_BASE_URL && LLM_API_KEY) {
+    console.error(`[web3-cli] mode=agent model=${LLM_WEB3_MODEL} query="${truncate(query, 140)}"`);
+    return runAgentLoop(query);
   }
-  if (intent === 'token_deep_dive') return runTokenDeepDive(query);
-  return runLegacyMcpQuery(query, intent);
+  // Fallback when LLM is not configured
+  console.error(`[web3-cli] mode=mcp_fallback query="${truncate(query, 140)}"`);
+  return runLegacyMcpQuery(query, 'token_deep_dive');
 }
 
 async function main() {

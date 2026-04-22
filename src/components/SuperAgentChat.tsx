@@ -58,6 +58,23 @@ li { margin-bottom: 4px; }
 </style>
 </head><body>${cleanHtml}
 <script>
+  // Strip follow-up questions section — the frontend renders it separately as interactive buttons.
+  // The HTML generation prompt says not to include it, but the LLM sometimes adds it anyway.
+  (function() {
+    var kw = ['持续跟踪','关键问题','follow-up questions','follow up questions','questions to watch','延伸思考','延伸问题'];
+    function hasKw(t) { t = (t||'').toLowerCase(); return kw.some(function(k){ return t.indexOf(k.toLowerCase()) >= 0; }); }
+    document.querySelectorAll('.section-title').forEach(function(el) {
+      if (hasKw(el.textContent)) { var s = el.closest('.section') || el.parentElement; if (s) s.remove(); }
+    });
+    ['h1','h2','h3','h4','strong','b'].forEach(function(tag) {
+      document.querySelectorAll(tag).forEach(function(el) {
+        if (hasKw(el.textContent)) {
+          var block = el.closest('div') || el.parentElement;
+          if (block && block !== document.body) block.remove();
+        }
+      });
+    });
+  })();
   function sendHeight() {
     var h = document.documentElement.scrollHeight;
     window.parent.postMessage({ type: 'loka-iframe-height', height: h }, '*');
@@ -3686,7 +3703,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         // in the middle of the analysis (which used to swallow analytical bullets into
         // the "相关问题" UI).
         // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
-        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:follow.?up|questions?\s+to\s+watch|值得[^\n]{0,6}(?:关注|思考)|需要[^\n]{0,6}关注|持续关注|后续[^\n]{0,3}问题|延伸[^\n]{0,3}问题|关注[^\n]{0,3}问题|follow-?up\s+questions?)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:follow.?up|questions?\s+to\s+watch|值得[^\n]{0,6}(?:关注|思考)|需要[^\n]{0,6}关注|持续关注|持续跟踪|后续[^\n]{0,3}问题|延伸[^\n]{0,3}问题|关注[^\n]{0,3}问题|关键问题|follow-?up\s+questions?)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
         const match = content.match(pattern);
         if (match) {
             const rawLines = match[1].split('\n')

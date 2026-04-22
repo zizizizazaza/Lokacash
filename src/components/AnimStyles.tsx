@@ -183,6 +183,15 @@ const AnimStyles = () => (
       z-index: 1;
     }
 
+    /* ── Thinking ticker: slide-up + fade-in each time a new item appears ── */
+    @keyframes ticker-slide-in {
+      from { opacity: 0; transform: translateY(7px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .ticker-in {
+      animation: ticker-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {

@@ -116,6 +116,8 @@ const App: React.FC = () => {
     } else if (ready && !authenticated) {
       api.clearToken();
       socket.clearToken();
+      // Reset plan cache so sidebar/settings immediately show guest state
+      window.dispatchEvent(new CustomEvent('plan-changed'));
     }
   }, [ready, authenticated, getAccessToken]);
 

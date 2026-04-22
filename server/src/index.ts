@@ -7,6 +7,7 @@ import { startScheduler, stopScheduler } from './services/scheduler.service.js';
 import { startPriceService, stopPriceService } from './services/price.service.js';
 import { startTrustMRRService, stopTrustMRRService } from './services/trustmrr.service.js';
 import { startStripeRevenueService, stopStripeRevenueService } from './services/stripe-revenue.service.js';
+import { prewarmJwks } from './middleware/auth.js';
 
 const server = createServer(app);
 
@@ -17,6 +18,9 @@ async function main() {
   try {
     await prisma.$connect();
     console.log('✅ Database connected');
+
+    // Pre-warm JWKS cache before accepting requests, to avoid cold-start 401s
+    await prewarmJwks();
 
     // Start background jobs
     startScheduler();
