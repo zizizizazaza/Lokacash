@@ -6016,10 +6016,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
                 {(() => { if (showThinkingPanel) console.log('[RT-DEBUG] panel check', { chatMode, routedMode: currentThinking?.routedMode, rtPanelExpanded, activeGraphMsgIdx }); return null; })()}
                 {showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && !rtPanelExpanded && (
-                    <div className="w-[480px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
+                    <div className="w-[500px] shrink-0 p-3 pl-0">
+                        <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
                         {/* Header */}
-                        <div className="flex items-center px-4 py-2.5 border-b border-gray-100 gap-1 shrink-0">
-                            <span className="text-[12px] font-bold text-gray-800 tracking-wide">Process</span>
+                        <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
+                            <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
+                            <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
                             <div className="flex-1" />
                             <button onClick={() => setShowThinkingPanel(false)}
                                 className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
@@ -6053,6 +6055,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     <TerminalLogPanel thinking={currentThinking} />
                                 </div>
                             )}
+                        </div>
                         </div>
                     </div>
                 )}
@@ -6110,33 +6113,55 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     </div>
                 )}
 
-                {/* Non-roundtable: original Thinking Process Side Panel */}
+                {/* Non-roundtable: original Thinking Process Side Panel — floating card */}
                 {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && currentThinking.routedMode !== 'roundtable' && (
-                    <div className="w-[360px] shrink-0 border-l border-gray-100 overflow-hidden">
-                        <ThinkingProcessSidePanel
-                            thinking={currentThinking}
-                            onClose={() => setShowThinkingPanel(false)}
-                            chatMode={chatMode}
-                        />
+                    <div className="w-[380px] shrink-0 p-3 pl-0">
+                        <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
+                            <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
+                                <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
+                                <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
+                                <div className="flex-1" />
+                                <button onClick={() => setShowThinkingPanel(false)}
+                                    className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                            </div>
+                            <div className="flex-1 min-h-0 overflow-hidden">
+                                <ThinkingProcessSidePanel
+                                    thinking={currentThinking}
+                                    onClose={() => setShowThinkingPanel(false)}
+                                    chatMode={chatMode}
+                                    hideHeader
+                                />
+                            </div>
+                        </div>
                     </div>
                 )}
 
                 {/* Standalone Roundtable Panel — only for non-roundtable mode fallback */}
                 {showGraphPanel && !showThinkingPanel && !sourcePanelData && chatMode !== 'roundtable' && (
-                    <div className="w-[520px] shrink-0 border-l border-gray-100 overflow-hidden relative">
-                        <button
-                            onClick={() => setShowGraphPanel(false)}
-                            className="absolute top-2 right-2 z-20 w-7 h-7 rounded-lg bg-white/80 backdrop-blur border border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all shadow-sm"
-                        >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && (chatMode as string) === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && (chatMode as string) === 'roundtable'} />
+                    <div className="w-[540px] shrink-0 p-3 pl-0">
+                        <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] relative">
+                            <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
+                                <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
+                                <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
+                                <div className="flex-1" />
+                                <button onClick={() => setShowGraphPanel(false)}
+                                    className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                            </div>
+                            <div className="flex-1 min-h-0 overflow-hidden">
+                                <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && (chatMode as string) === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && (chatMode as string) === 'roundtable'} />
+                            </div>
+                        </div>
                     </div>
                 )}
 
-                {/* Sources Side Panel */}
+                {/* Sources Side Panel — floating card */}
                 {sourcePanelData && !showThinkingPanel && (
-                    <div className="w-[380px] shrink-0 border-l border-gray-100 flex flex-col bg-white overflow-hidden">
+                    <div className="w-[400px] shrink-0 p-3 pl-0">
+                        <div className="h-full flex flex-col bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] overflow-hidden">
                         {/* Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
                             <div className="flex items-center gap-2">
@@ -6185,6 +6210,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     </div>
                                 </a>
                             ))}
+                        </div>
                         </div>
                     </div>
                 )}
