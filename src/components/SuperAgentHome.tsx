@@ -31,26 +31,9 @@ interface SuperAgentHomeProps {
 // ─── Domain (Stocks / Web3) toggle — from teammate's feat/only-super-agent ─────
 type Domain = 'stocks' | 'web3';
 const DOMAIN_STORAGE_KEY = 'loka_home_domain';
-const DOMAIN_THEME: Record<Domain, { accent: string; accentSoft: string; ring: string; label: string }> = {
-  stocks: { accent: '#10b981', accentSoft: 'rgba(16, 185, 129, 0.12)', ring: 'rgba(16, 185, 129, 0.35)', label: 'Stocks' },
-  web3:   { accent: '#8b5cf6', accentSoft: 'rgba(139, 92, 246, 0.12)', ring: 'rgba(139, 92, 246, 0.35)', label: 'Web3'   },
-};
-
-const DomainIcon: React.FC<{ domain: Domain; className?: string }> = ({ domain, className = 'w-4 h-4' }) => {
-  if (domain === 'stocks') {
-    return (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className}>
-        <path d="M3 17l5-5 4 4 4-6 5 5" />
-        <path d="M21 21H3" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" />
-      <path d="M12 7l-6 3.5M12 7l6 3.5M12 22V13M12 13L6 10.5M12 13l6-2.5" />
-    </svg>
-  );
+const DOMAIN_THEME: Record<Domain, { accent: string; accentSoft: string; ring: string; label: string; emoji: string }> = {
+  stocks: { accent: '#10b981', accentSoft: 'rgba(16, 185, 129, 0.12)', ring: 'rgba(16, 185, 129, 0.35)', label: 'Stocks',  emoji: '📈' },
+  web3:   { accent: '#BAFF29', accentSoft: 'rgba(186, 255, 41, 0.15)', ring: 'rgba(186, 255, 41, 0.45)', label: 'Web3',    emoji: '🪙' },
 };
 
 // ─── Home Feed: Crypto Trending + Upcoming Events Calendar ─────────────
@@ -316,8 +299,6 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   });
   const [showWelcome, setShowWelcome] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    // Force welcome via ?welcome=1 for testing
-    if (window.location.search.includes('welcome=1')) return true;
     return window.localStorage.getItem(DOMAIN_STORAGE_KEY) === null;
   });
   const domainTheme = DOMAIN_THEME[domain];
@@ -510,73 +491,102 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     );
   }
 
-  return (
-    <div className="flex-1 flex flex-col h-full overflow-y-auto" style={{ ['--domain-accent' as any]: domainTheme.accent, ['--domain-accent-soft' as any]: domainTheme.accentSoft }}>
-      {/* ── First-visit full-surface domain picker ── */}
-      {showWelcome && (
-        <div className="flex-1 flex flex-col items-center justify-center px-6 py-10" style={{ animation: 'fade-up 0.4s var(--ease-out-expo) both' }}>
-          <div className="max-w-[860px] w-full">
-            <h1 className="text-[32px] md:text-[44px] font-extrabold tracking-tight text-gray-900 leading-[1.1] text-center mb-12 md:mb-14">
-              Where would you like to start?
-            </h1>
+  // ── Welcome modal: compact picker (sidebar visible behind) ──
+  const welcomeModal = showWelcome ? (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: 'rgba(17, 24, 39, 0.55)', backdropFilter: 'blur(8px)' }}
+      onClick={() => pickDomain('stocks')}
+    >
+      <div
+        className="relative w-full max-w-[560px] rounded-3xl bg-white p-7 md:p-8"
+        style={{ boxShadow: '0 30px 80px rgba(0,0,0,0.25)', animation: 'fade-up 0.35s var(--ease-out-expo) both' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <h2 className="text-[22px] md:text-[24px] font-extrabold text-gray-900 tracking-tight leading-tight">Pick your market</h2>
+        <p className="text-[13px] text-gray-500 mt-1 leading-snug">Choose where to start — you can switch anytime from the top bar.</p>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {(['stocks', 'web3'] as Domain[]).map(d => {
-                const theme = DOMAIN_THEME[d];
-                const samples = USE_CASES.filter(u => u.domain === d).slice(0, 3);
-                const tagline = d === 'stocks'
-                  ? 'Equities, earnings, and industry research.'
-                  : 'Tokens, on-chain signals, and prediction markets.';
-                return (
-                  <button
-                    key={d}
-                    onClick={() => pickDomain(d)}
-                    className="group text-left bg-white rounded-2xl border border-gray-200 p-7 transition-all duration-200"
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = theme.accent; e.currentTarget.style.boxShadow = `0 8px 28px ${theme.ring}`; }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = ''; e.currentTarget.style.boxShadow = ''; }}
-                  >
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: theme.accentSoft, color: theme.accent }}>
-                        <DomainIcon domain={d} className="w-[18px] h-[18px]" />
-                      </div>
-                      <div className="text-[20px] font-bold text-gray-900">{theme.label}</div>
-                    </div>
-
-                    <p className="text-[13px] text-gray-500 mb-6">{tagline}</p>
-
-                    <div className="space-y-2">
-                      {samples.map(s => (
-                        <div key={s.id} className="text-[13px] text-gray-700 leading-snug">
-                          <span className="text-gray-300">&ldquo;</span>{s.title}<span className="text-gray-300">&rdquo;</span>
-                        </div>
-                      ))}
-                    </div>
-                  </button>
-                );
-              })}
+        <div className="grid grid-cols-2 gap-3 mt-5">
+          {/* Stocks */}
+          <button
+            onClick={() => pickDomain('stocks')}
+            className="group text-left rounded-2xl border border-gray-200 bg-white p-4 transition-all hover:-translate-y-0.5 hover:border-gray-900 hover:shadow-lg"
+          >
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#10b981', boxShadow: '0 0 6px rgba(16,185,129,0.6)' }} />
+              Markets · Live
             </div>
+            <div className="text-[24px] font-extrabold text-gray-900 tracking-tight leading-none mb-3">Stocks</div>
+            <ul className="space-y-1 text-[11.5px] text-gray-600 mb-4">
+              <li className="flex items-center gap-1.5"><span className="text-gray-300">→</span>NVIDIA after Q4?</li>
+              <li className="flex items-center gap-1.5"><span className="text-gray-300">→</span>AI infra moat</li>
+              <li className="flex items-center gap-1.5"><span className="text-gray-300">→</span>Tesla vs BYD</li>
+            </ul>
+            <div className="w-full bg-gray-900 group-hover:bg-black text-white rounded-full px-3 py-2 flex items-center justify-center gap-1 text-[12px] font-semibold transition-colors">
+              Enter Stocks
+              <svg className="w-3 h-3 transition-transform group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </button>
 
-            <button
-              onClick={() => setShowWelcome(false)}
-              className="block mx-auto mt-10 text-[12px] text-gray-400 hover:text-gray-600 transition-colors"
+          {/* Web3 */}
+          <button
+            onClick={() => pickDomain('web3')}
+            className="group text-left rounded-2xl p-4 transition-all hover:-translate-y-0.5 hover:shadow-xl"
+            style={{ background: '#0A0A0A' }}
+          >
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-3">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#BAFF29', boxShadow: '0 0 8px rgba(186,255,41,0.9)' }} />
+              On-chain · Synced
+            </div>
+            <div className="text-[24px] font-extrabold text-white tracking-tight leading-none mb-3">Web3</div>
+            <ul className="space-y-1 text-[11.5px] text-gray-300 mb-4">
+              <li className="flex items-center gap-1.5"><span style={{ color: '#BAFF29' }}>→</span>L2s with real traction</li>
+              <li className="flex items-center gap-1.5"><span style={{ color: '#BAFF29' }}>→</span>AI agent demand · 30d</li>
+              <li className="flex items-center gap-1.5"><span style={{ color: '#BAFF29' }}>→</span>Polymarket edge</li>
+            </ul>
+            <div
+              className="w-full rounded-full px-3 py-2 flex items-center justify-center gap-1 text-[12px] font-semibold text-gray-900 transition-all"
+              style={{ background: '#BAFF29' }}
             >
-              Skip for now
-            </button>
-          </div>
+              Enter Web3
+              <svg className="w-3 h-3 transition-transform group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </button>
         </div>
-      )}
 
-      {!showWelcome && (<>
+        <button
+          onClick={() => pickDomain('stocks')}
+          className="block mx-auto mt-4 text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
+        >Skip — I'll choose later</button>
+      </div>
+    </div>
+  ) : null;
+
+
+  return (
+    <div
+      className="flex-1 flex flex-col h-full overflow-y-auto"
+      style={{
+        ['--domain-accent' as any]: domainTheme.accent,
+        ['--domain-accent-soft' as any]: domainTheme.accentSoft,
+        ...(domain === 'web3' ? {
+          backgroundColor: '#F5F5EC',
+          backgroundImage: 'radial-gradient(circle, rgba(0,0,0,0.08) 1px, transparent 1px)',
+          backgroundSize: '18px 18px',
+        } : {}),
+      }}
+    >
+      {welcomeModal}
       {/* ── Top bar: Domain toggle + Upgrade ── */}
       <div className="flex items-center justify-between gap-3 px-4 md:px-6 pt-4 pb-0">
         <div
           role="tablist"
           aria-label="Asset domain"
-          className="inline-flex items-center gap-1 p-1 rounded-full bg-gray-100/80 border border-gray-200/80"
+          className="inline-flex items-center gap-1"
         >
           {(['stocks', 'web3'] as Domain[]).map(d => {
             const active = domain === d;
-            const theme = DOMAIN_THEME[d];
+            const isW3 = d === 'web3';
             return (
               <button
                 key={d}
@@ -585,11 +595,21 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                 onClick={() => pickDomain(d)}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-[12px] font-semibold transition-all"
                 style={active
-                  ? { background: theme.accent, color: '#fff', boxShadow: `0 2px 10px ${theme.ring}` }
-                  : { color: '#6b7280' }}
+                  ? (isW3
+                      ? { background: '#0A0A0A', color: '#fff' }
+                      : { background: '#E5E7EB', color: '#111827' })
+                  : { background: 'transparent', color: '#9ca3af' }}
               >
-                <DomainIcon domain={d} className="w-3.5 h-3.5" />
-                <span>{theme.label}</span>
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{
+                    background: active
+                      ? (isW3 ? '#BAFF29' : '#10b981')
+                      : '#d1d5db',
+                    boxShadow: active && isW3 ? '0 0 6px rgba(186,255,41,0.8)' : undefined,
+                  }}
+                />
+                <span>{isW3 ? 'Web3' : 'Stocks'}</span>
               </button>
             );
           })}
@@ -599,7 +619,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         </div>
       </div>
       {/* ── Hero + Input ── */}
-      <div className="hero-zone flex flex-col items-center pt-6 md:pt-10 pb-6 px-4">
+      <div className="hero-zone flex flex-col items-center pt-6 md:pt-10 pb-6 px-4" style={domain === 'web3' ? { background: 'transparent', backgroundImage: 'none' } : undefined}>
         <div className="max-w-[640px] w-full space-y-7" style={{ position: 'relative', zIndex: 1 }}>
           {/* Title */}
           <div className="text-center hero-title space-y-2">
@@ -831,31 +851,35 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
       {/* ── Use Cases — only on top-level, hidden when an agent is active ── */}
       {!selectedAgent && (
-        <div className="px-4 pb-10 pt-8 max-w-[640px] w-full mx-auto">
+        <div className="px-4 pb-10 pt-8 max-w-[960px] w-full mx-auto">
           <div className="flex items-center gap-2 mb-4">
             <span style={{ display: 'inline-block', width: 3, height: 14, borderRadius: 2, backgroundColor: domainTheme.accent, flexShrink: 0 }} />
-            <h2 className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">
-              {domain === 'stocks' ? 'Stocks · Explore Use Cases' : 'Web3 · Explore Use Cases'}
-            </h2>
+            <h2 className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">Explore Use Cases</h2>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-            {USE_CASES.filter(uc => uc.domain === domain).map(uc => (
-              <button
-                key={uc.id}
-                onClick={() => setChatMessage(uc.prompt)}
-                className="usecase-card group text-left bg-white border border-gray-100 rounded-xl p-3 cursor-pointer"
-              >
-                <div className="w-6 h-6 rounded-md flex items-center justify-center mb-2" style={{ background: domainTheme.accentSoft, color: domainTheme.accent }}>{UseCaseIcons[uc.id] ? React.createElement(UseCaseIcons[uc.id]) : null}</div>
-                <h3 className="text-[12px] font-semibold text-gray-900 mb-0.5 leading-snug">{uc.title}</h3>
-                <p className="text-[11px] text-gray-400 leading-snug mb-2">{uc.desc}</p>
-                <div className="flex flex-wrap gap-1">
-                  {uc.tags.map(tag => (
-                    <span key={tag} className="px-1.5 py-px rounded bg-gray-50 text-[10px] font-medium text-gray-400">{tag}</span>
-                  ))}
-                </div>
-              </button>
-            ))}
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {USE_CASES.filter(uc => uc.domain === domain).map(uc => {
+              const Ic = UseCaseIcons[uc.id];
+              return (
+                <button
+                  key={uc.id}
+                  onClick={() => setChatMessage(uc.prompt)}
+                  className="usecase-card group text-left bg-white border border-gray-100 rounded-2xl p-4 cursor-pointer hover:border-gray-200 hover:-translate-y-0.5 transition-all"
+                  style={{ boxShadow: '0 1px 2px rgba(0,0,0,0.02)' }}
+                >
+                  <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3" style={{ background: domainTheme.accentSoft, color: domain === 'web3' ? '#65a30d' : domainTheme.accent }}>
+                    {Ic ? <Ic /> : <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><path d="M3 17l4-4 4 4 4-6 4 2"/><path d="M21 21H3"/></svg>}
+                  </div>
+                  <h3 className="text-[13px] font-semibold text-gray-900 mb-1 leading-snug">{uc.title}</h3>
+                  <p className="text-[11px] text-gray-500 leading-relaxed mb-3 line-clamp-2">{uc.desc}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {uc.tags.map(tag => (
+                      <span key={tag} className="px-2 py-0.5 rounded-md bg-gray-50 text-[10px] font-medium text-gray-500">{tag}</span>
+                    ))}
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -923,7 +947,6 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           </div>
         );
       })()}
-      </>)}
 
     </div>
   );
