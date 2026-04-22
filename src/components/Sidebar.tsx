@@ -97,10 +97,10 @@ const UserMenu: React.FC<{
 export const Sidebar: React.FC<{
   expanded: boolean; onToggle: () => void; page: Page; go: (p: Page) => void;
   isDark: boolean; onToggleDark: () => void;
-  isLoggedIn: boolean; onLogin: () => void; onLogout: () => void;
+  isLoggedIn: boolean; privyReady?: boolean; onLogin: () => void; onLogout: () => void;
   userName?: string; userInitial?: string; userAvatar?: string | null;
   mobileDrawerOpen?: boolean; onCloseMobileDrawer?: () => void;
-}> = ({ expanded, onToggle, page, go, isDark, onToggleDark, isLoggedIn, onLogin, onLogout, userName, userInitial, userAvatar, mobileDrawerOpen, onCloseMobileDrawer }) => {
+}> = ({ expanded, onToggle, page, go, isDark, onToggleDark, isLoggedIn, privyReady = true, onLogin, onLogout, userName, userInitial, userAvatar, mobileDrawerOpen, onCloseMobileDrawer }) => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [desktopUserMenuOpen, setDesktopUserMenuOpen] = useState(false);
@@ -359,9 +359,9 @@ export const Sidebar: React.FC<{
 
         <div className="px-3 py-3 relative" style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 12px)' }}>
           <div className="flex items-center gap-2">
-            <div onClick={() => isLoggedIn ? setMobileUserMenuOpen(!mobileUserMenuOpen) : onLogin()} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-gray-50 transition-all cursor-pointer group/user">
-              <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500'} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
-              <span className="flex-1 text-[13px] font-medium text-gray-700 truncate">{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
+            <div onClick={() => isLoggedIn ? setMobileUserMenuOpen(!mobileUserMenuOpen) : (privyReady ? onLogin() : undefined)} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-gray-50 transition-all cursor-pointer group/user">
+              <div className={`w-7 h-7 ${(isLoggedIn || (!privyReady && userName)) ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500'} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+              <span className="flex-1 text-[13px] font-medium text-gray-700 truncate">{isLoggedIn ? (userName || 'User') : (userName || (privyReady ? 'Sign in' : '···'))}</span>
               <div className="opacity-0 group-hover/user:opacity-100 transition-opacity text-gray-400"><I.Dots /></div>
             </div>
             {isLoggedIn && (
@@ -398,7 +398,7 @@ export const Sidebar: React.FC<{
           ))}
         </div>
         <div className="relative flex flex-col items-center gap-1.5">
-          <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`w-8 h-8 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:ring-2 hover:ring-gray-300 transition-all overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+          <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : (privyReady ? onLogin() : undefined)} className={`w-8 h-8 ${(isLoggedIn || (!privyReady && userName)) ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:ring-2 hover:ring-gray-300 transition-all overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
           {isLoggedIn && (
             <PlanUpgradeEntry size="rail" />
           )}
@@ -505,9 +505,9 @@ export const Sidebar: React.FC<{
         {/* User */}
         <div className="px-3 py-3 relative">
           <div className="flex items-center gap-2">
-            <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : onLogin()} className={`flex-1 min-w-0 flex items-center gap-2.5 px-2 py-2 rounded-lg ${hoverBg} transition-all cursor-pointer group/user`}>
-              <div className={`w-7 h-7 ${isLoggedIn ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
-              <span className={`flex-1 text-[13px] font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'} truncate`}>{isLoggedIn ? (userName || 'User') : 'Sign in'}</span>
+            <div onClick={() => isLoggedIn ? setDesktopUserMenuOpen(!desktopUserMenuOpen) : (privyReady ? onLogin() : undefined)} className={`flex-1 min-w-0 flex items-center gap-2.5 px-2 py-2 rounded-lg ${hoverBg} transition-all cursor-pointer group/user`}>
+              <div className={`w-7 h-7 ${(isLoggedIn || (!privyReady && userName)) ? 'bg-emerald-500 text-white' : avatarBg} rounded-full flex items-center justify-center text-[10px] font-semibold overflow-hidden`}>{userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : (userInitial || 'U')}</div>
+              <span className={`flex-1 text-[13px] font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'} truncate`}>{isLoggedIn ? (userName || 'User') : (userName || (privyReady ? 'Sign in' : '···'))}</span>
               <div className={`opacity-0 group-hover/user:opacity-100 transition-opacity ${textMuted}`}><I.Dots /></div>
             </div>
             {isLoggedIn && (

@@ -46,6 +46,10 @@ const activeChatSessions = new Map<string, string>();
 const chatAbortControllers = new Map<string, AbortController>();
 /** Dedup map keyed by sessionId::content — prevents duplicate messages from queue flush + direct emit race */
 const chatDedupMap = new Map<string, number>();
+/** Per-socket rate limiter: tracks agent:chat timestamps to enforce max 3 messages per 10 seconds */
+const socketRateLimiter = new Map<string, number[]>();
+/** Session start timestamps — used by the orphan sweep to identify stale sessions */
+const chatSessionStartTimes = new Map<string, number>();
 
 interface AgentChatImage {
   url: string;
@@ -599,6 +603,34 @@ export function setupSocket(server: HttpServer) {
     path: '/api/socket.io',
   });
 
+  // Safety-net: sweep orphaned session state every 5 minutes.
+  // Only removes sessions that have been "active" for more than 30 minutes —
+  // those are definitively orphaned (longest Roundtable run is ~5 min).
+  const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+  setInterval(() => {
+    const now = Date.now();
+    let swept = 0;
+
+    for (const [sid, startedAt] of chatSessionStartTimes) {
+      if (now - startedAt > SESSION_MAX_AGE_MS) {
+        const ctrl = chatAbortControllers.get(sid);
+        if (ctrl) { ctrl.abort(); chatAbortControllers.delete(sid); }
+        activeChatSessions.delete(sid);
+        chatSessionStartTimes.delete(sid);
+        swept++;
+      }
+    }
+
+    // Prune dedup map entries older than 30s regardless of size
+    for (const [k, v] of chatDedupMap) {
+      if (now - v > 30_000) chatDedupMap.delete(k);
+    }
+
+    if (swept > 0) {
+      console.warn(`[sweep] Cleaned ${swept} orphaned chat session(s)`);
+    }
+  }, 5 * 60 * 1000);
+
   // JWT authentication middleware for WebSocket.
   // Tokenless connections are accepted as guests when ENABLE_GUEST_MODE is on;
   // guests are limited to Auto mode in the agent:chat handler below.
@@ -1028,6 +1060,24 @@ Text: "${query}"`;
       const sessionId = data.sessionId || crypto.randomUUID();
       const dedupImageKey = images.map((img) => img.url).join('|');
 
+      // ── Rate limit: max 3 agent:chat events per 10 seconds per socket ──
+      {
+        const now = Date.now();
+        const recent = (socketRateLimiter.get(socket.id) || []).filter(t => now - t < 10_000);
+        if (recent.length >= 3) {
+          const retryAfter = Math.ceil((recent[0] + 10_000 - now) / 1000);
+          socket.emit('agent:chat:error', {
+            sessionId,
+            error: 'rate_limited',
+            retryAfter,
+            hint: `Sending too fast. Please wait ${retryAfter}s.`,
+          });
+          return;
+        }
+        recent.push(now);
+        socketRateLimiter.set(socket.id, recent);
+      }
+
       // ── Dedup guard: skip identical content for the same session within 3s ──
       const dedupKey = `${sessionId}::${userContent}::${dedupImageKey}`;
       const now = Date.now();
@@ -1171,6 +1221,7 @@ Text: "${query}"`;
       };
 
       activeChatSessions.set(sessionId, 'running');
+      chatSessionStartTimes.set(sessionId, Date.now());
       startChatReplayBuffer(sessionId, data.mode);
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
@@ -1449,6 +1500,7 @@ Text: "${query}"`;
           } catch (_) {}
         }
         activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
@@ -1539,6 +1591,7 @@ Text: "${query}"`;
           const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
           if (isAborted()) {
             activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
             chatAbortControllers.delete(sessionId);
             return;
@@ -1560,6 +1613,7 @@ Text: "${query}"`;
           emitter.emitStreamDone('');
         }
         activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
@@ -2039,6 +2093,7 @@ Text: "${query}"`;
       if (isAborted()) {
         console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
         activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
@@ -3171,6 +3226,7 @@ The HTML must:
         if (isAborted()) {
           console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
@@ -3461,6 +3517,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         if (isAborted()) {
           console.log(`[agent:chat] Aborted during synthesis error handling for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
@@ -3520,11 +3577,13 @@ Research context:\n${synFullContent}${langInstruction}`;
         );
       }
       activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
       chatAbortControllers.delete(sessionId);
     });
     socket.on('disconnect', () => {
       console.log(`🔌 Client disconnected: ${socket.id}`);
+      socketRateLimiter.delete(socket.id);
 
       // Check if user has other active sockets before marking offline
       const rooms = io.sockets.adapter.rooms.get(`user:${userId}`);
