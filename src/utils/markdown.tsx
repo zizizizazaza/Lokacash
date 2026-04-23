@@ -235,9 +235,6 @@ export function OkxQuoteDerivatives({ okx, lang = 'zh' }: { okx: QuoteOkxSnapsho
     <>
       <div className="mx-5 h-px bg-gradient-to-r from-transparent via-amber-200/60 to-transparent" />
       <div className="px-5 py-3.5 space-y-2.5">
-        {okx.swapInstId && (
-          <div className="text-[9px] text-gray-400 font-mono">{okx.swapInstId}</div>
-        )}
         {derivStats.length > 0 && (
           <div className="grid grid-cols-3 gap-x-4 gap-y-3">
             {derivStats.map((s, si) => (
@@ -289,6 +286,11 @@ interface QuoteData {
   pb?: string;
   turnover?: string;
   asOf?: string;
+  // Crypto-specific fields populated from the LLM's structured asset block.
+  ath?: string;               // All-time high
+  supplyCirculating?: string; // Circulating supply
+  supplyTotal?: string;       // Total / max supply
+  fundingRate?: string;       // Perp funding rate string (fallback when live derivatives data absent)
 }
 
 /**
@@ -318,13 +320,55 @@ export function extractQuoteSnapshot(content: string): { quote: QuoteData | null
   const symbol = data['symbol'] || data['证券代码'] || data['代码'] || '';
   if (!symbol) return { quote: null, body: content };
 
+  // "24h H/L" style combined value, e.g. "$1.75 / $1.21" — split into high/low.
+  const rangeCombined = data['24小时最高/最低'] || data['24h high/low'] || data['24h h/l'] || '';
+  let rangeHigh: string | undefined;
+  let rangeLow: string | undefined;
+  if (rangeCombined) {
+    const parts = rangeCombined.split(/\s*\/\s*/);
+    if (parts.length === 2) {
+      rangeHigh = parts[0].trim();
+      rangeLow = parts[1].trim();
+    }
+  }
+
+  // "Circulating / Total supply" combined value, e.g. "2.48亿 / 总供应量10亿 RAVE"
+  const supplyCombined = data['流通供应量'] || data['circulating supply'] || data['circ supply'] || '';
+  let supplyCirc: string | undefined;
+  let supplyTot: string | undefined = data['总供应量'] || data['total supply'] || data['max supply'] || undefined;
+  if (supplyCombined) {
+    const m = supplyCombined.match(/^(.+?)\s*\/\s*(?:总供应量|total supply|max supply)[:：]?\s*(.+?)$/i);
+    if (m) {
+      supplyCirc = m[1].trim();
+      supplyTot = supplyTot || m[2].trim();
+    } else {
+      supplyCirc = supplyCombined;
+    }
+  }
+
   const quote: QuoteData = {
     symbol,
-    name: data['name'] || data['股票名称'] || data['名称'] || undefined,
+    name: data['name'] || data['股票名称'] || data['项目名称'] || data['名称'] || undefined,
     market: data['market'] || data['所属市场'] || data['市场'] || data['交易所'] || undefined,
     price: data['last price'] || data['last'] || data['最新价'] || data['现价'] || undefined,
-    change: data['change (%)'] || data['change'] || data['chg%'] || data['涨跌幅'] || data['涨跌'] || undefined,
-    volume: data['volume'] || data['成交量'] || data['成交额'] || undefined,
+    change:
+      data['change (%)'] || data['change'] || data['chg%'] ||
+      data['24小时涨跌幅'] || data['24h change (%)'] || data['24h change'] ||
+      data['涨跌幅'] || data['涨跌'] || undefined,
+    volume:
+      data['volume'] || data['成交量'] || data['成交额'] ||
+      data['24小时交易量'] || data['24h volume'] || data['24h vol'] || undefined,
+    high: data['high'] || data['最高'] || data['24h high'] || data['24小时最高'] || rangeHigh,
+    low: data['low'] || data['最低'] || data['24h low'] || data['24小时最低'] || rangeLow,
+    marketCap: data['market cap'] || data['mkt cap'] || data['市值'] || undefined,
+    ath:
+      data['ath'] || data['all-time high'] || data['历史最高价(ath)'] ||
+      data['历史最高价'] || data['历史最高'] || data['历史最高价(ath)'] || undefined,
+    supplyCirculating: supplyCirc,
+    supplyTotal: supplyTot,
+    fundingRate:
+      data['永续合约资金费率'] || data['资金费率'] ||
+      data['funding rate'] || data['funding'] || undefined,
     asOf: data['as of'] || data['数据时点'] || data['报价时间'] || data['交易日'] || undefined,
   };
 
@@ -345,8 +389,18 @@ export function extractQuoteSnapshot(content: string): { quote: QuoteData | null
 
 /** Bilingual label map keyed by lang */
 const LABELS: Record<string, Record<string, string>> = {
-  zh: { open: '开盘', prevClose: '昨收', high: '最高', low: '最低', volume: '成交量', amount: '成交额', marketCap: '市值', pe: 'PE', pb: 'PB', turnover: '换手率' },
-  en: { open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low', volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap', pe: 'PE', pb: 'PB', turnover: 'Turnover' },
+  zh: {
+    open: '开盘', prevClose: '昨收', high: '最高', low: '最低',
+    volume: '成交量', amount: '成交额', marketCap: '市值',
+    pe: 'PE', pb: 'PB', turnover: '换手率',
+    ath: '历史高点', supplyCirculating: '流通量', supplyTotal: '总供应', fundingRate: '资金费率',
+  },
+  en: {
+    open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low',
+    volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap',
+    pe: 'PE', pb: 'PB', turnover: 'Turnover',
+    ath: 'ATH', supplyCirculating: 'Circ Supply', supplyTotal: 'Total Supply', fundingRate: 'Funding',
+  },
 };
 
 /** Market badge style map (supports both zh & en market labels) */
@@ -389,18 +443,24 @@ export function QuoteCard({
   // Helper: check if a value is meaningful (not N/A, empty, zero-ish)
   const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
 
-  // Build stats array with localized labels, skipping empty/N/A
+  // Build stats array with localized labels, skipping empty/N/A.
+  // Order: 24h price band → supply/market cap → stock-style metrics → crypto funding.
   const stats: { label: string; value: string }[] = [];
-  if (ok(quote.open)) stats.push({ label: L.open, value: quote.open! });
-  if (ok(quote.prevClose)) stats.push({ label: L.prevClose, value: quote.prevClose! });
   if (ok(quote.high)) stats.push({ label: L.high, value: quote.high! });
   if (ok(quote.low)) stats.push({ label: L.low, value: quote.low! });
-  if (ok(quote.volume)) stats.push({ label: L.volume, value: quote.volume! });
-  if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
+  if (ok(quote.ath)) stats.push({ label: L.ath, value: quote.ath! });
   if (ok(quote.marketCap)) stats.push({ label: L.marketCap, value: quote.marketCap! });
+  if (ok(quote.volume)) stats.push({ label: L.volume, value: quote.volume! });
+  if (ok(quote.supplyCirculating)) stats.push({ label: L.supplyCirculating, value: quote.supplyCirculating! });
+  if (ok(quote.supplyTotal)) stats.push({ label: L.supplyTotal, value: quote.supplyTotal! });
+  if (ok(quote.open)) stats.push({ label: L.open, value: quote.open! });
+  if (ok(quote.prevClose)) stats.push({ label: L.prevClose, value: quote.prevClose! });
+  if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
   if (ok(quote.pe)) stats.push({ label: L.pe, value: quote.pe! });
   if (ok(quote.pb)) stats.push({ label: L.pb, value: quote.pb! });
   if (ok(quote.turnover)) stats.push({ label: L.turnover, value: quote.turnover! });
+  // Funding rate only when no live derivatives snapshot is available (avoid duplication).
+  if (!okxSnap && ok(quote.fundingRate)) stats.push({ label: L.fundingRate, value: quote.fundingRate! });
 
   return (
     <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>

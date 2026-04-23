@@ -262,7 +262,26 @@ def main():
     )
     args = parser.parse_args()
 
-    logging.getLogger().setLevel(logging.INFO)
+    # Attach a stderr handler at INFO level so logs from data_provider / fetcher
+    # modules actually flow through to Node's stderr capture. Without this,
+    # Python's `lastResort` handler swallows anything below WARNING.
+    # `force=True` clears any handler LiteLLM / third-party libs may have
+    # registered during earlier imports.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+        force=True,
+    )
+
+    # Silence noisy 3rd-party loggers whose WARNING output is not actionable:
+    # - urllib3.connectionpool: fires "Retrying (Retry(total=N, ...))" 20+ times
+    #   per request when background akshare/efinance fetchers lose the race but
+    #   keep retrying the proxy. User-facing result already returned by a faster
+    #   source; these are zombie-thread cleanup warnings, safe to hide.
+    for noisy in ("urllib3.connectionpool",):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
 
     config = get_config()
 

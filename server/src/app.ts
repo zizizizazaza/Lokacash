@@ -45,8 +45,12 @@ app.use(helmet({ contentSecurityPolicy: false }));
 // Request ID tracking
 app.use(requestId);
 
-// Request logging
-app.use(morgan(config.isProduction ? 'combined' : 'dev'));
+// Request logging — in production, only log errors (4xx/5xx) to cut noise.
+app.use(
+  morgan(config.isProduction ? 'combined' : 'dev', {
+    skip: (_req, res) => config.isProduction && res.statusCode < 400,
+  })
+);
 
 // CORS - support multiple origins
 const allowedOrigins = [

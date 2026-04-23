@@ -1742,7 +1742,7 @@ const CANNED_THINKING_MESSAGES: Record<string, string[]> = {
     ],
     web3: [
         'Querying CoinGecko market data',
-        'Pulling OKX perps funding',
+        'Pulling perpetual funding rates',
         'Reading on-chain signals',
         'Aggregating sentiment indicators',
         'Verifying coin identity',
@@ -5830,9 +5830,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                                                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6" />
                                                                                             </svg>
                                                                                             <span className="text-[9px] uppercase tracking-[0.08em] text-amber-600 font-semibold leading-none">{liveQuote.lang === 'en' ? 'Derivatives' : '衍生品'}</span>
-                                                                                            {matchingOkx.swapInstId && (
-                                                                                                <span className="text-[9px] text-gray-400 font-mono">{matchingOkx.swapInstId}</span>
-                                                                                            )}
                                                                                         </div>
                                                                                         {derivStats.length > 0 && (
                                                                                             <div className="grid grid-cols-3 gap-x-4 gap-y-3">

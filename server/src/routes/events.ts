@@ -127,26 +127,28 @@ export async function getListings(): Promise<NewCoinItem[]> {
   if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) return cache.items;
   if (inflight) return inflight;
   inflight = (async () => {
-    // Try /coins/list/new first (proper "newly added" data, if available)
-    try {
-      const items = await fetchCgNewCoins();
-      if (items.length > 0) {
-        cache = { items, loadedAt: Date.now() };
-        return items;
-      }
-      console.log('[events] /coins/list/new empty, falling back to /search/trending');
-    } catch (err) {
-      console.warn('[events] /coins/list/new failed, falling back to trending:', (err as Error).message);
-    }
-    // Fallback: /search/trending — always free, always works
+    // Primary: /search/trending — matches the UI's "Hot now" label with actual
+    // trending coins (BTC, ETH, PEPE when hot), not newly-listed micro-caps.
     try {
       const items = await fetchCgTrending();
       if (items.length > 0) {
         cache = { items, loadedAt: Date.now() };
         return items;
       }
+      console.log('[events] /search/trending empty, falling back to /coins/list/new');
     } catch (err) {
-      console.warn('[events] /search/trending also failed:', (err as Error).message);
+      console.warn('[events] /search/trending failed, falling back to new listings:', (err as Error).message);
+    }
+    // Fallback: /coins/list/new — newly-listed coins (Pro-tier endpoint).
+    // Only reachable if trending actually fails, so UI stays close to its label.
+    try {
+      const items = await fetchCgNewCoins();
+      if (items.length > 0) {
+        cache = { items, loadedAt: Date.now() };
+        return items;
+      }
+    } catch (err) {
+      console.warn('[events] /coins/list/new also failed:', (err as Error).message);
     }
     return cache?.items || [];
   })().finally(() => {
@@ -228,14 +230,25 @@ async function fetchCmcEvents(): Promise<UpcomingEvent[]> {
     // Require at least one concrete coin association — generic market events
     // are too abstract for a home-page card.
     if (coins.length === 0) continue;
+    // Dedupe by symbol — CMC sometimes returns the same symbol twice (e.g. a token
+    // and its derivative / re-deployment share the same ticker). Keep the first name
+    // encountered per symbol so the UI doesn't show "NIGHT NIGHT" chips.
+    const seenSyms = new Set<string>();
+    const uniqueCoins: typeof coins = [];
+    for (const c of coins) {
+      const sym = c.symbol.toUpperCase();
+      if (seenSyms.has(sym)) continue;
+      seenSyms.add(sym);
+      uniqueCoins.push(c);
+    }
     events.push({
       id: raw.id,
       title: title.trim(),
       dateEvent: ts,
       displayedDate: raw.displayed_date || new Date(ts).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }),
       categoryName,
-      coinSymbols: coins.slice(0, 5).map((c) => c.symbol.toUpperCase()),
-      coinNames: coins.slice(0, 5).map((c) => c.name),
+      coinSymbols: uniqueCoins.slice(0, 5).map((c) => c.symbol.toUpperCase()),
+      coinNames: uniqueCoins.slice(0, 5).map((c) => c.name),
       source: raw.source || '',
     });
   }

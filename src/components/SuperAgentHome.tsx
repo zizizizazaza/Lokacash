@@ -252,16 +252,21 @@ const EventsCalendar: React.FC<{ onPick: (prompt: string) => void }> = ({ onPick
                       )}
                     </div>
                     <h3 className="text-[12.5px] font-semibold text-gray-900 leading-snug line-clamp-1">{ev.title}</h3>
-                    {ev.coinSymbols.length > 0 && (
-                      <div className="flex flex-wrap gap-1 -mt-0.5">
-                        {ev.coinSymbols.slice(0, 3).map((sym) => (
-                          <span key={sym} className="px-1.5 py-px rounded bg-gray-50 text-[10px] font-medium text-gray-500">{sym}</span>
-                        ))}
-                        {ev.coinSymbols.length > 3 && (
-                          <span className="px-1.5 py-px text-[10px] text-gray-300">+{ev.coinSymbols.length - 3}</span>
-                        )}
-                      </div>
-                    )}
+                    {ev.coinSymbols.length > 0 && (() => {
+                      // Backend may return duplicate symbols (e.g. multi-chain tokens merged).
+                      // Dedupe so React keys stay unique and the chip row doesn't repeat.
+                      const uniqueSyms = Array.from(new Set(ev.coinSymbols));
+                      return (
+                        <div className="flex flex-wrap gap-1 -mt-0.5">
+                          {uniqueSyms.slice(0, 3).map((sym) => (
+                            <span key={sym} className="px-1.5 py-px rounded bg-gray-50 text-[10px] font-medium text-gray-500">{sym}</span>
+                          ))}
+                          {uniqueSyms.length > 3 && (
+                            <span className="px-1.5 py-px text-[10px] text-gray-300">+{uniqueSyms.length - 3}</span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </a>
                 );
               })}
