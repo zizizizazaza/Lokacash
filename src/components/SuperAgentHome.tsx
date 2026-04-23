@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
@@ -278,6 +278,436 @@ const EventsCalendar: React.FC<{ onPick: (prompt: string) => void }> = ({ onPick
   );
 };
 
+/* ── Roundtable banner ──────────────────────────────────────────
+   A light-weight hero banner for the Stocks homepage. Twelve analyst
+   avatars orbit a central disc; the verdict surfaces in the middle.
+   Hover any avatar to pause and read that specialist's profile.
+   No network calls — content is canned marketing copy.
+   Avatars come straight from /public/avatars/ (same set used by
+   SuperAgentChat's SUMMON_POOL). */
+const RT_AGENTS: { id: string; name: string; role: string; tags: string[]; avatar: string }[] = [
+  // ── 9 specialists (system + enhanced roles) ──
+  { id: 'fundamental_analyst', name: 'Fundamental Analyst', role: 'Financials & earnings quality',     tags: ['Financials', 'Earnings', 'DCF'],    avatar: '/avatars/fundamental_analyst.jpg' },
+  { id: 'valuation_specialist',name: 'Valuation Analyst',   role: 'Fair value & multi-model analysis', tags: ['DCF', 'Comparable', 'Scenario'],    avatar: '/avatars/valuation_specialist.jpg' },
+  { id: 'macro_enhanced',      name: 'Macro Strategist',    role: 'Rates, regimes & cross-asset flows',tags: ['Macro', 'Rates', 'Regimes'],        avatar: '/avatars/macro_enhanced.jpg' },
+  { id: 'risk_enhanced',       name: 'Risk Analyst',        role: 'Tail risks & downside scenarios',   tags: ['VaR', 'Stress', 'Hedging'],         avatar: '/avatars/risk_enhanced.jpg' },
+  { id: 'allocation_specialist',name: 'Allocation Analyst', role: 'ETF & asset allocation',            tags: ['MPT', 'Factors', 'Rebalance'],      avatar: '/avatars/allocation_specialist.jpg' },
+  { id: 'options_specialist',  name: 'Options Analyst',     role: 'Options strategies & Greeks',       tags: ['Greeks', 'Volatility', 'Strategy'], avatar: '/avatars/options_specialist.jpg' },
+  { id: 'event_driven',        name: 'Event-Driven Analyst',role: 'Catalysts, M&A & earnings events',  tags: ['Events', 'M&A', 'Catalysts'],       avatar: '/avatars/event_driven.jpg' },
+  { id: 'sentiment_analyst',   name: 'Sentiment Analyst',   role: 'Social & market sentiment',         tags: ['Social', 'NLP', 'Flows'],           avatar: '/avatars/sentiment_analyst.jpg' },
+  { id: 'technical_analyst',   name: 'Technical Analyst',   role: 'Price action & chart patterns',     tags: ['Charts', 'Trends', 'Levels'],       avatar: '/avatars/technical_analyst.jpg' },
+  // ── 3 master lenses ──
+  { id: 'buffett_style',       name: 'Warren Buffett lens', role: 'Wide moats & margin of safety',     tags: ['Value', 'Moats', 'Long-term'],      avatar: '/avatars/warren_buffett.jpg' },
+  { id: 'munger_style',        name: 'Charlie Munger lens', role: 'Mental models & inversion',         tags: ['Quality', 'Inversion', 'Multi-disc'], avatar: '/avatars/charlie_munger.jpg' },
+  { id: 'lynch_style',         name: 'Peter Lynch lens',    role: 'Growth at a reasonable price',      tags: ['Growth', 'PEG', 'Consumer'],        avatar: '/avatars/peter_lynch.jpg' },
+];
+
+const RT_VERDICTS: { topic: string; bull: number; bear: number; neutral: number }[] = [
+  { topic: 'Buy this AI chip?',      bull: 7, bear: 3, neutral: 2 },
+  { topic: 'Hold this ETF?',         bull: 4, bear: 6, neutral: 2 },
+  { topic: 'Add this dividend pick?',bull: 8, bear: 1, neutral: 3 },
+  { topic: 'Rotate to EM?',          bull: 3, bear: 5, neutral: 4 },
+  { topic: 'Chase this rally?',      bull: 5, bear: 4, neutral: 3 },
+];
+
+// Cycle rhythm (ms): spin for SPIN_MS, then hold still for HOLD_MS so the
+// verdict card can fade in. Total cycle = SPIN_MS + HOLD_MS.
+const RT_SPIN_MS = 3000;
+const RT_HOLD_MS = 2200;
+const RT_CYCLE   = RT_SPIN_MS + RT_HOLD_MS;
+const RT_HOLD_PCT = (RT_HOLD_MS / RT_CYCLE) * 100;   // hold window %
+const RT_SPIN_PCT = 100 - RT_HOLD_PCT;               // spin window %
+
+const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo }) => {
+  const [vIdx, setVIdx] = useState(0);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  useEffect(() => {
+    // Advance the topic at the very start of each cycle — while the card is
+    // invisible (spinning). By the time the card fades in, it already shows
+    // the next topic, so there's no mid-visible flash.
+    const id = setInterval(() => setVIdx(i => (i + 1) % RT_VERDICTS.length), RT_CYCLE);
+    return () => clearInterval(id);
+  }, []);
+
+  const DISC = 260;
+  const RADIUS = 108;
+  const AV = 34;
+  const v = RT_VERDICTS[vIdx];
+  const total = v.bull + v.bear + v.neutral;
+  const lead = v.bull > v.bear && v.bull > v.neutral
+    ? { label: 'Bullish', color: '#059669' }
+    : v.bear > v.bull && v.bear > v.neutral
+      ? { label: 'Bearish', color: '#dc2626' }
+      : { label: 'Mixed',   color: '#6b7280' };
+  const hovered = hoveredId ? RT_AGENTS.find(a => a.id === hoveredId) : null;
+
+  return (
+    <div className="rt-banner w-full max-w-[860px] mx-auto mt-2 mb-2 px-5 sm:px-7 py-5 sm:py-6 rounded-2xl bg-white border border-gray-200/70 flex items-center gap-6 sm:gap-8">
+      {/* Orbiting disc */}
+      <div className="relative shrink-0" style={{ width: DISC, height: DISC }}>
+        <div className="absolute rounded-full border border-dashed border-gray-200" style={{ inset: 8 }} />
+        <div className={`absolute inset-0 rt-ring${hoveredId ? ' rt-paused' : ''}`}>
+          {RT_AGENTS.map((a, i) => {
+            const angle = (i / RT_AGENTS.length) * 2 * Math.PI - Math.PI / 2;
+            const x = DISC / 2 + RADIUS * Math.cos(angle) - AV / 2;
+            const y = DISC / 2 + RADIUS * Math.sin(angle) - AV / 2;
+            const isActive = hoveredId === a.id;
+            return (
+              <div
+                key={a.id}
+                className="absolute rt-slot"
+                style={{ left: x, top: y, width: AV, height: AV, zIndex: isActive ? 4 : 2 }}
+                onMouseEnter={() => setHoveredId(a.id)}
+                onMouseLeave={() => setHoveredId(prev => (prev === a.id ? null : prev))}
+              >
+                <img
+                  src={a.avatar}
+                  alt={a.name}
+                  className={`w-full h-full rounded-full object-cover ring-2 shadow-[0_2px_6px_rgba(15,23,42,0.12)] ${isActive ? 'ring-gray-900 rt-avatar-active' : 'ring-white'}`}
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/avatars/default.jpg'; }}
+                />
+              </div>
+            );
+          })}
+        </div>
+        {/* Center stack: verdict (default) or agent profile (on avatar hover) */}
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          {hovered ? (
+            <div className="rt-agent-card rounded-xl bg-white border border-gray-200 shadow-[0_6px_20px_rgba(15,23,42,0.10)] px-3 py-3 text-center" style={{ width: 176 }}>
+              <img
+                src={hovered.avatar}
+                alt={hovered.name}
+                className="w-10 h-10 rounded-full object-cover mx-auto ring-2 ring-white shadow-sm"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/avatars/default.jpg'; }}
+              />
+              <div className="mt-1.5 text-[12px] font-semibold text-gray-900 leading-tight">{hovered.name}</div>
+              <div className="mt-0.5 text-[10.5px] text-gray-500 leading-snug px-1">{hovered.role}</div>
+              <div className="mt-2 flex flex-wrap gap-1 justify-center">
+                {hovered.tags.slice(0, 3).map(t => (
+                  <span key={t} className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 text-[9.5px] font-medium">{t}</span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rt-verdict rounded-xl bg-white border border-gray-100 shadow-[0_4px_14px_rgba(15,23,42,0.08)] px-3 py-2.5 text-center" style={{ width: 172 }}>
+              <div className="text-[11.5px] font-semibold text-gray-700 leading-snug">{v.topic}</div>
+              <div className="text-[15px] font-bold leading-tight mt-1" style={{ color: lead.color }}>{lead.label}</div>
+              <div className="mt-2 h-1.5 w-full rounded-full overflow-hidden flex bg-gray-100">
+                <div className="rt-bar" style={{ width: `${(v.bull/total)*100}%`, background: '#10b981' }} />
+                <div className="rt-bar" style={{ width: `${(v.bear/total)*100}%`, background: '#f43f5e' }} />
+                <div className="rt-bar" style={{ width: `${(v.neutral/total)*100}%`, background: '#d1d5db' }} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right copy */}
+      <div className="flex-1 min-w-0">
+        <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-gray-400 mb-1.5">The Roundtable</div>
+        <h3 className="text-[20px] sm:text-[22px] font-semibold text-gray-900 leading-[1.25]">
+          A dozen specialists convene.<br className="hidden sm:block" />
+          <span className="text-gray-500 font-normal">Every question, a shared view.</span>
+        </h3>
+        <p className="mt-2.5 text-[13px] leading-[1.6] text-gray-500">
+          System analysts auto-join every question — fundamentals, valuation, macro, risk.
+          Invite master lenses like Buffett, Munger, or Lynch for a different angle.
+        </p>
+        {onLiveDemo && (
+          <button
+            onClick={onLiveDemo}
+            className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gray-900 text-white text-[13px] font-semibold hover:bg-gray-800 transition-colors shadow-sm"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            Roundtable Live Demo
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        )}
+      </div>
+
+      <style>{`
+        /* Rhythm: slow arc, then freeze so the verdict card can fade in.
+           Each spin advances only 60° per cycle. The slot counter-rotates
+           by the same angle so every avatar stays upright. */
+        .rt-ring  { animation: rt-wheel ${RT_CYCLE}ms linear infinite; transform-origin: 50% 50%; }
+        .rt-slot  { animation: rt-wheel-reverse ${RT_CYCLE}ms linear infinite; transform-origin: 50% 50%; }
+        .rt-ring.rt-paused, .rt-ring.rt-paused .rt-slot,
+        .rt-ring.rt-paused ~ div .rt-verdict { animation-play-state: paused; }
+        @keyframes rt-wheel {
+          0%                      { transform: rotate(0deg); }
+          ${RT_SPIN_PCT.toFixed(2)}%  { transform: rotate(60deg); }
+          100%                    { transform: rotate(60deg); }
+        }
+        @keyframes rt-wheel-reverse {
+          0%                      { transform: rotate(0deg); }
+          ${RT_SPIN_PCT.toFixed(2)}%  { transform: rotate(-60deg); }
+          100%                    { transform: rotate(-60deg); }
+        }
+        /* Active avatar scale lives on the img, independent of the slot's
+           counter-rotation transform, so the two transforms don't clash. */
+        .rt-avatar-active { transform: scale(1.25); transition: transform 200ms ease-out; }
+        /* Verdict: hidden while spinning, appears during the hold window. */
+        .rt-verdict { animation: rt-verdict-cycle ${RT_CYCLE}ms ease-in-out infinite; }
+        @keyframes rt-verdict-cycle {
+          0%, ${(RT_SPIN_PCT - 4).toFixed(2)}%  { opacity: 0; transform: scale(0.94); }
+          ${(RT_SPIN_PCT + 2).toFixed(2)}%      { opacity: 1; transform: scale(1); }
+          100%                                   { opacity: 1; transform: scale(1); }
+        }
+        .rt-agent-card { animation: rt-fade 180ms ease-out both; }
+        @keyframes rt-fade { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+        .rt-bar { transition: width 420ms cubic-bezier(.2,.7,.3,1); }
+        .rt-slot { cursor: pointer; pointer-events: auto; }
+        @media (prefers-reduced-motion: reduce) {
+          .rt-ring, .rt-slot, .rt-verdict, .rt-agent-card { animation: none !important; opacity: 1 !important; }
+        }
+        @media (max-width: 640px) {
+          .rt-banner { flex-direction: column; text-align: center; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+/* ── Web3 Pulse banner ──────────────────────────────────────────
+   Sits in the same slot as the Stocks Roundtable banner. Shows a
+   compact, animated view of the on-chain moment: three majors with
+   sparklines, ETH gas + Fear&Greed, and a trending strip. Values
+   Data comes from CoinGecko's free public API (no key required):
+     - /coins/markets      → 6 hot majors (top by volume) with 7d sparklines
+     - /search/trending    → marquee of today's most-searched tokens
+   Both are cached in localStorage for 30 min so we don't hammer the API
+   across navigations. Fallbacks (below) keep the UI useful if offline. */
+type PulseCoin = { sym: string; name: string; price: number; chg: number; spark: number[] };
+const PULSE_FALLBACK_COINS: PulseCoin[] = [
+  { sym: 'BTC', name: 'Bitcoin',  price: 97420, chg:  2.4, spark: [36,34,33,37,40,42,41,44,46,45,48,52,50,53,55,58,56,59,62,60] },
+  { sym: 'ETH', name: 'Ethereum', price:  3418, chg: -1.1, spark: [60,62,59,57,58,55,54,56,53,51,52,50,48,49,47,46,48,45,44,46] },
+  { sym: 'SOL', name: 'Solana',   price:   214, chg:  5.8, spark: [30,32,31,33,36,35,39,42,40,44,48,46,50,54,52,56,58,55,60,64] },
+  { sym: 'BNB', name: 'BNB',      price:   612, chg:  0.9, spark: [40,42,41,43,42,44,43,45,44,46,45,47,46,48,47,49,48,50,49,51] },
+  { sym: 'XRP', name: 'XRP',      price:   2.38,chg: -2.3, spark: [55,54,52,53,51,50,48,49,47,46,45,44,43,42,41,40,41,39,38,37] },
+  { sym: 'DOGE',name: 'Dogecoin', price:   0.34,chg:  4.1, spark: [30,31,33,32,34,36,35,38,40,39,42,41,44,46,45,48,47,50,52,54] },
+];
+const PULSE_FALLBACK_TRENDING: { sym: string; chg: number }[] = [
+  { sym: 'WIF', chg: 18.3 }, { sym: 'JUP', chg: -4.1 }, { sym: 'ONDO', chg: 9.2 },
+  { sym: 'TAO', chg: 12.7 }, { sym: 'PENDLE', chg: -2.6 }, { sym: 'ENA', chg: 6.4 },
+  { sym: 'PYTH', chg: 3.9 },
+];
+
+const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v2';
+const PULSE_CACHE_TTL = 30 * 60 * 1000; // 30 min
+
+type PulseCache = { at: number; coins: PulseCoin[]; trending: { sym: string; chg: number }[] };
+
+const readPulseCache = (): PulseCache | null => {
+  try {
+    const raw = localStorage.getItem(PULSE_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PulseCache;
+    if (!parsed?.at || Date.now() - parsed.at > PULSE_CACHE_TTL) return null;
+    return parsed;
+  } catch { return null; }
+};
+
+const writePulseCache = (data: Omit<PulseCache, 'at'>) => {
+  try { localStorage.setItem(PULSE_CACHE_KEY, JSON.stringify({ at: Date.now(), ...data })); } catch {}
+};
+
+// Resample a long price array (CG returns ~168 hourly points for 7d) down
+// to ~24 points for a compact sparkline.
+const resampleSpark = (prices: number[], target = 24): number[] => {
+  if (!Array.isArray(prices) || prices.length === 0) return [];
+  if (prices.length <= target) return prices.slice();
+  const step = prices.length / target;
+  const out: number[] = [];
+  for (let i = 0; i < target; i++) out.push(prices[Math.min(prices.length - 1, Math.floor(i * step))]);
+  return out;
+};
+
+const sparkPath = (values: number[], w: number, h: number): string => {
+  if (!values.length) return '';
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = Math.max(1e-9, max - min);
+  const step = w / Math.max(1, values.length - 1);
+  return values.map((v, i) => {
+    const x = i * step;
+    const y = h - ((v - min) / range) * h;
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+};
+
+const fmtPrice = (n: number) => {
+  if (!isFinite(n)) return '—';
+  if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (n >= 1)    return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (n >= 0.01) return n.toLocaleString('en-US', { maximumFractionDigits: 4 });
+  return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+};
+
+const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) => {
+  // Live data from CoinGecko's free public API, cached 30 min.
+  const [coins, setCoins] = useState<PulseCoin[]>(() => readPulseCache()?.coins ?? PULSE_FALLBACK_COINS);
+  const [trending, setTrending] = useState<{ sym: string; chg: number }[]>(() => readPulseCache()?.trending ?? PULSE_FALLBACK_TRENDING);
+  const [updatedAt, setUpdatedAt] = useState<number>(() => readPulseCache()?.at ?? 0);
+
+  useEffect(() => {
+    const cache = readPulseCache();
+    if (cache) return; // fresh enough
+
+    let cancelled = false;
+    (async () => {
+      try {
+        // Ask for 15 rows so we can filter out stablecoins + wrapped assets
+        // and still end up with 6 real, interesting names.
+        const marketsUrl = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=15&page=1&sparkline=true&price_change_percentage=24h';
+        const trendingUrl = 'https://api.coingecko.com/api/v3/search/trending';
+
+        const [mRes, tRes] = await Promise.all([
+          fetch(marketsUrl).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+          fetch(trendingUrl).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+        ]);
+
+        if (cancelled) return;
+
+        // Drop stablecoins (USDT, USDC, DAI, …) and wrapped / staked majors
+        // (WBTC, WETH, STETH, WSTETH, WEETH) — they dilute the signal and
+        // always hover near 0% or mirror BTC/ETH.
+        const STABLE_OR_WRAPPED = /^(USDT|USDC|DAI|TUSD|FDUSD|USDE|PYUSD|BUSD|USDD|FRAX|LUSD|GUSD|WBTC|WETH|STETH|WSTETH|WEETH|CBBTC|CBETH|RETH|TBTC)$/;
+
+        const nextCoins: PulseCoin[] = (mRes as any[])
+          .map((x): PulseCoin => ({
+            sym: String(x.symbol || '').toUpperCase(),
+            name: x.name,
+            price: Number(x.current_price) || 0,
+            chg: Number(x.price_change_percentage_24h) || 0,
+            spark: resampleSpark(x.sparkline_in_7d?.price || [], 24),
+          }))
+          .filter(c => c.sym && c.price > 0 && !STABLE_OR_WRAPPED.test(c.sym))
+          .slice(0, 6);
+
+        const nextTrending: { sym: string; chg: number }[] = ((tRes as any)?.coins || [])
+          .slice(0, 10)
+          .map((w: any) => ({
+            sym: String(w?.item?.symbol || '').toUpperCase(),
+            chg: Number(w?.item?.data?.price_change_percentage_24h?.usd) || 0,
+          }))
+          .filter((t: { sym: string }) => t.sym);
+
+        if (nextCoins.length) setCoins(nextCoins);
+        if (nextTrending.length) setTrending(nextTrending);
+        writePulseCache({ coins: nextCoins.length ? nextCoins : coins, trending: nextTrending.length ? nextTrending : trending });
+        setUpdatedAt(Date.now());
+      } catch {
+        /* keep fallbacks */
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cosmetic drift (±0.2%) + live gas/F&G so the banner feels alive.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 2600);
+    return () => clearInterval(id);
+  }, []);
+  const jitter = (seed: number) => ((Math.sin(seed * 12.9898 + tick * 0.7) + 1) / 2 - 0.5) * 0.004;
+  const gasGwei = 14 + Math.round(((Math.sin(tick * 0.9) + 1) / 2) * 6);
+  const fgIdx   = 62 + Math.round(((Math.sin(tick * 0.45) + 1) / 2) * 6);
+  const fgLabel = fgIdx < 25 ? 'Extreme Fear' : fgIdx < 45 ? 'Fear' : fgIdx < 55 ? 'Neutral' : fgIdx < 75 ? 'Greed' : 'Extreme Greed';
+  const updatedLabel = updatedAt
+    ? `Updated ${new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : 'Sample data';
+
+  return (
+    <div className="w3p-banner w-full max-w-[860px] mx-auto mt-2 mb-2 rounded-2xl border border-gray-200/70 bg-white text-gray-900 overflow-hidden">
+      {/* Header strip */}
+      <div className="flex items-center justify-between px-5 sm:px-6 pt-4 pb-3 border-b border-gray-100">
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400/70 opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+          </span>
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-gray-400">On-Chain Pulse</span>
+          <span className="hidden sm:inline text-[10px] text-gray-300">·</span>
+          <span className="hidden sm:inline text-[10px] text-gray-400">{updatedLabel}</span>
+        </div>
+        <div className="flex items-center gap-3 text-[11px] text-gray-500">
+          <span><span className="text-gray-400">Gas</span> <span className="text-gray-800 font-semibold">{gasGwei}</span><span className="text-gray-400"> gwei</span></span>
+          <span className="w-px h-3 bg-gray-200" />
+          <span><span className="text-gray-400">F&amp;G</span> <span className="text-emerald-600 font-semibold">{fgIdx}</span> <span className="text-gray-400">{fgLabel}</span></span>
+        </div>
+      </div>
+
+      {/* Hot coins grid — 2×3 on desktop, 2 cols on mobile */}
+      <div className="grid grid-cols-2 sm:grid-cols-3">
+        {coins.slice(0, 6).map((c, i) => {
+          const live = c.price * (1 + jitter(i + 1));
+          const up = c.chg >= 0;
+          const col = i % 3, row = Math.floor(i / 3);
+          return (
+            <button
+              key={`${c.sym}-${i}`}
+              onClick={() => onAsk?.(`What's driving ${c.name} (${c.sym}) today?`)}
+              className={`group flex items-center gap-3 px-4 sm:px-5 py-3.5 text-left transition-colors hover:bg-gray-50 border-gray-100 ${col > 0 ? 'border-l' : ''} ${row > 0 ? 'border-t' : ''}`}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-[12px] font-bold tracking-wide text-gray-800">{c.sym}</span>
+                  <span className="text-[10.5px] text-gray-400 truncate">{c.name}</span>
+                </div>
+                <div className="mt-0.5 flex items-baseline gap-2">
+                  <span className="text-[15px] font-semibold text-gray-900 tabular-nums">${fmtPrice(live)}</span>
+                  <span className={`text-[11px] font-semibold tabular-nums ${up ? 'text-emerald-600' : 'text-rose-500'}`}>
+                    {up ? '▲' : '▼'} {Math.abs(c.chg).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+              <svg width={56} height={24} viewBox="0 0 56 24" className="shrink-0" aria-hidden>
+                <path
+                  d={sparkPath(c.spark, 56, 24)}
+                  fill="none"
+                  stroke={up ? '#10b981' : '#f43f5e'}
+                  strokeWidth={1.5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Trending marquee */}
+      <div className="relative overflow-hidden border-t border-gray-100 bg-gray-50/60">
+        <div className="flex items-center gap-6 px-5 sm:px-6 py-2.5 w3p-marquee">
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">Trending 24h</span>
+          {[...trending, ...trending].map((t, i) => (
+            <span key={`${t.sym}-${i}`} className="shrink-0 inline-flex items-center gap-1.5 text-[11.5px]">
+              <span className="font-semibold text-gray-700 tracking-wide">{t.sym}</span>
+              {t.chg !== 0 && (
+                <span className={`tabular-nums ${t.chg >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                  {t.chg >= 0 ? '+' : ''}{t.chg.toFixed(1)}%
+                </span>
+              )}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <style>{`
+        .w3p-marquee { animation: w3p-scroll 48s linear infinite; }
+        .w3p-banner:hover .w3p-marquee { animation-play-state: paused; }
+        @keyframes w3p-scroll {
+          from { transform: translateX(0); }
+          to   { transform: translateX(-50%); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .w3p-marquee { animation: none; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
 const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   isLoggedIn = false,
   onRequireLogin,
@@ -289,6 +719,10 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [mode, setMode] = useState<'auto' | 'fast' | 'roundtable'>('auto');
   const [chatMessage, setChatMessage] = useState<string | null>(null);
+  // Live Demo: when set, we skip directly into SuperAgentChat with a canned
+  // prompt, roundtable mode forced, and auto-confirm so the visitor watches
+  // the whole Roundtable animation without clicking.
+  const [liveDemoActive, setLiveDemoActive] = useState(false);
   const [phIdx, setPhIdx] = useState(0);
   const [pastedImages, setPastedImages] = useState<string[]>([]);
   const homeFileRef = useRef<HTMLInputElement>(null);
@@ -751,7 +1185,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           initialSessionId={sessionParam || undefined}
           initialChatMode={sessionParam ? undefined : mode}
           selectedAgentId={selectedAgent || undefined}
-          onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); navigate('/'); }}
+          autoStartRoundtable={liveDemoActive}
+          onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); setLiveDemoActive(false); navigate('/'); }}
         />
       </>
     );
@@ -871,7 +1306,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
             <h1 className="text-[38px] md:text-[46px] font-extrabold tracking-tight leading-[1.15] text-gray-900">
               {domain === 'stocks'
                 ? 'Where would you like to invest?'
-                : 'Where is the on-chain alpha?'}
+                : 'What are we exploring with multi-agents?'}
             </h1>
             <p className="text-[14px] text-gray-400 font-normal">
               {domain === 'stocks'
@@ -1109,38 +1544,21 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         )}
       </div>
 
-      {/* ── Use Cases — only on top-level, hidden when an agent is active ── */}
-      {!selectedAgent && (
-        <div className="px-4 pb-10 pt-8 max-w-[960px] w-full mx-auto relative" style={{ zIndex: 10 }}>
-          <div className="flex items-center gap-2 mb-4">
-            <span style={{ display: 'inline-block', width: 3, height: 14, borderRadius: 2, backgroundColor: domainTheme.accent, flexShrink: 0 }} />
-            <h2 className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">Explore Use Cases</h2>
-          </div>
+      {/* ── Roundtable banner — replaces use cases, Stocks only ── */}
+      {!selectedAgent && domain === 'stocks' && (
+        <div className="px-4 pb-10 pt-0 w-full">
+          <RoundtableBanner onLiveDemo={() => {
+            setMode('roundtable');
+            setLiveDemoActive(true);
+            setChatMessage('Is NVIDIA still a buy at current valuations?');
+          }} />
+        </div>
+      )}
 
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {USE_CASES.filter(uc => uc.domain === domain).map(uc => {
-              const Ic = UseCaseIcons[uc.id];
-              return (
-                <button
-                  key={uc.id}
-                  onClick={() => setChatMessage(uc.prompt)}
-                  className="usecase-card group text-left bg-white border border-gray-100 rounded-2xl p-4 cursor-pointer hover:border-gray-200 hover:-translate-y-0.5 transition-all"
-                  style={{ boxShadow: '0 1px 2px rgba(0,0,0,0.02)' }}
-                >
-                  <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3" style={{ background: domainTheme.accentSoft, color: domain === 'web3' ? '#65a30d' : domainTheme.accent }}>
-                    {Ic ? <Ic /> : <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><path d="M3 17l4-4 4 4 4-6 4 2"/><path d="M21 21H3"/></svg>}
-                  </div>
-                  <h3 className="text-[13px] font-semibold text-gray-900 mb-1 leading-snug">{uc.title}</h3>
-                  <p className="text-[11px] text-gray-500 leading-relaxed mb-3 line-clamp-2">{uc.desc}</p>
-                  <div className="flex flex-wrap gap-1">
-                    {uc.tags.map(tag => (
-                      <span key={tag} className="px-2 py-0.5 rounded-md bg-gray-50 text-[10px] font-medium text-gray-500">{tag}</span>
-                    ))}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+      {/* ── Web3 Pulse banner — on-chain snapshot, Web3 only ── */}
+      {!selectedAgent && domain === 'web3' && (
+        <div className="px-4 pb-10 pt-0 w-full relative" style={{ zIndex: 10 }}>
+          <Web3PulseBanner onAsk={(q) => setChatMessage(q)} />
         </div>
       )}
 

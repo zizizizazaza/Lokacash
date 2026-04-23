@@ -4005,13 +4005,11 @@ const ThinkingProcessSidePanel: React.FC<{
         // Remaining modules
         for (const mod of thinking.modules) {
             if (mod.type === 'search') continue;
+            if (mod.type === 'simulation') continue; // Simulation module hidden
             if (mod.type === 'done' && mod.status !== 'completed') continue;
             switch (mod.type) {
                 case 'analysis':
                     mods.push({ key: 'analysis', element: <AnalysisModule mod={mod} /> });
-                    break;
-                case 'simulation':
-                    mods.push({ key: 'simulation', element: <SimulationModule mod={mod} /> });
                     break;
                 case 'consensus':
                     mods.push({ key: 'consensus', element: <ConsensusModule mod={mod} /> });
@@ -4099,6 +4097,9 @@ interface SuperAgentChatProps {
     initialSessionId?: string;
     /** From home screen mode selector (not used when opening history-only session). */
     initialChatMode?: 'auto' | 'fast' | 'roundtable';
+    /** When true, the Roundtable summon flow auto-confirms after the selecting
+     *  phase reveals, producing a hands-free "live demo" run from the home banner. */
+    autoStartRoundtable?: boolean;
 }
 
 /** Replace bare [Source Name] citations with [Source Name](url) using the sources list,
@@ -4212,7 +4213,7 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     return result;
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode }) => {
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable }) => {
     const navigate = useNavigate();
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
@@ -4330,6 +4331,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [rtPanelExpanded, setRtPanelExpanded] = useState(false);
     const [summonPhase, setSummonPhase] = useState<'idle' | 'loading' | 'narrating' | 'selecting'>('idle');
     const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
+    // Bumps whenever an auto-confirm (Live Demo) is requested; a downstream
+    // effect fires handleSummonConfirm with the latest closure.
+    const [autoConfirmTick, setAutoConfirmTick] = useState(0);
     const [pendingRtText, setPendingRtText] = useState<string | null>(null);
     const summonBypassRef = useRef(false);
     const rtDemoTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -5440,9 +5444,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
 
         setActiveGraphMsgIdx(msgIdx);
-        // In roundtable mode, show the unified panel with process tab
+        // Roundtable mode: panel stays closed by default; user can open it
+        // from the thinking indicator on the assistant message.
         if (chatMode === 'roundtable') {
-            setShowThinkingPanel(true);
             setPanelTab('process');
         }
         setShowGraphPanel(false);
@@ -5697,6 +5701,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setTimeout(() => { setSummonPhase('narrating'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 1400);
             setTimeout(() => { setSummonPhase('selecting'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 3200);
             setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 300);
+            // Live Demo: pre-pick a few lenses and request auto-confirm so the
+            // visitor sees the full Roundtable run without any clicks.
+            if (autoStartRoundtable) {
+                setTimeout(() => {
+                    setSelectedSummonIds(new Set(['buffett_style', 'munger_style', 'lynch_style', 'sentiment_focus']));
+                }, 3600);
+                setTimeout(() => { setAutoConfirmTick(Date.now()); }, 4800);
+            }
             return;
         }
 
@@ -5711,8 +5723,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setSummonPhase('idle');
         setPendingRtText(null);
         summonBypassRef.current = true;
-        // Open side panel on Roundtable Graph tab
-        setShowThinkingPanel(true);
+        // Process panel stays closed by default — users can open it from the
+        // thinking indicator on the assistant message if they want the animation.
         setShowGraphPanel(false);
         setSourcePanelData(null);
         setPanelTab('process');
@@ -5932,6 +5944,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         sendToAI(text, messages, realAnalystIds);
         setTimeout(scrollUserMsgToTop, 150);
     }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop, selectedSummonIds]);
+
+    // Live Demo: when autoConfirmTick bumps, fire the confirm with the latest
+    // closure so the pre-selected lenses are picked up correctly.
+    useEffect(() => {
+        if (!autoConfirmTick) return;
+        handleSummonConfirm();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoConfirmTick]);
 
     const handleSend = () => {
         if (!inputText.trim() || isStreaming) return;
