@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
+from aegean.core import AgentRegistry
 from aegean.core.models import (
     Group,
     GroupMember,
@@ -19,7 +20,6 @@ from aegean.core.models import (
     GroupConsensusResult,
     CollaborationMode,
 )
-from aegean.core.agent import AgentRegistry
 from aegean.services.group_chat_service import GroupChatService
 
 

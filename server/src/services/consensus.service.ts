@@ -1,41 +1,80 @@
 import { config } from '../config.js';
+import {
+  ANALYST_CATALOG,
+  SYSTEM_ANALYST_IDS,
+  getAnalystById,
+  type AnalystPersona,
+} from '../catalogs/analysts.js';
 
 const CONSENSUS_BASE = config.consensus.baseUrl;
 
-export const PRESET_AGENTS = [
-  { agent_id: 'agent_0', role: 'risk_analyst', capability_weight: 1.0, specialization: { credit: 0.95, fraud: 0.80 } },
-  { agent_id: 'agent_1', role: 'market_analyst', capability_weight: 1.0, specialization: { market: 0.90, valuation: 0.85 } },
-  { agent_id: 'agent_2', role: 'research_agent', capability_weight: 1.0, specialization: { news: 0.90, sentiment: 0.80 } },
-  { agent_id: 'agent_3', role: 'trading_strategist', capability_weight: 1.0, specialization: { technical: 0.85, strategy: 0.90 } },
-];
-
-
-const AGENT_LABEL_ZH: Record<string, string> = {
-  agent_0: '风险分析',
-  agent_1: '市场分析',
-  agent_2: '研究情报',
-  agent_3: '交易策略',
-};
-
-const AGENT_ID_ORDER = ['agent_0', 'agent_1', 'agent_2', 'agent_3'] as const;
-
-export function formatConsensusAgentLabel(agentId: string): string {
-  const zh = AGENT_LABEL_ZH[agentId];
-  if (zh) return `${zh}（${agentId}）`;
-  const p = PRESET_AGENTS.find((a) => a.agent_id === agentId);
-  return p ? `${p.role}（${agentId}）` : agentId;
+/**
+ * Wire-format agent member record sent to aegean's POST /groups/:id/members.
+ *
+ * aegean stores the role / capability_weight / specialization as per-group
+ * metadata; the underlying system prompt is baked into the MinimalAgent at
+ * aegean startup time (see tools/aegean-consensus/main.py + personas.json).
+ */
+export interface ConsensusGroupMember {
+  agent_id: string;
+  role: string;
+  capability_weight: number;
+  specialization: Record<string, number>;
 }
 
+function personaToMember(p: AnalystPersona): ConsensusGroupMember {
+  return {
+    agent_id: p.id,
+    role: p.role.en.toLowerCase().replace(/\s+&\s+/g, '_').replace(/\s+/g, '_'),
+    capability_weight: 1.0,
+    specialization: p.specialization,
+  };
+}
+
+/**
+ * Default roster when the caller does not pick specific analysts.
+ * Equal to the 4 mandatory system personas — the minimum legal selection.
+ */
+export const PRESET_AGENTS: ConsensusGroupMember[] = SYSTEM_ANALYST_IDS
+  .map((id) => getAnalystById(id))
+  .filter((p): p is AnalystPersona => !!p)
+  .map(personaToMember);
+
+/** Catalog display order: system → enhanced → master, preserving list order. */
+const CATALOG_AGENT_ORDER: string[] = ANALYST_CATALOG.map((p) => p.id);
+
+export function formatConsensusAgentLabel(agentId: string): string {
+  const p = getAnalystById(agentId);
+  if (p) return `${p.displayName.zh}（${agentId}）`;
+  return agentId;
+}
 
 export function sortConsensusAgentEntries<T>(entries: [string, T][]): [string, T][] {
   return [...entries].sort(([a], [b]) => {
-    const ia = AGENT_ID_ORDER.indexOf(a as (typeof AGENT_ID_ORDER)[number]);
-    const ib = AGENT_ID_ORDER.indexOf(b as (typeof AGENT_ID_ORDER)[number]);
+    const ia = CATALOG_AGENT_ORDER.indexOf(a);
+    const ib = CATALOG_AGENT_ORDER.indexOf(b);
     if (ia >= 0 && ib >= 0) return ia - ib;
     if (ia >= 0) return -1;
     if (ib >= 0) return 1;
     return a.localeCompare(b);
   });
+}
+
+/**
+ * Expand a list of analyst IDs (from frontend Roundtable UI) into group
+ * member records. Unknown IDs are silently dropped with a warning.
+ */
+function buildMembersFromAnalystIds(ids: string[]): ConsensusGroupMember[] {
+  const members: ConsensusGroupMember[] = [];
+  for (const id of ids) {
+    const p = getAnalystById(id);
+    if (!p) {
+      console.warn(`[Consensus] unknown analystId=${id} — skipped`);
+      continue;
+    }
+    members.push(personaToMember(p));
+  }
+  return members;
 }
 
 export async function pyFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
@@ -55,7 +94,21 @@ export async function pyFetch<T = any>(path: string, options: RequestInit = {}):
   return res.json() as Promise<T>;
 }
 
-export async function runConsensusEngine(userId: string, mode: string, message: string) {
+export interface RunConsensusOptions {
+  /**
+   * Optional list of analyst persona IDs to include in this run.
+   * If absent, falls back to PRESET_AGENTS (4 system personas).
+   * IDs must exist in ANALYST_CATALOG — unknown IDs are dropped.
+   */
+  analystIds?: string[];
+}
+
+export async function runConsensusEngine(
+  userId: string,
+  mode: string,
+  message: string,
+  options: RunConsensusOptions = {},
+) {
   const modeMap: Record<string, string> = {
     roundtable: 'consensus',
     collaborate: 'collaboration',
@@ -63,6 +116,24 @@ export async function runConsensusEngine(userId: string, mode: string, message: 
     fast: 'collaboration',
   };
   const apiMode = modeMap[mode] || 'consensus';
+
+  // Pick roster: caller-supplied analystIds (from Roundtable UI) takes
+  // precedence over PRESET_AGENTS (default 4 system personas).
+  const members: ConsensusGroupMember[] =
+    options.analystIds && options.analystIds.length > 0
+      ? buildMembersFromAnalystIds(options.analystIds)
+      : [...PRESET_AGENTS];
+
+  if (members.length === 0) {
+    throw new Error(
+      'Consensus refused: no valid analyst IDs resolved from input ' +
+      `(analystIds=${JSON.stringify(options.analystIds ?? [])}).`,
+    );
+  }
+
+  console.log(
+    `[Consensus] roster resolved: count=${members.length} ids=${members.map((m) => m.agent_id).join(',')}`,
+  );
 
   // ── Step 1: Create group ─────────────────────────────────
   console.log(`[Consensus] Step 1: Creating group (mode=${apiMode})...`);
@@ -79,9 +150,9 @@ export async function runConsensusEngine(userId: string, mode: string, message: 
   console.log(`[Consensus] Step 1 ✅ Group created: ${groupId}`);
 
   // ── Step 2: Add agent members ────────────────────────────
-  console.log(`[Consensus] Step 2: Adding ${PRESET_AGENTS.length} agents...`);
+  console.log(`[Consensus] Step 2: Adding ${members.length} agents...`);
   let addedCount = 0;
-  for (const agent of PRESET_AGENTS) {
+  for (const agent of members) {
     try {
       await pyFetch(`/groups/${groupId}/members`, {
         method: 'POST',

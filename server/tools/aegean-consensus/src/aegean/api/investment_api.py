@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +16,8 @@ from aegean.investment.models import InvestmentAnalysisRequest, InvestmentAnalys
 from aegean.investment.service import InvestmentAnalysisService
 from aegean.memory.global_memory import GlobalMemorySystem
 from aegean.risk.risk_consensus import RiskConsensusCoordinator
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/investment", tags=["Investment Analysis"])
 
@@ -58,12 +62,29 @@ def _to_sse(event: dict) -> str:
     summary="Run investment analysis",
 )
 async def analyze_investment(body: InvestmentAnalysisRequest) -> InvestmentAnalysisResponse:
+    logger.info(
+        "[api] ▶ POST /investment/analyze received symbol=%s market=%s type=%s mode=%s",
+        body.asset.symbol,
+        getattr(body.asset.market, "value", body.asset.market),
+        getattr(body.asset.asset_type, "value", body.asset.asset_type),
+        getattr(body.mode, "value", body.mode),
+    )
     service = _get_service()
+    started = time.time()
     try:
-        return await service.analyze(body)
+        result = await service.analyze(body)
+        logger.info(
+            "[api] ✓ POST /investment/analyze completed elapsed=%.2fs action=%s confidence=%.2f",
+            time.time() - started,
+            getattr(result.recommendation.action, "value", result.recommendation.action),
+            result.recommendation.confidence,
+        )
+        return result
     except ValueError as exc:
+        logger.warning("[api] ✗ /investment/analyze ValueError elapsed=%.2fs: %s", time.time() - started, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("[api] ✗ /investment/analyze ERROR elapsed=%.2fs: %s", time.time() - started, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

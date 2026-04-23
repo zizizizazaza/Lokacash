@@ -91,9 +91,12 @@ docs/NEED_FROM_YOU.md
 LamportID.pem
 **/.venv/
 **/venv/
+# Aegean runtime state (SETU task DB, etc.)
+server/tools/aegean-consensus/.aegean/
 BUG_TRACKING.md
 .claude/
 
 OKX_AGENT_TRADE_KIT.md
 WEB3_DUAL_ROUTE_PLAN.md
 SKILL_MODULE_PLAN.md
+analyst-roundtable-plan.md

@@ -491,6 +491,40 @@ const SUMMON_POOL: { id: string; name: string; nameCN: string; initials: string;
 const SYSTEM_AGENT_IDS = new Set(SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id));
 const DEFAULT_SUMMON_IDS = new Set<string>();
 
+// Lookup helpers for mapping backend analystId → frontend display name.
+const SUMMON_POOL_BY_ID = new Map(SUMMON_POOL.map(a => [a.id, a]));
+function getAnalystDisplayName(analystId: string, preferCN = false): string {
+    const p = SUMMON_POOL_BY_ID.get(analystId);
+    if (!p) return analystId;
+    return preferCN ? p.nameCN : p.name;
+}
+
+/**
+ * Parse a persona's raw answer into the shape the Debate Tab expects.
+ * Personas are instructed to emit `SIGNAL: bullish|bearish|neutral` — that's
+ * what we map to the "verdict" field. Falls back to 'Neutral' if the model
+ * didn't follow the schema.
+ */
+function parsePersonaVerdict(answer: string): 'Bullish' | 'Bearish' | 'Neutral' {
+    const m = answer?.match(/SIGNAL:\s*(bullish|bearish|neutral)/i);
+    const raw = m ? m[1].toLowerCase() : 'neutral';
+    if (raw === 'bullish') return 'Bullish';
+    if (raw === 'bearish') return 'Bearish';
+    return 'Neutral';
+}
+
+/**
+ * Extract a short reasoning snippet from a persona's raw answer. Prefers the
+ * RATIONALE section if the persona followed the schema, else uses the first
+ * ~200 chars.
+ */
+function parsePersonaReasoning(answer: string): string {
+    if (!answer) return '';
+    const m = answer.match(/RATIONALE:\s*([\s\S]+?)(?:\n[A-Z_]+:|\n\n|$)/i);
+    if (m && m[1].trim()) return m[1].trim().slice(0, 400);
+    return answer.slice(0, 400);
+}
+
 const AGENT_COLORS: Record<string, string> = {
     FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
 };
@@ -4701,8 +4735,190 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
 
         const onConsensusDone = (data: { sessionId: string; result: any }) => {
-            saLog('← agent:chat:consensus_done (ignored — demo mode)', { expect: sessionId, got: data?.sessionId });
-            // Demo mode: do NOT overwrite panel with backend consensus data
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:consensus_done (live → overwrite demo)', {
+                sessionId: data.sessionId,
+                rounds: data?.result?.consensus?.roundsUsed,
+                reached: data?.result?.consensus?.consensusReached,
+            });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const result = data.result || {};
+            const resp: Array<{ agentId: string; answer: string; confidence: number }> =
+                result?.consensus?.agentResponses || [];
+            const finalAnswer: string = result?.consensus?.finalAnswer || '';
+            const finalConfidencePct = Math.round(
+                ((result?.consensus?.confidence as number) || 0) * 100,
+            );
+            const reached = result?.consensus?.consensusReached !== false;
+
+            // Derive each persona's conclusion verdict/confidence from its raw answer.
+            const conclusions = resp.map((r) => ({
+                agentName: getAnalystDisplayName(r.agentId),
+                verdict: parsePersonaVerdict(r.answer),
+                confidence: Math.round((r.confidence || 0) * 100),
+            }));
+
+            // Majority signal across personas → surface as finalVerdict.
+            const tally: Record<string, number> = { Bullish: 0, Bearish: 0, Neutral: 0 };
+            for (const c of conclusions) {
+                tally[c.verdict] = (tally[c.verdict] || 0) + 1;
+            }
+            const finalVerdict =
+                (Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] as string) || 'Neutral';
+
+            // Rough conflict rate: 100% minus the majority share.
+            const majorityCount = tally[finalVerdict] || 0;
+            const conflictRate =
+                conclusions.length > 0
+                    ? Math.round(((conclusions.length - majorityCount) / conclusions.length) * 100)
+                    : 0;
+
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const next: RtConsensusResult = {
+                    status: 'done',
+                    hasConsensus: reached,
+                    conflictRate,
+                    agentConclusions: conclusions,
+                    finalVerdict,
+                    finalConfidence: finalConfidencePct,
+                };
+                return {
+                    ...prev,
+                    [msgIdx]: {
+                        ...existing,
+                        rtConsensus: next,
+                        rtReportStatus: 'active',
+                    },
+                };
+            });
+        };
+
+        // ─── NEW Roundtable persona events (Stage 4 protocol, Stage 5 wire-up) ──
+        // These handlers overlay real backend data onto thinkingProcesses.
+        // The demo animation in handleSummonConfirm still runs in parallel
+        // (for initial UI smoothness while we wait for the backend to return);
+        // once real events arrive, they overwrite the demo state so the
+        // AgentRoom / Debate Tab end up showing the actual personas' verdicts.
+        const onAnalystsSelected = (data: {
+            sessionId: string;
+            analysts: Array<{
+                id: string;
+                displayName: { zh: string; en: string };
+                role: { zh: string; en: string };
+                initials: string;
+                color: string;
+                category: 'system' | 'enhanced' | 'master';
+            }>;
+        }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:analysts_selected', {
+                count: data.analysts.length,
+                ids: data.analysts.map((a) => a.id).join(','),
+            });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const ids = data.analysts.map((a) => a.id);
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                return {
+                    ...prev,
+                    [msgIdx]: {
+                        ...existing,
+                        // Overwrite demo roster with the real backend-resolved one.
+                        selectedAgentIds: ids,
+                    },
+                };
+            });
+        };
+        const onAgentResponded = (data: {
+            sessionId: string;
+            analystId: string;
+            round: number;
+            confidence: number;
+            summary: string;
+            answer: string;
+        }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:agent_responded', {
+                analystId: data.analystId,
+                round: data.round,
+                confidence: data.confidence,
+                len: data.answer?.length ?? 0,
+            });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const displayName = getAnalystDisplayName(data.analystId);
+            const verdict = parsePersonaVerdict(data.answer);
+            const reasoning = parsePersonaReasoning(data.answer);
+            const confPct = Math.round((data.confidence || 0) * 100);
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const existingRounds = existing.rtRounds || [];
+                let rounds = [...existingRounds];
+                const roundIdx = rounds.findIndex((r) => r.round === data.round);
+                const newAgent: RtAgentInference = {
+                    agentId: data.analystId,
+                    agentName: displayName,
+                    status: 'done',
+                    verdict,
+                    confidence: confPct,
+                    reasoning,
+                };
+                if (roundIdx === -1) {
+                    rounds.push({ round: data.round, status: 'active', agents: [newAgent] });
+                } else {
+                    const agents = [...rounds[roundIdx].agents];
+                    const agentPos = agents.findIndex((a) => a.agentId === data.analystId);
+                    if (agentPos === -1) {
+                        agents.push(newAgent);
+                    } else {
+                        agents[agentPos] = { ...agents[agentPos], ...newAgent };
+                    }
+                    rounds[roundIdx] = { ...rounds[roundIdx], agents };
+                }
+                return {
+                    ...prev,
+                    [msgIdx]: { ...existing, rtRounds: rounds },
+                };
+            });
+        };
+        const onRoundStarted = (data: { sessionId: string; round: number; maxRounds: number }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:round_started', { round: data.round, maxRounds: data.maxRounds });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const rounds = [...(existing.rtRounds || [])];
+                const idx = rounds.findIndex((r) => r.round === data.round);
+                if (idx === -1) {
+                    rounds.push({ round: data.round, status: 'active', agents: [] });
+                } else if (rounds[idx].status !== 'done') {
+                    rounds[idx] = { ...rounds[idx], status: 'active' };
+                }
+                return { ...prev, [msgIdx]: { ...existing, rtRounds: rounds } };
+            });
+        };
+        const onRoundCompleted = (data: { sessionId: string; round: number; maxRounds: number }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:round_completed', { round: data.round, maxRounds: data.maxRounds });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const rounds = [...(existing.rtRounds || [])];
+                const idx = rounds.findIndex((r) => r.round === data.round);
+                if (idx === -1) return prev;
+                rounds[idx] = { ...rounds[idx], status: 'done' };
+                return { ...prev, [msgIdx]: { ...existing, rtRounds: rounds } };
+            });
         };
 
         const onQuote = (data: { sessionId: string; quote: any }) => {
@@ -4739,6 +4955,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:quote', onQuote);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
+        // New Roundtable persona events (log-only in Stage 4)
+        socket.on('agent:chat:analysts_selected', onAnalystsSelected);
+        socket.on('agent:chat:agent_responded', onAgentResponded);
+        socket.on('agent:chat:round_started', onRoundStarted);
+        socket.on('agent:chat:round_completed', onRoundCompleted);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
@@ -4756,6 +4977,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:quote', onQuote);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
+            socket.off('agent:chat:analysts_selected', onAnalystsSelected);
+            socket.off('agent:chat:agent_responded', onAgentResponded);
+            socket.off('agent:chat:round_started', onRoundStarted);
+            socket.off('agent:chat:round_completed', onRoundCompleted);
         };
     }, [sessionId]);
 
@@ -4958,7 +5183,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
     }, [sessionId, chatMode, chatSelectedAgent]);
 
-    const sendToAI = useCallback((text: string, existingMessages?: Message[]) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[], analystIds?: string[]) => {
         // Bump generation so stale events from a previous run are dropped
         chatGenRef.current += 1;
         activeChatGenRef.current = chatGenRef.current;
@@ -5023,6 +5248,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             // Subsequent messages let the router decide based on content — prevents
             // sticky guru-council mode when user switches topics.
             agentId: currentMessages.length === 0 ? chatSelectedAgent : undefined,
+            // Roundtable persona selection — sent only when user picks analysts.
+            // Must include the 4 system IDs + ≥1 user-picked (validated server-side).
+            ...(analystIds && analystIds.length > 0 ? { analystIds } : {}),
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -5429,9 +5657,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         // Clear any previous timers (e.g. rapid re-confirm) before scheduling
         rtDemoTimersRef.current.forEach(clearTimeout);
         rtDemoTimersRef.current = steps.map(s => setTimeout(s.run, s.t));
-        sendToAI(text, messages);
+        // Send REAL selection to backend — 4 system (always on) + user-picked
+        // enhanced/master personas. Demo injection above is UI preview only.
+        const systemIds = SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id);
+        const userPickedIds = [...selectedSummonIds].filter(id => !systemIds.includes(id));
+        const realAnalystIds = [...systemIds, ...userPickedIds];
+        sendToAI(text, messages, realAnalystIds);
         setTimeout(scrollUserMsgToTop, 150);
-    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop]);
+    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop, selectedSummonIds]);
 
     const handleSend = () => {
         if (!inputText.trim() || isStreaming) return;

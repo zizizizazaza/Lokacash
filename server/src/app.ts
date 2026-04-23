@@ -34,6 +34,7 @@ import skillRoutes from './routes/skill.js';
 import subscriptionRoutes from './routes/subscription.js';
 import guestRoutes from './routes/guest.js';
 import configRoutes from './routes/config.js';
+import analystsRoutes from './routes/analysts.js';
 import path from 'path';
 import prisma from './db.js';
 
@@ -135,6 +136,7 @@ app.use('/api/events', eventsRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/guest', guestRoutes);
 app.use('/api/config', configRoutes);
+app.use('/api/analysts', analystsRoutes);
 // Public skill API for external AI agents — no auth (internal testing).
 // Mounted under /api so it inherits the reverse-proxy path in production
 // (e.g. https://nftkashai.online/lokacash/api/skill/v1/*).

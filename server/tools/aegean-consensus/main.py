@@ -83,10 +83,14 @@ def _build_simple_openai_client(api_key: str):
                 self.last_usage = None
                 self.last_provider = "openai"
 
-            async def complete(self, prompt: str) -> str:
+            async def complete(self, prompt: str, system_prompt: str | None = None) -> str:
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": prompt})
                 resp = await self.client.chat.completions.create(
                     model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                     temperature=0.1,
                     max_tokens=512,
                 )
@@ -122,12 +126,15 @@ def _build_simple_anthropic_client(api_key: str):
                 self.last_usage = None
                 self.last_provider = "anthropic"
 
-            async def complete(self, prompt: str) -> str:
-                msg = await self.client.messages.create(
+            async def complete(self, prompt: str, system_prompt: str | None = None) -> str:
+                create_kwargs = dict(
                     model=self.model,
                     max_tokens=512,
                     messages=[{"role": "user", "content": prompt}],
                 )
+                if system_prompt:
+                    create_kwargs["system"] = system_prompt
+                msg = await self.client.messages.create(**create_kwargs)
                 usage = getattr(msg, "usage", None)
                 self.last_usage = {
                     "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
@@ -213,10 +220,14 @@ def _build_simple_openai_client_with(api_key: str, model: str, base_url: str = N
                 self.last_usage = None
                 self.last_provider = "openai"
 
-            async def complete(self, prompt: str) -> str:
+            async def complete(self, prompt: str, system_prompt: str | None = None) -> str:
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": prompt})
                 resp = await self.client.chat.completions.create(
                     model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                     temperature=0.1,
                     max_tokens=512,
                 )
@@ -282,30 +293,105 @@ def _register_minimal_agents_multi(registry, per_agent_clients: list):
     from aegean.core.models import Solution
 
     class MinimalAgent(Agent):
-        def __init__(self, agent_id: str, llm_client=None, model_name: str = "", **kwargs):
+        def __init__(
+            self,
+            agent_id: str,
+            llm_client=None,
+            model_name: str = "",
+            system_prompt: str | None = None,
+            **kwargs,
+        ):
             super().__init__(agent_id=agent_id, **kwargs)
             self._llm = llm_client
             self._model_name = model_name
+            # Persona system prompt baked in at registration time so every
+            # generate_solution() call stays in-character for this agent_id.
+            # None = legacy behavior (user-only prompt, no role guidance).
+            self._system_prompt = system_prompt
 
         async def generate_solution(self, task: str) -> Solution:
             if self._llm:
-                try:
-                    answer = await self._llm.complete(
-                        f"Task: {task}\n\nProvide a concise answer:"
+                import time as _time
+                # Hard timeout on each LLM call so the whole pipeline can't hang
+                # on a single unresponsive chat completion.
+                _timeout = float(os.getenv("AEGEAN_LLM_CALL_TIMEOUT", "60"))
+                # When a persona system_prompt is set, the LLM already knows its
+                # role + output schema, so we pass the task as a lean user turn.
+                # Legacy fallback (no system_prompt) keeps the old framing.
+                if self._system_prompt:
+                    prompt_text = task
+                else:
+                    prompt_text = f"Task: {task}\n\nProvide a concise answer:"
+                # 502 Bad Gateway from api.lingyaai.cn is transient but openai-SDK's
+                # built-in retry only waits <1s each time, which can exhaust retries
+                # during a 5-10s upstream hiccup. Our outer retry uses longer backoff.
+                _max_outer_retries = int(os.getenv("AEGEAN_LLM_OUTER_RETRIES", "2"))
+                _backoffs = [3.0, 8.0]  # seconds between outer attempts
+                last_err = None
+                for attempt in range(_max_outer_retries + 1):
+                    _t0 = _time.time()
+                    logger.info(
+                        f"[llm] ▶ {self.agent_id} ({self._model_name}) complete() "
+                        f"prompt_len={len(prompt_text)} "
+                        f"sys_prompt={'yes' if self._system_prompt else 'no'} "
+                        f"timeout={_timeout}s attempt={attempt + 1}"
                     )
-                    raw_usage = getattr(self._llm, "last_usage", None) or {}
-                    from aegean.core.models import TokenUsage as _TU
-                    tu = _TU.from_raw(raw_usage)
-                    return Solution(
-                        agent_id=self.agent_id,
-                        answer=answer,
-                        confidence=0.8,
-                        tokens_prompt=tu.tokens_prompt,
-                        tokens_completion=tu.tokens_completion,
-                        usage=tu,
-                    )
-                except Exception as e:
-                    logger.warning(f"{self.agent_id} ({self._model_name}) LLM failed: {e}")
+                    try:
+                        answer = await asyncio.wait_for(
+                            self._llm.complete(
+                                prompt_text,
+                                system_prompt=self._system_prompt,
+                            ),
+                            timeout=_timeout,
+                        )
+                        logger.info(
+                            f"[llm] ✓ {self.agent_id} ({self._model_name}) "
+                            f"elapsed={_time.time() - _t0:.2f}s answer_len={len(answer or '')}"
+                        )
+                        raw_usage = getattr(self._llm, "last_usage", None) or {}
+                        from aegean.core.models import TokenUsage as _TU
+                        tu = _TU.from_raw(raw_usage)
+                        return Solution(
+                            agent_id=self.agent_id,
+                            answer=answer,
+                            confidence=0.8,
+                            tokens_prompt=tu.tokens_prompt,
+                            tokens_completion=tu.tokens_completion,
+                            usage=tu,
+                        )
+                    except asyncio.TimeoutError as e:
+                        last_err = e
+                        logger.warning(
+                            f"[llm] ✗ {self.agent_id} ({self._model_name}) TIMEOUT "
+                            f"after {_time.time() - _t0:.2f}s (limit={_timeout}s)"
+                        )
+                    except Exception as e:
+                        last_err = e
+                        err_text = str(e)
+                        is_transient = (
+                            "502" in err_text
+                            or "503" in err_text
+                            or "504" in err_text
+                            or "Bad Gateway" in err_text
+                            or "rate" in err_text.lower()
+                        )
+                        logger.warning(
+                            f"[llm] ✗ {self.agent_id} ({self._model_name}) failed "
+                            f"elapsed={_time.time() - _t0:.2f}s transient={is_transient} "
+                            f"err={err_text[:200]}"
+                        )
+                        if not is_transient:
+                            break  # non-retryable error, give up
+                    if attempt < _max_outer_retries:
+                        wait = _backoffs[min(attempt, len(_backoffs) - 1)]
+                        logger.info(
+                            f"[llm] … {self.agent_id} backing off {wait}s before retry"
+                        )
+                        await asyncio.sleep(wait)
+                logger.warning(
+                    f"[llm] ✗ {self.agent_id} exhausted {_max_outer_retries + 1} attempts, "
+                    f"last_err={last_err}"
+                )
             return Solution(
                 agent_id=self.agent_id,
                 answer=f"[{self.agent_id}] Unable to analyze without LLM",
@@ -313,26 +399,121 @@ def _register_minimal_agents_multi(registry, per_agent_clients: list):
             )
 
         async def refine_solution(self, refinement_set) -> Solution:
-            if not refinement_set:
-                return await self.generate_solution("refinement")
-            from collections import Counter
-            from aegean.core.models import TokenUsage as _TU
-            answers = [s.answer for s in refinement_set]
-            majority = Counter(answers).most_common(1)[0][0]
-            # Aggregate token usage already tracked in peer solutions
-            tp = sum(getattr(s, "tokens_prompt", 0) for s in refinement_set)
-            tc = sum(getattr(s, "tokens_completion", 0) for s in refinement_set)
-            tu = _TU(tokens_prompt=tp, tokens_completion=tc, tokens_total=tp + tc)
-            return Solution(
-                agent_id=self.agent_id,
-                answer=majority,
-                confidence=0.75,
-                reasoning="Refined based on peer solutions",
-                tokens_prompt=tp,
-                tokens_completion=tc,
-                usage=tu,
-            )
+            """
+            Re-analyze after seeing peer stances. CRITICAL: use the LLM with
+            the persona's system_prompt so we stay IN CHARACTER. The legacy
+            behaviour was a majority-vote (Counter.most_common) that collapsed
+            every agent to the same answer — this destroyed persona diversity
+            the moment any refinement round ran. Fix: feed peers as context,
+            ask our own LLM to refine *from our persona's lens*.
+            """
+            if not refinement_set or not self._llm or not self._system_prompt:
+                # No LLM or no persona → fall back to majority voting
+                # (preserves legacy behaviour for anonymous agents).
+                if not refinement_set:
+                    return await self.generate_solution("refinement")
+                from collections import Counter
+                from aegean.core.models import TokenUsage as _TU
+                answers = [s.answer for s in refinement_set]
+                majority = Counter(answers).most_common(1)[0][0]
+                tp = sum(getattr(s, "tokens_prompt", 0) for s in refinement_set)
+                tc = sum(getattr(s, "tokens_completion", 0) for s in refinement_set)
+                tu = _TU(tokens_prompt=tp, tokens_completion=tc, tokens_total=tp + tc)
+                return Solution(
+                    agent_id=self.agent_id,
+                    answer=majority,
+                    confidence=0.75,
+                    reasoning="Refined via majority vote (no persona prompt)",
+                    tokens_prompt=tp,
+                    tokens_completion=tc,
+                    usage=tu,
+                )
 
+            # Persona path: build a "re-read peers, re-state your view" prompt.
+            peer_blocks = []
+            for s in refinement_set:
+                peer_id = getattr(s, "agent_id", "peer")
+                if peer_id == self.agent_id:
+                    continue  # skip self
+                peer_answer = (s.answer or "")[:600]
+                peer_blocks.append(f"--- Peer: {peer_id} ---\n{peer_answer}")
+            peers_text = "\n\n".join(peer_blocks) if peer_blocks else "(no peer stances yet)"
+
+            task = (
+                "Your peer analysts have shared their stances. Read them, then "
+                "refine your own analysis. You MAY update your view if their "
+                "evidence is compelling, but do NOT abandon your persona's "
+                "lens or framework. If you disagree, say so clearly.\n\n"
+                f"Peer stances:\n{peers_text}\n\n"
+                "Now provide your refined verdict — same output schema as your "
+                "initial answer (SIGNAL / CONFIDENCE / KEY_EVIDENCE / "
+                "RATIONALE / WOULD_CHANGE_MY_MIND)."
+            )
+            return await self.generate_solution(task)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # New path (2026-04-23): read persona catalog from personas.json and
+    # register one MinimalAgent per persona (18 agents by default).
+    # Each persona carries its own system_prompt + specialization weights so
+    # /groups/:id/consensus can dynamically pick a subset of persona IDs.
+    #
+    # Fallback path: if personas.json is missing or unreadable, register
+    # anonymous agent_0..agent_{N-1} using the per_agent_clients list (legacy
+    # behaviour preserved for old deployments).
+    # ═══════════════════════════════════════════════════════════════════════
+
+    import json
+    from pathlib import Path
+
+    personas_path = Path(__file__).resolve().parent / "personas.json"
+    personas_data = None
+    if personas_path.exists():
+        try:
+            personas_data = json.loads(personas_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                f"Failed to parse personas.json ({exc}); falling back to legacy anonymous agents"
+            )
+            personas_data = None
+
+    if personas_data and isinstance(personas_data.get("personas"), list):
+        personas = personas_data["personas"]
+        # Distribute personas across the available LLM clients in round-robin
+        # fashion so each client handles ~(18 / N) personas. With a single
+        # shared client (common case) they all use the same model.
+        if not per_agent_clients:
+            logger.warning("No LLM clients available; persona agents will return placeholder answers")
+            per_agent_clients = [(os.getenv("OPENAI_MODEL", "gpt-4o"), None)]
+
+        registered = 0
+        for idx, persona in enumerate(personas):
+            pid = persona.get("id")
+            if not pid:
+                continue
+            model_name, llm_client = per_agent_clients[idx % len(per_agent_clients)]
+            agent = MinimalAgent(
+                agent_id=pid,
+                llm_client=llm_client,
+                model_name=model_name,
+                system_prompt=persona.get("system_prompt") or None,
+                specialization=persona.get("specialization") or {},
+            )
+            registry.register_agent(agent)
+            registered += 1
+
+        counts = {"system": 0, "enhanced": 0, "master": 0}
+        for p in personas:
+            c = p.get("category")
+            if c in counts:
+                counts[c] += 1
+        logger.info(
+            f"Registered {registered} persona agents from personas.json "
+            f"(system={counts['system']} enhanced={counts['enhanced']} master={counts['master']})"
+        )
+        return  # persona mode — skip the legacy anonymous registration below
+
+    # ── Legacy fallback: anonymous agent_0..agent_{N-1} ──
+    logger.warning("personas.json not found; registering legacy anonymous agents")
     for i, (model_name, llm_client) in enumerate(per_agent_clients):
         agent = MinimalAgent(
             agent_id=f"agent_{i}",
@@ -340,7 +521,7 @@ def _register_minimal_agents_multi(registry, per_agent_clients: list):
             model_name=model_name,
         )
         registry.register_agent(agent)
-    logger.info(f"Registered {len(per_agent_clients)} minimal agents")
+    logger.info(f"Registered {len(per_agent_clients)} legacy anonymous minimal agents")
 
 
 async def seed_on_startup(app_state: dict):

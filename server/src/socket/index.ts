@@ -16,6 +16,15 @@ import {
   runConsensusEngine,
   sortConsensusAgentEntries,
 } from '../services/consensus.service.js';
+import {
+  getAnalystById,
+  SYSTEM_ANALYST_IDS,
+  validateAnalystSelection,
+  type PublicAnalystPersona,
+} from '../catalogs/analysts.js';
+import { extractAsset } from '../services/assetExtractor.js';
+import { runAegeanDeepAnalysis } from '../services/aegeanDeepAnalysis.service.js';
+import { transformAegeanDeepAnalysis } from '../services/aegeanDeepAnalysisTransform.js';
 import { consumeQuota } from '../services/subscription.service.js';
 import { consumeGuestAuto, GUEST_CONFIG } from '../services/guest.service.js';
 import * as crypto from 'crypto';
@@ -1047,7 +1056,7 @@ Text: "${query}"`;
       }
     });
 
-    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[] }) => {
+    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[] }) => {
       const userContent = typeof data?.content === 'string' ? data.content : '';
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
@@ -1229,6 +1238,111 @@ Text: "${query}"`;
       const requestStartedAt = Date.now();
       const sinceRequestStart = () => Date.now() - requestStartedAt;
       const asSeconds = (ms: number) => (ms / 1000).toFixed(3);
+
+      // ══════════════════════════════════════════════════════════════════
+      //   Aegean Deep-Dive early gate (feature-flag gated; OFF by default)
+      //   See: docs/aegean-deep-analysis-migration.md
+      //
+      //   When ENABLE_AEGEAN_DEEP_ANALYSIS=true and user picks Roundtable
+      //   with a single-asset question → route to aegean /investment/analyze.
+      //   Non-single-asset → silent fallback to Fast mode.
+      //   Flag OFF (default) or asset extraction failure → flow through to
+      //   legacy Roundtable path (zero behavioral change).
+      // ══════════════════════════════════════════════════════════════════
+      if (
+        process.env.ENABLE_AEGEAN_DEEP_ANALYSIS === 'true' &&
+        data.mode === 'roundtable' &&
+        !hasImages
+      ) {
+        try {
+          const asset = await extractAsset(userContent);
+          if (asset) {
+            // ── Single-asset → route to aegean deep-dive ──
+            console.log(
+              `[deep-dive] routing to aegean: symbol=${asset.symbol} market=${asset.market} type=${asset.asset_type}`,
+            );
+
+            // Minimal stepper progression so the Workbench UI animates.
+            // Phase 2 will emit fine-grained events from aegean's event_sink;
+            // for v1 we just bookend the stepper around the single HTTP call.
+            emitter.emitModule('route', 'done', { mode: 'roundtable', route: 'aegean-deep-dive' });
+            emitter.emitModule('summon', 'done', { roster: asset.symbol });
+            emitter.emitModule('research', 'active', { provider: 'aegean' });
+
+            const aegeanRaw = await runAegeanDeepAnalysis(userId, asset, userContent);
+
+            emitter.emitModule('research', 'done', { provider: 'aegean' });
+            emitter.emitModule('debate', 'done', {
+              roundsUsed: aegeanRaw.consensus?.rounds_used ?? 1,
+            });
+            emitter.emitModule('consensus', 'done', {
+              action: aegeanRaw.recommendation?.action,
+              confidence: aegeanRaw.recommendation?.confidence,
+            });
+
+            const transformed = transformAegeanDeepAnalysis(aegeanRaw, userContent);
+            const finalMarkdown = transformed.consensus.finalAnswer;
+
+            // Persist assistant message with the transformed result so history
+            // replay shows the same content.
+            if (!isGuest) {
+              try {
+                await prisma.chatMessage.create({
+                  data: {
+                    userId,
+                    sessionId,
+                    role: 'assistant',
+                    content: finalMarkdown,
+                    metadata: stringifyChatMeta({
+                      consensusResult: transformed,
+                      deepDive: transformed.deepDive,
+                      mode: 'roundtable',
+                      provider: 'aegean-investment-analyze',
+                      assetSymbol: asset.symbol,
+                      assetMarket: asset.market,
+                      assetType: asset.asset_type,
+                    }),
+                  },
+                });
+              } catch (dbErr) {
+                console.warn('[deep-dive] DB persist failed:', (dbErr as Error).message);
+              }
+            }
+
+            const dur = Math.round(sinceRequestStart() / 1000);
+            emitter.emitModule('report', 'done', { duration: dur });
+            emitter.emitModule('done', 'completed', { duration: dur });
+            emitter.emitStreamDone(finalMarkdown, { sources: [] });
+
+            // Session cleanup — mirror legacy paths so sweep doesn't flag as stale.
+            activeChatSessions.delete(sessionId);
+            chatSessionStartTimes.delete(sessionId);
+            finishChatReplayBuffer(sessionId);
+            chatAbortControllers.delete(sessionId);
+
+            console.log(
+              `[deep-dive] ✅ completed: symbol=${asset.symbol} elapsed_s=${asSeconds(sinceRequestStart())}`,
+            );
+            return;
+          }
+
+          // ── No single asset → silent fallback to Fast mode ──
+          console.log(`[deep-dive] no asset detected, falling back to Fast mode`);
+          data.mode = 'fast';
+          socket.emit('agent:chat:info', {
+            sessionId,
+            hint: '未识别到具体资产，已切换到 Fast 模式',
+          });
+          // Flow through to legacy handler (now in Fast branch)
+        } catch (err) {
+          // Aegean call failure → flow through to legacy Roundtable. User
+          // still gets an answer; we just lose the deep-dive enhancement.
+          console.warn(
+            '[deep-dive] failed, falling through to legacy Roundtable:',
+            (err as Error).message,
+          );
+        }
+      }
 
       let routeImageDigest = '';
       if (hasImages) {
@@ -2800,56 +2914,74 @@ For each guru in the simulation data, create a detailed subsection. If the user 
         );
       };
       try {
-        console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
-        const synthesisStream = await aiService.chatStream(
-          [{ role: 'user', content: synthesizePrompt }],
-          'superagent',
-          undefined,
-          synthesisMaxTokens,
-          synthesisModelOverride,
-        );
-        console.log('[agent:chat] Synthesis stream obtained, reading...');
-        const synReader = synthesisStream.getReader();
-        const synDecoder = new TextDecoder();
+        // ──────────────────────────────────────────────────────────────────
+        // Phase 1 synthesis: turn raw tool output (contextString) into a
+        // polished markdown draft streamed to the user (Fast mode) or used
+        // as input to the consensus debate (legacy Roundtable).
+        //
+        // ⚡ Optimization (2026-04-23): in Roundtable mode we skip this LLM
+        // call entirely. The consensus debate + final Deep Research pass
+        // already consume the raw contextString — running a pre-synthesis
+        // burns 10-20s with no material quality gain. synFullContent stays
+        // as an empty string; downstream blocks treat that as "no draft".
+        // ──────────────────────────────────────────────────────────────────
         let synFullContent = '';
-        let synBuffer = '';
         let synthesisFirstTokenAt: number | null = null;
+        if (!isDeepResearch) {
+          console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
+          const synthesisStream = await aiService.chatStream(
+            [{ role: 'user', content: synthesizePrompt }],
+            'superagent',
+            undefined,
+            synthesisMaxTokens,
+            synthesisModelOverride,
+          );
+          console.log('[agent:chat] Synthesis stream obtained, reading...');
+          const synReader = synthesisStream.getReader();
+          const synDecoder = new TextDecoder();
+          let synBuffer = '';
 
-        while (true) {
-          const { done, value } = await synReader.read();
-          if (done || isAborted()) {
-            if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
-              try {
-                const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) {
-                  if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
-                  synFullContent += delta;
-                  if (!isDeepResearch) streamToChat(delta);
-                }
-              } catch (e) { }
+          while (true) {
+            const { done, value } = await synReader.read();
+            if (done || isAborted()) {
+              if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
+                try {
+                  const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                    synFullContent += delta;
+                    streamToChat(delta);
+                  }
+                } catch (e) { }
+              }
+              break;
             }
-            break;
-          }
-          synBuffer += synDecoder.decode(value, { stream: true });
-          const lines = synBuffer.split('\n');
-          synBuffer = lines.pop() || '';
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('data: ')) {
-              const sseData = trimmed.slice(6).trim();
-              if (sseData === '[DONE]') continue;
-              try {
-                const parsed = JSON.parse(sseData);
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) {
-                  if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
-                  synFullContent += delta;
-                  if (!isDeepResearch) streamToChat(delta);
-                }
-              } catch (e) { }
+            synBuffer += synDecoder.decode(value, { stream: true });
+            const lines = synBuffer.split('\n');
+            synBuffer = lines.pop() || '';
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                const sseData = trimmed.slice(6).trim();
+                if (sseData === '[DONE]') continue;
+                try {
+                  const parsed = JSON.parse(sseData);
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                    synFullContent += delta;
+                    streamToChat(delta);
+                  }
+                } catch (e) { }
+              }
             }
           }
+        } else {
+          console.log(
+            `[agent:chat] Roundtable mode: skipping Phase 1 LLM synthesis (saves ~10-20s); ` +
+              `consensus + deep-research will consume raw contextString directly (${contextString.length} chars)`,
+          );
         }
 
         if (isAborted()) {
@@ -2913,8 +3045,71 @@ Focus on:
 3. Main risks to your thesis
 4. Specific price levels or targets if applicable
 
-Research context:\n${synFullContent}${langInstruction}`;
-            const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
+Research context:\n${synFullContent || contextString}${langInstruction}`;
+            // Pull analyst roster from frontend (Roundtable UI ≥5 selection).
+            const analystIdsRaw = Array.isArray(data.analystIds) && data.analystIds.length > 0
+              ? data.analystIds
+              : undefined;
+            // Stage 6 validation: strict reject if analystIds is present but
+            // invalid (<5, >max, missing system, unknown IDs). If analystIds
+            // is entirely absent → legacy fallback to 4 system (covers Auto
+            // mode routed to Roundtable where UI didn't build a roster).
+            let analystIds = analystIdsRaw;
+            if (analystIdsRaw) {
+              const v = validateAnalystSelection(analystIdsRaw);
+              if (!v.ok) {
+                console.warn(
+                  `[agent:chat] REJECT invalid analystIds (${v.error}) sessionId=${sessionId}`,
+                );
+                socket.emit('agent:chat:error', {
+                  sessionId,
+                  error: v.error ?? 'Invalid analyst selection',
+                  code: 'invalid_analyst_selection',
+                });
+                // Cleanup & short-circuit
+                activeChatSessions.delete(sessionId);
+                chatSessionStartTimes.delete(sessionId);
+                finishChatReplayBuffer(sessionId);
+                chatAbortControllers.delete(sessionId);
+                return;
+              }
+              analystIds = v.normalizedIds;
+            }
+            const effectiveRosterIds: string[] = analystIds ?? [...SYSTEM_ANALYST_IDS];
+            console.log(
+              `[agent:chat] roundtable consensus: analystIds=${effectiveRosterIds.join(',')} ` +
+                `task_len=${consensusTask.length}`,
+            );
+
+            // ▶ NEW EVENT: tell the frontend which analysts are in this run,
+            // with enough metadata to render the AgentRoom column without
+            // needing another round-trip to /api/analysts.
+            const rosterPayload: PublicAnalystPersona[] = effectiveRosterIds
+              .map((id) => {
+                const p = getAnalystById(id);
+                return p
+                  ? {
+                      id: p.id,
+                      displayName: p.displayName,
+                      role: p.role,
+                      initials: p.initials,
+                      color: p.color,
+                      category: p.category,
+                    }
+                  : null;
+              })
+              .filter((x): x is PublicAnalystPersona => x !== null);
+            socket.emit('agent:chat:analysts_selected', {
+              sessionId,
+              analysts: rosterPayload,
+            });
+
+            const consensusResult = await runConsensusEngine(
+              userId,
+              'roundtable',
+              consensusTask,
+              { analystIds },
+            );
             savedConsensusResult = consensusResult;
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
@@ -2934,6 +3129,59 @@ Research context:\n${synFullContent}${langInstruction}`;
             // Emit round-by-round progress so the frontend graph updates progressively
             for (let r = 1; r <= roundsUsed; r++) {
               emitter.emitModule('consensus', 'active', { status: 'discussing', round: r, maxRounds: 3 });
+            }
+
+            // ▶ NEW EVENTS: fine-grained per-round / per-agent updates so the
+            // frontend Debate Tab, Graph, and Activity Log can render live
+            // (rather than popping everything in at the very end).
+            // Rationale: aegean /consensus is synchronous, so we don't get
+            // events DURING the call; we simulate gradual reveal here with a
+            // staggered emit loop so the UI animates nicely.
+            const STAGGER_MS = 120;
+            let stagger = 0;
+            for (let r = 1; r <= roundsUsed; r++) {
+              setTimeout(() => {
+                if (isAborted()) return;
+                socket.emit('agent:chat:round_started', {
+                  sessionId,
+                  round: r,
+                  maxRounds: roundsUsed,
+                });
+              }, stagger);
+              stagger += STAGGER_MS;
+              // In this final pass we only have the last round's responses
+              // from the /consensus endpoint. Fan them out per round so the UI
+              // Debate Tab timeline gets something for every round.
+              for (const resp of agentResponses) {
+                const analystIdCaptured: string = String(resp.agentId ?? '');
+                const answerCaptured: string = String(resp.answer ?? '');
+                const confCaptured: number =
+                  typeof resp.confidence === 'number' ? resp.confidence : 0;
+                const roundCaptured = r;
+                setTimeout(() => {
+                  if (isAborted()) return;
+                  socket.emit('agent:chat:agent_responded', {
+                    sessionId,
+                    analystId: analystIdCaptured,
+                    round: roundCaptured,
+                    confidence: confCaptured,
+                    // Keep answer bounded so very long LLM outputs don't bloat
+                    // the socket frame; full answer is still in consensusResult.
+                    summary: answerCaptured.slice(0, 400),
+                    answer: answerCaptured,
+                  });
+                }, stagger);
+                stagger += STAGGER_MS;
+              }
+              setTimeout(() => {
+                if (isAborted()) return;
+                socket.emit('agent:chat:round_completed', {
+                  sessionId,
+                  round: r,
+                  maxRounds: roundsUsed,
+                });
+              }, stagger);
+              stagger += STAGGER_MS;
             }
 
             if (agentResponses.length > 0) {
@@ -2975,7 +3223,11 @@ Research context:\n${synFullContent}${langInstruction}`;
 
             // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate
             emitter.emitModule('consensus', 'active', { status: 'synthesizing', round: roundsUsed + 1, maxRounds: 3 });
-            const deepResearchInput = `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`;
+            // In Roundtable mode synFullContent is empty (Phase 1 skipped),
+            // so fold the "Initial Analysis Draft" section only when it exists.
+            const deepResearchInput = synFullContent
+              ? `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`
+              : `Raw Research Data:\n${contextString}${expertDebateContext}`;
             const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
 
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
@@ -3076,6 +3328,12 @@ Research context:\n${synFullContent}${langInstruction}`;
                   ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
                 },
                 consensusResult: savedConsensusResult ?? undefined,
+                // Persist the roster separately from consensusResult so the
+                // session history page can replay AgentRoom / Debate Tab
+                // without re-parsing consensusResult.agentResponses.
+                ...(isDeepResearch && data.analystIds?.length
+                  ? { analystIds: data.analystIds }
+                  : {}),
                 quoteCard: savedQuoteCard ?? undefined,
                 xProfileCard: savedXProfileCard ?? undefined,
                 sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
