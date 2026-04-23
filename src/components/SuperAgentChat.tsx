@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SuperAgentChat — Chat Detail Page
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
@@ -47,16 +47,33 @@ const HtmlReportFrame: React.FC<{ html: string; isStreaming: boolean }> = ({ htm
         if (!iframe) return;
         // Strip any markdown code fences the LLM might have wrapped around
         const cleanHtml = html.replace(/^```html?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+        const fontOrigin = window.location.origin;
         const fullDoc = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root { --color-text-primary: #1a1a1a; --color-text-secondary: #666; --color-text-tertiary: #999; --color-background-secondary: #f5f5f5; --color-border-tertiary: #e5e5e5; --border-radius-md: 8px; --border-radius-lg: 12px; --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Semibold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Bold.woff2') format('woff2'); font-weight: 700; font-display: swap; }
+:root { --color-text-primary: #1a1a1a; --color-text-secondary: #666; --color-text-tertiary: #999; --color-background-secondary: #f5f5f5; --color-border-tertiary: #e5e5e5; --border-radius-md: 8px; --border-radius-lg: 12px; --font-sans: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.6; }
+body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.75; font-size: 15px; }
 ul, ol { padding-left: 1.2em; margin: 0.5rem 0; text-align: left; }
-li { margin-bottom: 4px; }
+li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
 </style>
 </head><body>${cleanHtml}
+<style id="loka-report-override">
+  /* Force-upgrade typography for both new and historical reports */
+  .report-wrap, .report-wrap p, .report-wrap li, .report-wrap td, .report-wrap .guru-analysis, .report-wrap .debate-text, .report-wrap .consensus-detail, .report-wrap .risk-item { font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; }
+  /* Headings and titles use Inter (geometric) for report-like authority */
+  .report-wrap h1, .report-wrap h2, .report-wrap h3, .report-wrap h4, .report-wrap .report-title, .report-wrap .section-title, .report-wrap .consensus-verdict, .report-wrap .report-label, .report-wrap .guru-name, .report-wrap th { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; letter-spacing: -0.01em; }
+  .report-wrap { font-size: 15px !important; line-height: 1.75 !important; }
+  .report-wrap p, .report-wrap li, .report-wrap .guru-analysis, .report-wrap .debate-text, .report-wrap .consensus-detail, .report-wrap .risk-item { font-size: 15px !important; line-height: 1.75 !important; }
+  .report-wrap .report-title { font-size: 26px !important; font-weight: 700 !important; line-height: 1.35 !important; letter-spacing: -0.015em !important; }
+  .report-wrap .consensus-verdict { font-size: 20px !important; font-weight: 700 !important; letter-spacing: -0.01em !important; }
+  .report-wrap .guru-name { font-size: 16px !important; font-weight: 600 !important; }
+  .report-wrap .cmp-table { font-size: 14px !important; }
+</style>
 <script>
   // Strip follow-up questions section — the frontend renders it separately as interactive buttons.
   // The HTML generation prompt says not to include it, but the LLM sometimes adds it anyway.
@@ -4008,7 +4025,7 @@ const ThinkingProcessSidePanel: React.FC<{
     })();
 
     return (
-        <div className="flex flex-col h-full bg-white">
+        <div className="flex flex-col h-full">
             {!hideHeader && (
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <div>
@@ -5990,7 +6007,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
                     {/* Chat column header (above chat content only) */}
-                    <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+                    <div className="flex items-center justify-between px-5 py-4 shrink-0">
                         <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
                         <PlanUpgradeEntry size="sm" hideIfMax />
                     </div>
@@ -6007,7 +6024,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             }}
                                         >
                                             <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
-                                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
+                                                <p className="px-2 pb-2 text-[13px] font-bold text-gray-900 tracking-tight sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
                                                 <ul className="space-y-0.5">
                                                     {(() => {
                                                         // Filter and optimize TOC hierarchy:
@@ -6848,7 +6865,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     {/* Input */}
                     <div className="absolute bottom-0 left-0 right-0 pt-2 pb-4 px-4 md:px-8 pointer-events-none" style={{ zIndex: 10 }}>
                         <div className="max-w-2xl mx-auto pointer-events-auto">
-                            <div className="bg-white/90 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-gray-100" style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06)' }}>
+                            <div className="bg-white/95 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-black/[0.03]" style={{ boxShadow: '0 12px 48px -8px rgba(15,23,42,0.18), 0 4px 16px -2px rgba(15,23,42,0.10), 0 1px 3px rgba(15,23,42,0.06)' }}>
                                 {/* Voice overlay: Recording */}
                                 {voiceState === 'recording' && (
                                     <div className="absolute inset-x-0 top-0 bottom-[52px] flex items-center justify-center">
@@ -7007,13 +7024,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 {/* ── Unified Process Panel (floating card, same for all modes) ── */}
                 {showThinkingPanel && currentThinking && (
                     <div className="w-[440px] shrink-0 p-3 pl-0">
-                        <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
-                            <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
-                                <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
+                        <div className="h-full flex flex-col overflow-hidden bg-[#fafafb] rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
+                            <div className="flex items-center px-4 py-3 gap-2 shrink-0">
                                 <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Process</span>
                                 <div className="flex-1" />
                                 <button onClick={() => setShowThinkingPanel(false)}
-                                    className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
+                                    className="w-7 h-7 rounded-lg bg-white/60 hover:bg-white flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
                                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                                 </button>
                             </div>

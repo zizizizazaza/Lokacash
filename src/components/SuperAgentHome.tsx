@@ -1084,7 +1084,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         {!selectedAgent && (
           <div className="hero-actions pt-6 pb-5 px-4 flex flex-col items-center gap-3">
             <div className="flex items-center gap-2 flex-wrap justify-center">
-              {FEATURED_AGENTS.map(a => {
+              {FEATURED_AGENTS.filter(a => !(domain === 'web3' && a.id === 'guru-council')).map(a => {
                 const Ic = a.icon;
                 return (
                   <button key={a.id}

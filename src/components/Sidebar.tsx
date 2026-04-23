@@ -251,13 +251,13 @@ export const Sidebar: React.FC<{
   });
 
   /* theme classes */
-  const bg = isDark ? 'bg-[#1a1a1a] border-[#2a2a2a]' : 'bg-white border-gray-100';
+  const bg = isDark ? 'bg-[#1a1a1a] border-[#2a2a2a]' : 'bg-[#f7f7f8] border-transparent';
   const textPrimary = isDark ? 'text-gray-100' : 'text-gray-900';
   const textSecondary = isDark ? 'text-gray-400' : 'text-gray-500';
   const textMuted = isDark ? 'text-gray-500' : 'text-gray-400';
-  const hoverBg = isDark ? 'hover:bg-white/8' : 'hover:bg-gray-100';
-  const activeBg = isDark ? 'bg-white/10 text-white font-semibold' : 'bg-gray-100 text-gray-900 font-semibold';
-  const divider = isDark ? 'bg-white/8' : 'bg-gray-100';
+  const hoverBg = isDark ? 'hover:bg-white/8' : 'hover:bg-black/5';
+  const activeBg = isDark ? 'bg-white/10 text-white font-semibold' : 'bg-black/8 text-gray-900 font-semibold';
+  const divider = isDark ? 'bg-white/8' : 'bg-black/5';
   const avatarBg = isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-500';
 
   /* ── Mobile Drawer Overlay ── */
@@ -378,7 +378,7 @@ export const Sidebar: React.FC<{
   /* ── Collapsed: 56px icon rail with hover tooltips ── */
   if (!expanded) return (
     <>
-      <nav className={`hidden md:flex w-14 flex-col items-center pt-3 pb-4 shrink-0 border-r ${isDark ? 'border-white/10' : 'border-gray-100'} ${bg}`}>
+      <nav className={`hidden md:flex w-14 flex-col items-center pt-3 pb-4 shrink-0 ${bg}`}>
         <button onClick={onToggle} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
           <I.Panel /><span className="rail-tip">Expand</span>
         </button>
@@ -413,7 +413,7 @@ export const Sidebar: React.FC<{
   /* ── Expanded: 256px full sidebar ── */
   return (
     <>
-      <aside className={`hidden md:flex w-64 flex-col shrink-0 border-r ${isDark ? 'border-white/10' : 'border-gray-100'} ${bg}`}>
+      <aside className={`hidden md:flex w-64 flex-col shrink-0 ${bg}`}>
         {/* Header */}
         <div className="flex items-center justify-between pl-5 pr-2 pt-5 pb-3">
           <span className={`text-[15px] font-bold tracking-tight ${textPrimary} cursor-default select-none`}>Loka</span>
