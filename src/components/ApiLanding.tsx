@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+﻿import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Web3DotWave from './Web3DotWave';
 
 /* ═══════════════════════════════════════════════
@@ -488,7 +488,7 @@ const ApiLanding: React.FC = () => {
             <span className="text-gray-300 text-sm">/</span>
             <span className="text-sm font-semibold text-gray-500 group-hover:text-gray-700 transition-colors">Developers</span>
           </a>
-          <nav className={`hidden md:flex items-center gap-8 transition-opacity duration-300 ${scrolled ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+          <nav className="hidden md:flex items-center gap-8">
             {NAV_LINKS.map(link => (
               <button key={link.href} onClick={() => scrollToSection(link.href)}
                 className="text-sm font-bold text-gray-500 hover:text-black transition-colors">
@@ -611,6 +611,31 @@ const ApiLanding: React.FC = () => {
               </a>
             </div>
           </Reveal>
+
+          <Reveal delay={400}>
+            <div className="mt-10 sm:mt-16 flex items-center gap-2 text-[11px] font-mono text-gray-500">
+              <span className="text-gray-400">$</span>
+              <code className="select-all">npm install @loka/sdk</code>
+              <span className="inline-block w-1.5 h-3 bg-black animate-pulse ml-1" />
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* ── Stats strip (numbers up front) ── */}
+      <section className="border-b border-gray-200 bg-white">
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-12 xl:px-24 grid grid-cols-2 md:grid-cols-4 divide-x divide-gray-200">
+          {[
+            { n: '4', label: 'Specialized AI agents' },
+            { n: '50+', label: 'Payment methods' },
+            { n: '190+', label: 'Countries covered' },
+            { n: '<340ms', label: 'Risk decision latency' },
+          ].map((s, i) => (
+            <div key={i} className="px-4 py-8 sm:py-10 text-center sm:text-left">
+              <div className="text-2xl sm:text-4xl font-black tracking-tight text-black">{s.n}</div>
+              <div className="text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-widest mt-2">{s.label}</div>
+            </div>
+          ))}
         </div>
       </section>
 

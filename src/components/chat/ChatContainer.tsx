@@ -112,8 +112,8 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
         if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
       })
       .catch(() => {
-        setRoundtableQuota({ used: 2, limit: 3 });
-        setFastQuota({ used: 6, limit: 10 });
+        setRoundtableQuota({ used: 1, limit: 3 });
+        setFastQuota({ used: 4, limit: 20 });
       });
   }, []);
 

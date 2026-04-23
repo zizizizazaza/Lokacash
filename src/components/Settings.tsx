@@ -9,6 +9,41 @@ interface SettingsProps {
 
 const PLAN_RANK: Record<string, number> = { free: 0, pro: 1, max: 2 };
 
+const plans = [
+    {
+        id: 'free' as const,
+        name: 'Free',
+        monthlyPrice: 0,
+        yearlyPrice: 0,
+        accent: 'gray' as const,
+        searches: { fast: '20 / week', roundtable: '3 / week' },
+        extras: ['Unlimited casual chat'],
+        cta: null,
+    },
+    {
+        id: 'pro' as const,
+        name: 'Pro',
+        monthlyPrice: 49,
+        yearlyPrice: 489,
+        accent: 'pro' as const,
+        searches: { fast: '300 / mo', roundtable: '75 / mo' },
+        extras: ['Unlimited casual chat', 'Priority response speed'],
+        cta: 'Upgrade to Pro',
+    },
+    {
+        id: 'max' as const,
+        name: 'Max',
+        monthlyPrice: 109,
+        yearlyPrice: 1087,
+        accent: 'max' as const,
+        searches: { fast: '800 / mo', roundtable: '225 / mo' },
+        extras: ['Unlimited casual chat', 'Priority response speed', 'Early access to new features'],
+        cta: 'Upgrade to Max',
+    },
+];
+
+const ANNUAL_DISCOUNT = 17;
+
 const CheckIcon = memo(({ className = '' }: { className?: string }) => (
     <svg className={`w-3 h-3 shrink-0 ${className}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />

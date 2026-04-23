@@ -118,7 +118,7 @@ import { Page } from './types';
 
 
 export const FEATURED_GROUPS = [
-  { id: 'g1', name: 'Polymarket Predictions', desc: 'Crowd-sourced market predictions 鈥?weather, elections, earnings surprises, and more.', memberCount: 3, agentCount: 2, online: 2, avatar: 'PP', color: 'bg-blue-100 text-blue-600', avatars: ['AC', 'SK', 'CW', 'LA', 'RA'] },
+  { id: 'g1', name: 'Polymarket Predictions', desc: 'Crowd-sourced market predictions — weather, elections, earnings surprises, and more.', memberCount: 3, agentCount: 2, online: 2, avatar: 'PP', color: 'bg-blue-100 text-blue-600', avatars: ['AC', 'SK', 'CW', 'LA', 'RA'] },
   { id: 'g2', name: 'Daily Market Pulse', desc: 'Hot topics, trending tickers, and breaking macro news powered by multi-agent research.', memberCount: 3, agentCount: 1, online: 2, avatar: 'DM', color: 'bg-emerald-100 text-emerald-600', avatars: ['MR', 'EZ', 'RB', 'LA'] },
   { id: 'g3', name: 'Alpha Research Circle', desc: 'Deep-dive signals: cross-asset momentum, earnings revisions, and sentiment shifts.', memberCount: 2, agentCount: 2, online: 1, avatar: 'AR', color: 'bg-violet-100 text-violet-600', avatars: ['DP', 'AT', 'LA', 'MR'] },
   { id: 'g4', name: 'Global Macro Signals', desc: 'Fed watch, inflation expectations, bond yields, and central bank policy tracking.', memberCount: 4, agentCount: 1, online: 3, avatar: 'GM', color: 'bg-amber-100 text-amber-600', avatars: ['JL', 'NP', 'TW', 'LW', 'MB'] },
@@ -281,7 +281,7 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
         id: 'intel', label: 'Recon',
         prompts: [
           'Scan the last 30 days: what is the community saying about AI coding tools?',
-          'Gather intelligence on OpenAI\'s latest moves 鈥?Reddit, X, HN combined',
+          'Gather intelligence on OpenAI\'s latest moves — Reddit, X, HN combined',
           'What do investors really think about NVIDIA after Q4? Cross-platform scan',
         ],
       },
@@ -304,9 +304,46 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
       {
         id: 'competitor', label: 'Competitor Watch',
         prompts: [
-          'Claude Code vs Cursor vs Windsurf 鈥?community sentiment comparison last 30 days',
+          'Claude Code vs Cursor vs Windsurf — community sentiment comparison last 30 days',
           'What are users complaining about with Perplexity AI recently?',
           'Monitor: how is the community reacting to Manus\'s latest update?',
+        ],
+      },
+      // ── Web3-only scenarios (hidden in Stocks) ──
+      {
+        id: 'w3-intel', label: 'On-chain Recon',
+        prompts: [
+          'Scan the last 30 days: what is the crypto community saying about Solana?',
+          'Cross-platform intel on Base L2 — Farcaster, X, and Reddit combined.',
+          'What are whales quietly accumulating this week? On-chain + social scan.',
+          'Gather signals on restaking narratives — EigenLayer, Ether.fi, Renzo.',
+        ],
+      },
+      {
+        id: 'w3-narratives', label: 'Narratives',
+        prompts: [
+          'Which Web3 narratives are going viral right now — DePIN, AI agents, RWA?',
+          'Is the meme coin cycle heating up again? Cross-chain sentiment check.',
+          'What are crypto researchers saying about modular vs monolithic L1s?',
+          'Track the "ETF inflows" narrative — news, on-chain, and sentiment.',
+        ],
+      },
+      {
+        id: 'w3-tokens', label: 'Token Watch',
+        prompts: [
+          'Sentiment and on-chain monitoring for SOL, SUI, and APT this week.',
+          'Top 5 most discussed altcoins across X and Farcaster last 7 days.',
+          'Which tokens had a sudden wallet-growth spike in the last 30 days?',
+          'Social buzz vs price action — is BTC sentiment confirming the rally?',
+        ],
+      },
+      {
+        id: 'w3-protocols', label: 'Protocol Pulse',
+        prompts: [
+          'Monitor TVL trends for Ethereum L2s — Base, Arbitrum, Optimism.',
+          'How is the community reacting to Uniswap v4 hooks?',
+          'Compare developer activity on Solana vs Ethereum vs Sui.',
+          'What are users complaining about with major CEXs this month?',
         ],
       },
     ],
@@ -371,6 +408,34 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
           'Earnings calendar: who reported today and how did the market react?',
           'Geopolitical risk update — tariffs, sanctions, and trade tensions.',
           'Crypto market daily — Bitcoin, Ethereum, and key altcoin moves.',
+        ],
+      },
+      // ── Web3-only scenarios (hidden in Stocks) ──
+      {
+        id: 'w3-majors', label: 'Majors',
+        prompts: [
+          'Daily briefing on BTC and ETH — key price action, flows, and news.',
+          'What drove the crypto market today? Top 10 movers and catalysts.',
+          'ETF flows update: BTC and ETH spot ETF net inflows today.',
+          'Overnight in crypto: funding rates, open interest, and liquidations.',
+        ],
+      },
+      {
+        id: 'w3-ecosystems', label: 'Ecosystems',
+        prompts: [
+          'Solana ecosystem news today — top dApps, memes, and launches.',
+          'Ethereum L2 recap — Base, Arbitrum, Optimism, Blast movers.',
+          'Modular stack update: Celestia, EigenDA, and rollup news.',
+          'Bitcoin ecosystem: runes, ordinals, and BTCFi news today.',
+        ],
+      },
+      {
+        id: 'w3-onchain', label: 'On-chain & Signals',
+        prompts: [
+          'On-chain highlights: large transfers, whale wallets, and CEX flows.',
+          'Which tokens had the biggest holder growth in the last 24h?',
+          'Stablecoin supply changes today — USDT, USDC, DAI on each chain.',
+          'DEX volume leaders and unusual activity across major chains today.',
         ],
       },
     ],

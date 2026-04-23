@@ -406,19 +406,18 @@ const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo })
       <div className="flex-1 min-w-0">
         <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-gray-400 mb-1.5">The Roundtable</div>
         <h3 className="text-[20px] sm:text-[22px] font-semibold text-gray-900 leading-[1.25]">
-          A dozen specialists convene.<br className="hidden sm:block" />
-          <span className="text-gray-500 font-normal">Every question, a shared view.</span>
+          Multi-agent debate, one clear answer.
         </h3>
         <p className="mt-2.5 text-[13px] leading-[1.6] text-gray-500">
-          System analysts auto-join every question — fundamentals, valuation, macro, risk.
-          Invite master lenses like Buffett, Munger, or Lynch for a different angle.
+          Bulls and bears, fundamentals and macro, risk and momentum — agents challenge each other
+          until the noise is gone. Bring in Buffett, Munger or Lynch whenever you want a harder question asked.
         </p>
         {onLiveDemo && (
           <button
             onClick={onLiveDemo}
-            className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gray-900 text-white text-[13px] font-semibold hover:bg-gray-800 transition-colors shadow-sm"
+            className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gray-100 text-gray-800 text-[13px] font-semibold hover:bg-gray-200 hover:text-gray-900 transition-colors border border-gray-200/80"
           >
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
             Roundtable Live Demo
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
           </button>
@@ -775,8 +774,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
       })
       .catch(() => {
-        setRoundtableQuota({ used: 2, limit: 3 });
-        setFastQuota({ used: 10, limit: 10 });
+        setRoundtableQuota({ used: 1, limit: 3 });
+        setFastQuota({ used: 4, limit: 20 });
       });
   }, []);
 
@@ -907,12 +906,29 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     }
   }, [newChatTs]); // eslint-disable-line
 
-  // Auto-select first scenario when entering an agent's secondary page
+  // Auto-select first scenario when entering an agent's secondary page.
+  // Respect domain filtering — in Web3, the first stocks-only scenario
+  // (e.g. research.intel) must be skipped.
   useEffect(() => {
-    if (selectedAgent && AGENT_GUIDES[selectedAgent]?.scenarios?.length) {
-      setSelectedScenario(AGENT_GUIDES[selectedAgent].scenarios![0].id);
-    }
-  }, [selectedAgent]);
+    if (!selectedAgent) return;
+    const all = AGENT_GUIDES[selectedAgent]?.scenarios;
+    if (!all || all.length === 0) return;
+    const STOCKS_ONLY = new Set([
+      'stock','public','usstock','ashare','compare','startup',
+      'region','sector','intel','demand','trending','competitor',
+    ]);
+    const WEB3_ONLY = new Set([
+      'crypto','project',
+      'w3-intel','w3-narratives','w3-tokens','w3-protocols',
+      'w3-majors','w3-ecosystems','w3-onchain',
+    ]);
+    const first = all.find(s => {
+      if (domain === 'stocks' && WEB3_ONLY.has(s.id)) return false;
+      if (domain === 'web3' && STOCKS_ONLY.has(s.id)) return false;
+      return true;
+    }) ?? all[0];
+    setSelectedScenario(first.id);
+  }, [selectedAgent, domain]);
 
   useEffect(() => {
     if (input) return;
@@ -1294,8 +1310,16 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
             );
           })}
         </div>
-        <div className="hidden md:block">
-          <PlanUpgradeEntry size="md" hideIfMax />
+        <div className="hidden md:flex items-center gap-2">
+          <button
+            onClick={() => navigate('/developers')}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-gray-700 bg-white hover:bg-gray-50 border border-gray-200 hover:border-gray-300 transition-colors"
+            title="Get Loka Skill"
+          >
+            <I.Code />
+            <span>Get Loka Skill</span>
+          </button>
+          <PlanUpgradeEntry size="sm" hideIfMax />
         </div>
       </div>
       {/* ── Hero + Input ── */}
@@ -1453,17 +1477,62 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           {/* Agent Guide — only when an agent is selected */}
           {selectedAgent && AGENT_GUIDES[selectedAgent] && (() => {
             // Scenario IDs that only make sense in one domain. Anything
-            // not listed here is shown in both domains.
-            const STOCKS_ONLY_SCENARIOS = new Set(['stock', 'public', 'usstock', 'ashare']);
-            const WEB3_ONLY_SCENARIOS   = new Set(['crypto', 'project']);
+            // not listed here is shown in both domains but then further
+            // filtered by prompt-level keywords (see below).
+            const STOCKS_ONLY_SCENARIOS = new Set([
+              'stock', 'public', 'usstock', 'ashare', 'compare', 'startup',
+              'region', 'sector',
+              // Signal Radar (research) AI-ecosystem scenarios are
+              // stock/tech-flavoured, not crypto.
+              'intel', 'demand', 'trending', 'competitor',
+            ]);
+            const WEB3_ONLY_SCENARIOS = new Set([
+              'crypto', 'project',
+              // Signal Radar web3 scenarios
+              'w3-intel', 'w3-narratives', 'w3-tokens', 'w3-protocols',
+              // Daily News web3 scenarios
+              'w3-majors', 'w3-ecosystems', 'w3-onchain',
+            ]);
             const filterScenarios = (scenarios: NonNullable<typeof AGENT_GUIDES[string]['scenarios']>) =>
               scenarios.filter(s => {
                 if (domain === 'stocks' && WEB3_ONLY_SCENARIOS.has(s.id)) return false;
-                if (domain === 'web3'   && STOCKS_ONLY_SCENARIOS.has(s.id)) return false;
+                if (domain === 'web3' && STOCKS_ONLY_SCENARIOS.has(s.id)) return false;
                 return true;
               });
+
+            // Prompt-level keyword filter. Web3 drops anything that reads
+            // as a pure stock prompt (common tickers / companies / macros).
+            // Stocks drops anything that reads as a pure crypto prompt.
+            const STOCKY_RE = /\b(NVIDIA|NVDA|Tesla|TSLA|Apple|AAPL|Microsoft|MSFT|Google|GOOGL|Amazon|AMZN|Palantir|PLTR|CrowdStrike|CRWD|Snowflake|SNOW|Datadog|DDOG|Meta|META|BYD|Grab|GoTo|S&P\s?500|Dow|Nasdaq|A-share|Hong Kong|Fed|CPI|FDA|semiconductor|equit(y|ies)|dividend|ETF|earnings|valuation|stock)\b/i;
+            const CRYPTO_RE = /\b(BTC|ETH|SOL|Bitcoin|Ethereum|Solana|Sui|Aptos|L1|L2|DeFi|on-chain|onchain|token(omics)?|crypto|Eigenlayer|Celestia|Base\s?(L2|\()|restaking|Coinbase)\b/i;
+
+            const promptFitsDomain = (p: string) => {
+              if (domain === 'web3') {
+                if (STOCKY_RE.test(p) && !CRYPTO_RE.test(p)) return false;
+                return true;
+              }
+              // stocks domain
+              if (CRYPTO_RE.test(p) && !STOCKY_RE.test(p)) return false;
+              return true;
+            };
+
             const rawScenarios = AGENT_GUIDES[selectedAgent].scenarios;
-            const scenarios = rawScenarios ? filterScenarios(rawScenarios) : undefined;
+            const scenarios = rawScenarios
+              ? filterScenarios(rawScenarios)
+                  .map(s => ({ ...s, prompts: s.prompts.filter(promptFitsDomain) }))
+                  .filter(s => s.prompts.length > 0)
+              : undefined;
+
+            // Which agents keep the secondary scenario pills:
+            //   · Stocks domain: Guru Council, Daily News, Signal Radar.
+            //   · Web3 domain: Daily News, Signal Radar (Guru Council is
+            //     stocks-only anyway).
+            const PILL_AGENTS_STOCKS = new Set(['guru-council', 'daily-news', 'research']);
+            const PILL_AGENTS_WEB3 = new Set(['daily-news', 'research']);
+            const showPills =
+              ((domain === 'stocks' && PILL_AGENTS_STOCKS.has(selectedAgent)) ||
+               (domain === 'web3' && PILL_AGENTS_WEB3.has(selectedAgent))) &&
+              !!scenarios && scenarios.length > 0;
             return (
             <div className="hero-guide space-y-3" style={{ animation: 'fade-up 0.35s var(--ease-out-expo) both' }}>
 
@@ -1474,14 +1543,14 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                 </div>
               )}
 
-              {scenarios && scenarios.length > 0 && (
+              {showPills && (
                 <div className="flex flex-wrap gap-2">
-                  {scenarios.map(s => (
+                  {scenarios!.map(s => (
                     <button
                       key={s.id}
                       onClick={() => setSelectedScenario(selectedScenario === s.id ? null : s.id)}
-                      className={`scenario-pill px-3 py-1.5 rounded-full text-[12px] font-medium border ${selectedScenario === s.id
-                        ? 'bg-gray-900 text-white border-gray-900'
+                      className={`scenario-pill px-3 py-1.5 rounded-full text-[12px] font-medium border transition-colors ${selectedScenario === s.id
+                        ? 'bg-gray-700 text-white border-gray-700'
                         : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:text-gray-900'
                         }`}
                     >{s.label}</button>
@@ -1491,9 +1560,39 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
               {(() => {
                 const guide = AGENT_GUIDES[selectedAgent];
-                const prompts = scenarios
-                  ? scenarios.find(s => s.id === selectedScenario)?.prompts ?? []
-                  : guide.prompts ?? [];
+                let prompts: string[] = [];
+                if (showPills) {
+                  // Pills visible: show prompts for the active scenario (or
+                  // the first one by default).
+                  const activeId = selectedScenario ?? scenarios![0]?.id;
+                  prompts = scenarios!.find(s => s.id === activeId)?.prompts ?? [];
+                } else if (scenarios && scenarios.length > 0) {
+                  // Pills hidden: flatten one prompt per scenario so the
+                  // user still sees a representative spread of use cases.
+                  const seen = new Set<string>();
+                  for (const s of scenarios) {
+                    for (const p of s.prompts) {
+                      if (seen.has(p)) continue;
+                      seen.add(p);
+                      prompts.push(p);
+                      break; // one per scenario
+                    }
+                  }
+                  // Top up to ~6 items from remaining scenario prompts.
+                  if (prompts.length < 6) {
+                    for (const s of scenarios) {
+                      for (const p of s.prompts) {
+                        if (seen.has(p)) continue;
+                        seen.add(p);
+                        prompts.push(p);
+                        if (prompts.length >= 6) break;
+                      }
+                      if (prompts.length >= 6) break;
+                    }
+                  }
+                } else {
+                  prompts = guide.prompts ?? [];
+                }
                 if (!prompts.length) return null;
                 return (
                   <div className="space-y-1">

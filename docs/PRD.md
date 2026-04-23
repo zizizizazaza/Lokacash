@@ -384,9 +384,9 @@ Founder 可以将公司上架到 Loka，获得曝光。
 
 | 计划 | 月付 | 年付 | Fast 配额 | Roundtable 配额 | 重置周期 | 附加权益 |
 |------|------|------|-----------|-----------------|----------|----------|
-| **Free** | $0 | $0 | 10 次 | 2 次 | **每 7 天** | Unlimited casual chat |
-| **Pro** | $39 | $389 (≈17% off) | 200 次 | 50 次 | **每 30 天** | Unlimited casual chat, Priority response speed |
-| **Max** | $99 | $987 (≈17% off) | 500 次 | 150 次 | **每 30 天** | Unlimited casual chat, Priority response speed, Early access to new features |
+| **Free** | $0 | $0 | 20 次 | 3 次 | **每 7 天** | Unlimited casual chat |
+| **Pro** | $49 | $489 (≈17% off) | 300 次 | 75 次 | **每 30 天** | Unlimited casual chat, Priority response speed |
+| **Max** | $109 | $1087 (≈17% off) | 800 次 | 225 次 | **每 30 天** | Unlimited casual chat, Priority response speed, Early access to new features |
 
 **关键说明：**
 - **滚动周期重置**，不固定在周一或月初：
