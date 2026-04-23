@@ -7018,15 +7018,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
                                             disabled={!isStreaming && !inputText.trim()}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ml-0.5 ${isStreaming
-                                                    ? 'bg-gray-900 text-white hover:bg-gray-700'
+                                            title={isStreaming ? 'Stop generating' : 'Send'}
+                                            aria-label={isStreaming ? 'Stop generating' : 'Send'}
+                                            className={`relative w-8 h-8 rounded-lg flex items-center justify-center transition-all ml-0.5 group ${isStreaming
+                                                    ? 'bg-white text-gray-700 border border-gray-300 hover:border-red-400 hover:text-red-500 hover:bg-red-50 shadow-sm'
                                                     : inputText.trim()
-                                                        ? 'bg-gray-900 text-white hover:bg-gray-800'
+                                                        ? 'bg-gray-900 text-white hover:bg-gray-800 shadow-sm'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                                                 }`}
                                         >
                                             {isStreaming ? (
-                                                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                                                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3" /></svg>
                                             ) : (
                                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
                                             )}

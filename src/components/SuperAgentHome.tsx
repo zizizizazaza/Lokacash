@@ -406,7 +406,7 @@ const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo })
       <div className="flex-1 min-w-0">
         <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-gray-400 mb-1.5">The Roundtable</div>
         <h3 className="text-[20px] sm:text-[22px] font-semibold text-gray-900 leading-[1.25]">
-          Multi-agent debate, one clear answer.
+          Multi-agent debate, persuade, vote.
         </h3>
         <p className="mt-2.5 text-[13px] leading-[1.6] text-gray-500">
           Bulls and bears, fundamentals and macro, risk and momentum — agents challenge each other
@@ -476,14 +476,14 @@ const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo })
      - /search/trending    → marquee of today's most-searched tokens
    Both are cached in localStorage for 30 min so we don't hammer the API
    across navigations. Fallbacks (below) keep the UI useful if offline. */
-type PulseCoin = { sym: string; name: string; price: number; chg: number; spark: number[] };
+type PulseCoin = { sym: string; name: string; price: number; chg: number; spark: number[]; icon?: string };
 const PULSE_FALLBACK_COINS: PulseCoin[] = [
-  { sym: 'BTC', name: 'Bitcoin',  price: 97420, chg:  2.4, spark: [36,34,33,37,40,42,41,44,46,45,48,52,50,53,55,58,56,59,62,60] },
-  { sym: 'ETH', name: 'Ethereum', price:  3418, chg: -1.1, spark: [60,62,59,57,58,55,54,56,53,51,52,50,48,49,47,46,48,45,44,46] },
-  { sym: 'SOL', name: 'Solana',   price:   214, chg:  5.8, spark: [30,32,31,33,36,35,39,42,40,44,48,46,50,54,52,56,58,55,60,64] },
-  { sym: 'BNB', name: 'BNB',      price:   612, chg:  0.9, spark: [40,42,41,43,42,44,43,45,44,46,45,47,46,48,47,49,48,50,49,51] },
-  { sym: 'XRP', name: 'XRP',      price:   2.38,chg: -2.3, spark: [55,54,52,53,51,50,48,49,47,46,45,44,43,42,41,40,41,39,38,37] },
-  { sym: 'DOGE',name: 'Dogecoin', price:   0.34,chg:  4.1, spark: [30,31,33,32,34,36,35,38,40,39,42,41,44,46,45,48,47,50,52,54] },
+  { sym: 'BTC', name: 'Bitcoin',  price: 97420, chg:  2.4, spark: [36,34,33,37,40,42,41,44,46,45,48,52,50,53,55,58,56,59,62,60], icon: 'https://assets.coingecko.com/coins/images/1/small/bitcoin.png' },
+  { sym: 'ETH', name: 'Ethereum', price:  3418, chg: -1.1, spark: [60,62,59,57,58,55,54,56,53,51,52,50,48,49,47,46,48,45,44,46], icon: 'https://assets.coingecko.com/coins/images/279/small/ethereum.png' },
+  { sym: 'SOL', name: 'Solana',   price:   214, chg:  5.8, spark: [30,32,31,33,36,35,39,42,40,44,48,46,50,54,52,56,58,55,60,64], icon: 'https://assets.coingecko.com/coins/images/4128/small/solana.png' },
+  { sym: 'BNB', name: 'BNB',      price:   612, chg:  0.9, spark: [40,42,41,43,42,44,43,45,44,46,45,47,46,48,47,49,48,50,49,51], icon: 'https://assets.coingecko.com/coins/images/825/small/bnb-icon2_2x.png' },
+  { sym: 'XRP', name: 'XRP',      price:   2.38,chg: -2.3, spark: [55,54,52,53,51,50,48,49,47,46,45,44,43,42,41,40,41,39,38,37], icon: 'https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png' },
+  { sym: 'DOGE',name: 'Dogecoin', price:   0.34,chg:  4.1, spark: [30,31,33,32,34,36,35,38,40,39,42,41,44,46,45,48,47,50,52,54], icon: 'https://assets.coingecko.com/coins/images/5/small/dogecoin.png' },
 ];
 const PULSE_FALLBACK_TRENDING: { sym: string; chg: number }[] = [
   { sym: 'WIF', chg: 18.3 }, { sym: 'JUP', chg: -4.1 }, { sym: 'ONDO', chg: 9.2 },
@@ -491,7 +491,7 @@ const PULSE_FALLBACK_TRENDING: { sym: string; chg: number }[] = [
   { sym: 'PYTH', chg: 3.9 },
 ];
 
-const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v2';
+const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v3';
 const PULSE_CACHE_TTL = 30 * 60 * 1000; // 30 min
 
 type PulseCache = { at: number; coins: PulseCoin[]; trending: { sym: string; chg: number }[] };
@@ -578,6 +578,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
             price: Number(x.current_price) || 0,
             chg: Number(x.price_change_percentage_24h) || 0,
             spark: resampleSpark(x.sparkline_in_7d?.price || [], 24),
+            icon: x.image,
           }))
           .filter(c => c.sym && c.price > 0 && !STABLE_OR_WRAPPED.test(c.sym))
           .slice(0, 6);
@@ -648,6 +649,19 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
               onClick={() => onAsk?.(`What's driving ${c.name} (${c.sym}) today?`)}
               className={`group flex items-center gap-3 px-4 sm:px-5 py-3.5 text-left transition-colors hover:bg-gray-50 border-gray-100 ${col > 0 ? 'border-l' : ''} ${row > 0 ? 'border-t' : ''}`}
             >
+              {c.icon ? (
+                <img
+                  src={c.icon}
+                  alt={c.sym}
+                  width={22}
+                  height={22}
+                  loading="lazy"
+                  className="shrink-0 w-[22px] h-[22px] rounded-full ring-1 ring-gray-200 bg-white"
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                />
+              ) : (
+                <span className="shrink-0 w-[22px] h-[22px] rounded-full bg-gray-100 text-[9px] font-bold text-gray-500 flex items-center justify-center">{c.sym.slice(0, 2)}</span>
+              )}
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-[12px] font-bold tracking-wide text-gray-800">{c.sym}</span>

@@ -1,4 +1,4 @@
-import { config } from '../config.js';
+﻿import { config } from '../config.js';
 import { CRYPTO_SYMBOLS_FOR_PROMPT } from '../constants/cryptoAssets.js';
 
 export function getGlobalTimeContext(): string {
