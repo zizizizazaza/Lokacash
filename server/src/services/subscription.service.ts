@@ -163,14 +163,21 @@ export async function getQuota(userId: string): Promise<QuotaSnapshot> {
   let sub = await getOrCreateSubscription(userId);
   sub = await lazyReset(sub);
   const plan = normalizePlan(sub.plan);
+  // Resolve caps from the live PLAN_DEFAULTS every read instead of reading
+  // sub.fastLimit / sub.roundtableLimit from the DB. Those columns get
+  // written at create/upgrade/reset time, so changing PLAN_FREE_FAST (or any
+  // quota env var) would otherwise take up to one full window (28 days for
+  // Pro/Max) to propagate to existing subscribers — not what we want during
+  // active pricing/quota tuning. Keeping the DB columns for audit purposes.
+  const defaults = PLAN_DEFAULTS[plan];
   const period = `resets ${sub.resetAt.toISOString()}`;
   return {
     plan,
     billingCycle: (sub.billingCycle === 'monthly' || sub.billingCycle === 'yearly') ? sub.billingCycle : null,
     currentPeriodEnd: sub.currentPeriodEnd ? sub.currentPeriodEnd.toISOString() : null,
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
-    fast: { used: sub.fastUsed, limit: sub.fastLimit, period },
-    roundtable: { used: sub.roundtableUsed, limit: sub.roundtableLimit, period },
+    fast: { used: sub.fastUsed, limit: defaults.fast, period },
+    roundtable: { used: sub.roundtableUsed, limit: defaults.roundtable, period },
   };
 }
 
@@ -187,9 +194,11 @@ export async function consumeQuota(userId: string, mode: QuotaMode): Promise<
   sub = await lazyReset(sub);
 
   const usedField = mode === 'fast' ? 'fastUsed' : 'roundtableUsed';
-  const limitField = mode === 'fast' ? 'fastLimit' : 'roundtableLimit';
   const currentUsed = sub[usedField];
-  const currentLimit = sub[limitField];
+  // Source the cap from live PLAN_DEFAULTS so env quota changes take effect
+  // immediately for all existing subscribers, not after the next resetAt.
+  const plan = normalizePlan(sub.plan);
+  const currentLimit = mode === 'fast' ? PLAN_DEFAULTS[plan].fast : PLAN_DEFAULTS[plan].roundtable;
 
   if (currentUsed >= currentLimit) {
     return { allowed: false, error: 'quota_exhausted', mode, resetAt: sub.resetAt };
