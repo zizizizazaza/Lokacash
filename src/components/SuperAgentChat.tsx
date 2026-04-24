@@ -4714,6 +4714,46 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
     }, [allTocHeadings, showToc]);
 
+    // ── Scroll-to-bottom floating button ──
+    // Shown only when the user has scrolled meaningfully above the latest
+    // message (> ~1 viewport's worth). Click does a smooth scroll to the
+    // messages-end anchor. Matches the standard chat-app pattern.
+    const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+    useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        let rafId = 0;
+        const check = () => {
+            const { scrollTop, scrollHeight, clientHeight } = container;
+            const distFromBottom = scrollHeight - scrollTop - clientHeight;
+            // 240px ≈ roughly one answer-card's worth; below that we treat as
+            // "near the bottom" and hide the button to avoid visual clutter.
+            setShowScrollToBottom(distFromBottom > 240);
+        };
+        const onScroll = () => {
+            cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(check);
+        };
+        container.addEventListener('scroll', onScroll, { passive: true });
+        check();
+        // Also re-evaluate on content size changes (streaming tokens, images,
+        // quote cards) so the button appears/disappears without needing a
+        // manual scroll to trigger it.
+        const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onScroll) : null;
+        if (ro && container.firstElementChild instanceof HTMLElement) ro.observe(container.firstElementChild);
+        return () => {
+            cancelAnimationFrame(rafId);
+            container.removeEventListener('scroll', onScroll);
+            ro?.disconnect();
+        };
+    }, [messages.length]);
+
+    const handleScrollToBottom = useCallback(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    }, []);
+
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
         requestAnimationFrame(() => {
@@ -6914,6 +6954,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     {/* Input */}
                     <div className="absolute bottom-0 left-0 right-0 pt-2 pb-4 px-4 md:px-8 pointer-events-none" style={{ zIndex: 10 }}>
                         <div className="max-w-2xl mx-auto pointer-events-auto">
+                            {/* Scroll-to-bottom FAB: only while user is scrolled above the latest reply */}
+                            {showScrollToBottom && (
+                                <div className="flex justify-center mb-3">
+                                    <button
+                                        onClick={handleScrollToBottom}
+                                        aria-label="Scroll to latest message"
+                                        title="Scroll to latest"
+                                        className="group w-9 h-9 rounded-full bg-white border border-gray-200 text-gray-500 hover:text-gray-900 hover:bg-gray-50 hover:border-gray-300 shadow-md hover:shadow-lg flex items-center justify-center transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-95"
+                                        style={{ animation: 'menu-pop 0.2s ease-out', boxShadow: '0 4px 14px -2px rgba(15,23,42,0.12), 0 1px 3px rgba(15,23,42,0.08)' }}
+                                    >
+                                        <svg className="w-4 h-4 transition-transform group-hover:translate-y-[1px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.25} strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M12 5v14M19 12l-7 7-7-7" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            )}
                             <div className="bg-white/95 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-black/[0.03]" style={{ boxShadow: '0 12px 48px -8px rgba(15,23,42,0.18), 0 4px 16px -2px rgba(15,23,42,0.10), 0 1px 3px rgba(15,23,42,0.06)' }}>
                                 {/* Voice overlay: Recording */}
                                 {voiceState === 'recording' && (
