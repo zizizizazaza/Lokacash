@@ -69,7 +69,7 @@ li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
   /* Force-upgrade typography for both new and historical reports */
   .report-wrap, .report-wrap p, .report-wrap li, .report-wrap td, .report-wrap .guru-analysis, .report-wrap .debate-text, .report-wrap .consensus-detail, .report-wrap .risk-item { font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; }
   /* Headings and titles use Inter (geometric) for report-like authority */
-  .report-wrap h1, .report-wrap h2, .report-wrap h3, .report-wrap h4, .report-wrap .report-title, .report-wrap .section-title, .report-wrap .consensus-verdict, .report-wrap .report-label, .report-wrap .guru-name, .report-wrap th { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; letter-spacing: -0.01em; }
+  .report-wrap h1, .report-wrap h2, .report-wrap h3, .report-wrap h4, .report-wrap .report-title, .report-wrap .section-title, .report-wrap .consensus-verdict, .report-wrap .report-label, .report-wrap .guru-name, .report-wrap th { font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; letter-spacing: -0.01em; }
   .report-wrap { font-size: 15px !important; line-height: 1.75 !important; }
   .report-wrap p, .report-wrap li, .report-wrap .guru-analysis, .report-wrap .debate-text, .report-wrap .consensus-detail, .report-wrap .risk-item { font-size: 15px !important; line-height: 1.75 !important; }
   .report-wrap .report-title { font-size: 26px !important; font-weight: 700 !important; line-height: 1.35 !important; letter-spacing: -0.015em !important; }
@@ -4849,6 +4849,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 @keyframes summon-text { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
                 @keyframes summon-dot { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
                 @keyframes summon-glow { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } 50% { box-shadow: 0 0 12px 2px rgba(34,197,94,0.25); } }
+
+                /* Mode icon hover animations */
+                @keyframes mode-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                @keyframes mode-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+                @keyframes mode-shake { 0%,100% { transform: translateX(0) rotate(0); } 25% { transform: translateX(-1px) rotate(-6deg); } 75% { transform: translateX(1px) rotate(6deg); } }
+                .mode-icon-anim { display: inline-flex; transition: transform .2s ease; transform-origin: center; }
+                .mode-icon-auto:hover .mode-icon-anim { animation: mode-pulse 1.1s ease-in-out infinite; }
+                .mode-icon-fast:hover .mode-icon-anim { animation: mode-shake .45s ease-in-out infinite; }
+                .mode-icon-roundtable:hover .mode-icon-anim { animation: mode-spin 2.4s linear infinite; }
             `}</style>
 
             {/* ══ Content Row — two independent full-height columns ══ */}
@@ -4935,14 +4944,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 <div key={i} id={`msg-wrap-${i}`} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
-                                            <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm">
-                                                <p className="text-[13px] leading-relaxed">{msg.content}</p>
-                                                <p className="text-[9px] text-gray-500 mt-1.5 text-right">{msg.timestamp}</p>
+                                            <div className="max-w-[72%] px-4 py-3 bg-gray-100 text-gray-900 rounded-2xl rounded-br-sm border border-gray-200/70">
+                                                <p className="text-[15px] leading-relaxed tracking-[-0.011em]" style={{ fontFamily: "'Open Runde', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif", fontWeight: 500 }}>{msg.content}</p>
+                                                <p className="text-[9px] text-gray-400 mt-1.5 text-right">{msg.timestamp}</p>
                                             </div>
                                         </div>
                                     ) : (
                                         <div className="flex items-start gap-3">
-                                            <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
                                             <div className="flex-1 min-w-0">
                                                 {thinkingProcesses[i] && (
                                                     <ThinkingInlineTrigger
@@ -5518,7 +5526,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 };
                                 return (
                                 <div className="flex items-start gap-3">
-                                    <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
                                     <div className="flex-1 min-w-0">
                                         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden" style={{ maxWidth: 680 }}>
                                             {summonPhase === 'loading' || summonPhase === 'narrating' ? (
@@ -5731,7 +5738,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     </button>
                                 </div>
                             )}
-                            <div className="bg-white/95 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-black/[0.03]" style={{ boxShadow: '0 12px 48px -8px rgba(15,23,42,0.18), 0 4px 16px -2px rgba(15,23,42,0.10), 0 1px 3px rgba(15,23,42,0.06)' }}>
+                            <div
+                                className="group/composer bg-white backdrop-blur-xl border border-gray-200/80 rounded-[20px] relative ring-1 ring-black/[0.04] transition-all duration-200 focus-within:border-gray-300 focus-within:ring-gray-300/30 focus-within:shadow-[0_20px_60px_-12px_rgba(15,23,42,0.25),0_6px_20px_-4px_rgba(15,23,42,0.12)]"
+                                style={{
+                                    boxShadow: '0 12px 48px -8px rgba(15,23,42,0.18), 0 4px 16px -2px rgba(15,23,42,0.10), 0 1px 3px rgba(15,23,42,0.06)',
+                                    backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(250,250,252,1) 100%)',
+                                }}
+                            >
+
                                 {/* Voice overlay: Recording */}
                                 {voiceState === 'recording' && (
                                     <div className="absolute inset-x-0 top-0 bottom-[52px] flex items-center justify-center">
@@ -5790,13 +5804,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     onChange={e => setInputText(e.target.value)}
                                     onPaste={handleChatPaste}
                                     onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                                    placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up question...'}
+                                    placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up…'}
                                     disabled={isStreaming || voiceState !== 'idle'}
-                                    className="w-full bg-transparent outline-none resize-none text-[14px] text-gray-900 placeholder:text-gray-400 px-4 pt-3.5 pb-1 leading-relaxed overflow-y-auto"
-                                    style={{ minHeight: '46px', maxHeight: '180px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
+                                    className="w-full bg-transparent outline-none resize-none text-[14.5px] text-gray-900 placeholder:text-gray-400 px-5 pt-4 pb-1 leading-relaxed overflow-y-auto"
+                                    style={{ minHeight: '50px', maxHeight: '180px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
-                                <div className="flex items-center justify-between px-3 pb-2.5">
-                                    {/* Left: mode selector + agent selector */}
+                                <div className="flex items-center justify-between px-2.5 pb-2.5 pt-0.5">
+                                    {/* Left: Mode selector — plain text, ChatGPT/Claude style */}
                                     <div className="flex items-center gap-1">
                                         <ModeSelector
                                             mode={chatMode}
@@ -5834,17 +5848,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             disabled={!isStreaming && !inputText.trim()}
                                             title={isStreaming ? 'Stop generating' : 'Send'}
                                             aria-label={isStreaming ? 'Stop generating' : 'Send'}
-                                            className={`relative w-8 h-8 rounded-lg flex items-center justify-center transition-all ml-0.5 group ${isStreaming
+                                            className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-all ml-1 ${isStreaming
                                                     ? 'bg-white text-gray-700 border border-gray-300 hover:border-red-400 hover:text-red-500 hover:bg-red-50 shadow-sm'
                                                     : inputText.trim()
-                                                        ? 'bg-gray-900 text-white hover:bg-gray-800 shadow-sm'
+                                                        ? 'bg-gray-900 text-white hover:bg-black shadow-[0_6px_16px_-4px_rgba(15,23,42,0.35)] hover:-translate-y-[1px]'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                                                 }`}
                                         >
                                             {isStreaming ? (
                                                 <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3" /></svg>
                                             ) : (
-                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
                                             )}
                                         </button>
                                     </div>

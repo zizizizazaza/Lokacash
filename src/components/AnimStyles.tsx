@@ -95,9 +95,8 @@ const AnimStyles = () => (
 
     /* ── Quick action pills ── */
     .qa-pill {
-      transition: transform 0.15s var(--ease-out-quart), border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+      transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
     }
-    .qa-pill:hover { transform: translateY(-1px); }
     .qa-pill:active { transform: scale(0.96); transition-duration: 0.08s; }
 
     /* ── Scenario pills ── */
@@ -130,7 +129,7 @@ const AnimStyles = () => (
     /* ── Hero zone with dot grid ── */
     .hero-zone {
       position: relative;
-      background-color: #fff;
+      background-color: transparent;
       background-image: radial-gradient(circle, rgba(26,111,255,0.09) 1px, transparent 1px);
       background-size: 32px 32px;
     }

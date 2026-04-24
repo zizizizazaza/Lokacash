@@ -251,7 +251,7 @@ export const Sidebar: React.FC<{
   });
 
   /* theme classes */
-  const bg = isDark ? 'bg-[#1a1a1a] border-[#2a2a2a]' : 'bg-[#f7f7f8] border-transparent';
+  const bg = isDark ? 'bg-[#1a1a1a] border-[#2a2a2a]' : 'bg-[#F4F4F5] border-transparent';
   const textPrimary = isDark ? 'text-gray-100' : 'text-gray-900';
   const textSecondary = isDark ? 'text-gray-400' : 'text-gray-500';
   const textMuted = isDark ? 'text-gray-500' : 'text-gray-400';

@@ -15,24 +15,24 @@ export interface ModeConfig {
 
 export const MODES: ModeConfig[] = [
   {
-    id: 'auto', label: 'Auto', desc: 'Direct model chat, no agent analysis',
+    id: 'auto', label: 'Auto', desc: 'Smart routing — picks the best pipeline',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-      React.createElement('path', { d: 'M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z' }))
+      React.createElement('path', { d: 'M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1' }),
+      React.createElement('circle', { cx: 12, cy: 12, r: 3.5 }))
   },
   {
-    id: 'fast', label: 'Fast', desc: 'Single-agent analysis, fast turnaround',
-    icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-      React.createElement('path', { d: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z' }))
+    id: 'fast', label: 'Fast', desc: 'Single-agent answer',
+    icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'currentColor' },
+      React.createElement('path', { d: 'M13 2L3.5 13.5a.5.5 0 00.4.8h6.3l-1.3 6.5a.5.5 0 00.9.35L20 9.5a.5.5 0 00-.4-.8h-6.3l1.3-5.7a.5.5 0 00-.9-.35z' }))
   },
   {
-    id: 'roundtable', label: 'Roundtable', desc: 'Multi-agent debate with iterative consensus',
+    id: 'roundtable', label: 'Roundtable', desc: 'Multi-agent debate + vote',
     icon: () => React.createElement('svg', { className: 'w-3.5 h-3.5', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-      React.createElement('circle', { cx: 12, cy: 5, r: 2 }),
-      React.createElement('circle', { cx: 5, cy: 19, r: 2 }),
-      React.createElement('circle', { cx: 19, cy: 19, r: 2 }),
-      React.createElement('path', { d: 'M14 5.5a7.5 7.5 0 014.5 12' }),
-      React.createElement('path', { d: 'M17 19.5H7' }),
-      React.createElement('path', { d: 'M5.5 17A7.5 7.5 0 0110 5.5' }))
+      React.createElement('circle', { cx: 12, cy: 12, r: 8.5, strokeDasharray: '2 2', opacity: 0.35 }),
+      React.createElement('circle', { cx: 12, cy: 4, r: 2, fill: 'currentColor' }),
+      React.createElement('circle', { cx: 20, cy: 14, r: 2, fill: 'currentColor' }),
+      React.createElement('circle', { cx: 4, cy: 14, r: 2, fill: 'currentColor' }),
+      React.createElement('circle', { cx: 12, cy: 20, r: 2, fill: 'currentColor' }))
   },
 ];
 

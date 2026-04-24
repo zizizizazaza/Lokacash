@@ -163,7 +163,6 @@ const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo })
 
       {/* Right copy */}
       <div className="flex-1 min-w-0">
-        <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-gray-400 mb-1.5">The Roundtable</div>
         <h3 className="text-[20px] sm:text-[22px] font-semibold text-gray-900 leading-[1.25]">
           Multi-agent debate, persuade, vote.
         </h3>
@@ -509,9 +508,9 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     const stored = window.localStorage.getItem(DOMAIN_STORAGE_KEY);
     return stored === 'web3' ? 'web3' : 'stocks';
   });
-  // DEBUG: force welcome modal every mount. Restore the commented-out
-  // initializer below to go back to "show only on first visit".
-  const [showWelcome, setShowWelcome] = useState<boolean>(true);
+  // Welcome modal — disabled by default. Flip to `true` to force-show during
+  // development. Original "show on first visit" logic preserved below.
+  const [showWelcome, setShowWelcome] = useState<boolean>(false);
   // const [showWelcome, setShowWelcome] = useState<boolean>(() => {
   //   if (typeof window === 'undefined') return false;
   //   return window.localStorage.getItem(DOMAIN_STORAGE_KEY) === null;
@@ -989,7 +988,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       style={{
         ['--domain-accent' as any]: domainTheme.accent,
         ['--domain-accent-soft' as any]: domainTheme.accentSoft,
-        ...(domain === 'web3' ? { backgroundColor: '#FFFFFF' } : {}),
+        ...(domain === 'web3' ? { backgroundColor: '#FFFFFF' } : { backgroundColor: '#FFFFFF' }),
       }}
     >
       {/* ── Stocks page: classical / editorial styling (scoped) ── */}
@@ -1014,7 +1013,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
             margin: 4px auto 14px;
           }
           .stocks-classic .hero-title p {
-            font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+            font-family: 'Open Runde', 'Inter', ui-sans-serif, system-ui, sans-serif;
             font-style: normal;
             font-weight: 400;
             color: #64748b;
@@ -1086,7 +1085,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         <div className="hidden md:flex items-center gap-2">
           <button
             onClick={() => navigate('/developers')}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-gray-700 bg-white hover:bg-gray-50 border border-gray-200 hover:border-gray-300 transition-colors"
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-gray-600 hover:text-gray-900 border border-gray-300 hover:border-gray-900 transition-colors"
             title="Get Loka Skill"
           >
             <I.Code />
@@ -1097,19 +1096,17 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       </div>
       {/* ── Hero + Input ── */}
       <div className="hero-zone flex flex-col items-center pt-14 md:pt-20 pb-6 px-4 relative" style={{ zIndex: 10, ...(domain === 'web3' ? { background: 'transparent', backgroundImage: 'none' } : {}) }}>
-        <div className="max-w-[640px] w-full space-y-7" style={{ position: 'relative', zIndex: 1 }}>
+        <div className="max-w-[640px] w-full space-y-12" style={{ position: 'relative', zIndex: 1 }}>
           {/* Title */}
           <div className="text-center hero-title space-y-2">
-            <h1 className="text-[38px] md:text-[46px] font-extrabold tracking-tight leading-[1.15] text-gray-900">
+            <h1
+              className="text-[32px] md:text-[40px] font-normal tracking-tight leading-[1.15] text-gray-900"
+              style={{ fontFamily: "'Newsreader', ui-serif, Georgia, serif", letterSpacing: '-0.02em', fontOpticalSizing: 'auto', fontWeight: 400 }}
+            >
               {domain === 'stocks'
                 ? 'Where would you like to invest?'
-                : 'What are we exploring with multi-agents?'}
+                : 'Where to explore in crypto?'}
             </h1>
-            <p className="text-[14px] text-gray-400 font-normal">
-              {domain === 'stocks'
-                ? 'Multi-agent AI for stocks, sectors & macro intelligence.'
-                : 'Multi-agent AI for tokens, protocols & on-chain signals.'}
-            </p>
           </div>
 
           {/* Input Box */}
@@ -1373,7 +1370,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                       <button
                         key={i}
                         onClick={() => setInput(p)}
-                        className="prompt-item w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-left text-[13px] text-gray-600 hover:bg-gray-50 hover:text-gray-900 border border-transparent hover:border-gray-100 transition-colors group"
+                        className="prompt-item w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-left text-[14px] text-gray-600 hover:bg-gray-50 hover:text-gray-900 border border-transparent hover:border-gray-100 transition-colors group"
                       >
                         <span>{p}</span>
                         <svg className="w-3 h-3 text-gray-300 group-hover:text-gray-400 shrink-0 ml-3 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
@@ -1406,7 +1403,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                         setChatMessage(a.prompt);
                       }
                     }}
-                    className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:border-gray-300 hover:text-gray-900 hover:shadow-sm whitespace-nowrap">
+                    className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white/70 text-[14px] font-medium text-gray-600 hover:bg-gray-100 hover:border-gray-300 hover:text-gray-900 transition-colors whitespace-nowrap">
                     <Ic /> {a.name}
                   </button>
                 );
