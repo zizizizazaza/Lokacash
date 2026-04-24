@@ -1,5 +1,6 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
+import { usePrivy } from '@privy-io/react-auth';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
@@ -480,13 +481,22 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
 };
 
 const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
-  isLoggedIn = false,
   onRequireLogin,
 }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const { ready, authenticated } = usePrivy();
+  const isLoggedIn = ready && authenticated;
+  const tryStartChat = (text: string) => {
+    if (!text?.trim()) return;
+    if (!isLoggedIn) {
+      window.dispatchEvent(new Event('show-auth-modal'));
+      return;
+    }
+    setChatMessage(text.trim());
+  };
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [mode, setMode] = useState<'auto' | 'fast' | 'roundtable'>('auto');
@@ -1173,7 +1183,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
                   e.preventDefault();
-                  setChatMessage(input.trim());
+                  tryStartChat(input);
                 }
               }}
               placeholder={homeVoiceState !== 'idle' ? '' : PLACEHOLDERS[phIdx]}
@@ -1236,7 +1246,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                 </button>
                 <button
                   onClick={() => {
-                    setChatMessage(input.trim());
+                    tryStartChat(input);
                   }}
                   className={`send-btn-active w-8 h-8 rounded-lg flex items-center justify-center transition-all ${input.trim() ? 'bg-gray-700 text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                     }`}>
@@ -1408,11 +1418,11 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                       if ((a as any).agentId) {
                         setSelectedAgent((a as any).agentId);
                         setSelectedScenario(null);
-                        if (a.prompt) setChatMessage(a.prompt);
+                        if (a.prompt) tryStartChat(a.prompt);
                       } else if (a.route) {
                         navigate(a.route);
                       } else if (a.prompt) {
-                        setChatMessage(a.prompt);
+                        tryStartChat(a.prompt);
                       }
                     }}
                     className="qa-pill flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 bg-white/70 text-[14px] font-medium text-gray-600 hover:bg-gray-100 hover:border-gray-300 hover:text-gray-900 transition-colors whitespace-nowrap">
@@ -1429,6 +1439,10 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       {!selectedAgent && domain === 'stocks' && (
         <div className="px-4 pb-10 pt-0 w-full">
           <RoundtableBanner onLiveDemo={() => {
+            if (!isLoggedIn) {
+              window.dispatchEvent(new Event('show-auth-modal'));
+              return;
+            }
             setMode('roundtable');
             setLiveDemoActive(true);
             setChatMessage('Is NVIDIA still a buy at current valuations?');
@@ -1439,7 +1453,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       {/* ── Web3 Pulse banner — on-chain snapshot, Web3 only ── */}
       {!selectedAgent && domain === 'web3' && (
         <div className="px-4 pb-10 pt-0 w-full relative" style={{ zIndex: 10 }}>
-          <Web3PulseBanner onAsk={(q) => setChatMessage(q)} />
+          <Web3PulseBanner onAsk={(q) => tryStartChat(q)} />
         </div>
       )}
 
