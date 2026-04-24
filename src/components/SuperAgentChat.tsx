@@ -4614,15 +4614,25 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const recalcToc = () => {
             const containerRect = container.getBoundingClientRect();
 
-            // Determine which assistant message's TOC to show:
-            // Use the LAST message whose first heading has scrolled into or above the viewport top.
+            // Determine which assistant message's TOC to show.
+            //
+            // Each conversation turn is [user message, assistant message]. The
+            // turn visually begins at the user bubble, not at the assistant
+            // answer's first heading — so we anchor off the USER message
+            // wrapper (the msg at idx-1) rather than the answer's first H2.
+            // This makes the TOC switch as soon as the next user question
+            // scrolls to the top, instead of waiting for the answer body's
+            // first heading (which can be hundreds of pixels down past the
+            // price card / Docs-Web tabs / opening paragraphs).
+            //
+            // Falls back to the assistant wrapper itself if the preceding
+            // message isn't a user turn (e.g. the very first message).
             let bestIdx = tocIndices[0];
             for (const idx of tocIndices) {
-                const heads = allTocHeadings[idx];
-                if (!heads || heads.length === 0) continue;
-                const firstEl = document.getElementById(heads[0].id);
-                if (firstEl) {
-                    const top = firstEl.getBoundingClientRect().top - containerRect.top;
+                const anchorIdx = idx - 1 >= 0 && messages[idx - 1]?.role === 'user' ? idx - 1 : idx;
+                const anchorEl = document.getElementById(`msg-wrap-${anchorIdx}`);
+                if (anchorEl) {
+                    const top = anchorEl.getBoundingClientRect().top - containerRect.top;
                     if (top <= 80) bestIdx = idx;
                 }
             }
@@ -6122,7 +6132,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 )}
                                 <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
                             {messages.map((msg, i) => (
-                                <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
+                                <div key={i} id={`msg-wrap-${i}`} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
                                             <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm">
