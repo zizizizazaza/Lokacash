@@ -1907,9 +1907,22 @@ const PlanPipeline: React.FC<{ thinking: ThinkingFlow; compact?: boolean }> = ({
             ];
         }
         const trace = thinking.toolTrace || [];
-        const anyRunning = trace.some(t => t.status === 'running');
-        const anyDone = trace.some(t => t.status === 'done');
-        // Research turns green once all tools stop running — don't gate on
+        const anyToolRunning = trace.some(t => t.status === 'running');
+        const anyToolDone = trace.some(t => t.status === 'done');
+        // Web / web3 / analysis research goes through modules, not toolTrace
+        // (crypto market-data queries, exa/tavily web search, etc.). Include
+        // those signals so Research lights up when tools aren't being invoked.
+        const standardMods = thinking.modules || [];
+        const isDataMod = (t: string) => t === 'search' || t === 'analysis' || t === 'web3';
+        const anyModActive = standardMods.some(
+            m => isDataMod(m.type) && (m.status === 'active' || (m.status as string) === 'analyzing')
+        );
+        const anyModDone = standardMods.some(
+            m => isDataMod(m.type) && m.status === 'completed'
+        );
+        const anyRunning = anyToolRunning || anyModActive;
+        const anyDone = anyToolDone || anyModDone;
+        // Research turns green once all data-gathering stops — don't gate on
         // !thinking.isActive, since that's also true during the Respond/
         // synthesis phase (tools are done but model is still streaming).
         const researchDone = anyDone && !anyRunning;
