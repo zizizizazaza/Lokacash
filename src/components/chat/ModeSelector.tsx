@@ -79,7 +79,7 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
       `}</style>
       <button
         onClick={() => setOpen(v => !v)}
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12.5px] transition-colors hover:bg-gray-100 ms-row-${mode} ${open ? 'bg-gray-100' : ''} ${mode === 'roundtable' ? 'text-blue-700' : 'text-gray-600 hover:text-gray-900'} ${hintOn && mode !== 'roundtable' ? 'ms-hint' : ''}`}
+        className={`inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[12.5px] transition-colors hover:bg-gray-100 ms-row-${mode} ${open ? 'bg-gray-100' : ''} ${mode === 'roundtable' ? 'text-blue-700' : 'text-gray-500 hover:text-gray-900'} ${hintOn && mode !== 'roundtable' ? 'ms-hint' : ''}`}
       >
         <span className={`ms-icon ${mode === 'roundtable' ? 'text-blue-600' : 'text-gray-400'}`}>{React.createElement(current.icon)}</span>
         <span className={`font-medium ${mode === 'roundtable' ? 'text-blue-700' : ''} ${compact ? 'hidden sm:inline' : ''}`}>{current.label}</span>
@@ -93,6 +93,7 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
           className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-gray-200 rounded-xl shadow-[0_20px_50px_-10px_rgba(15,23,42,0.25)] overflow-hidden z-30"
           style={{ animation: 'menu-pop 0.15s ease-out' }}
         >
+          <div className="px-3.5 pt-2.5 pb-1.5 text-[11px] font-medium text-gray-400">Chat Mode</div>
           {MODES.map(m => {
             const MIcon = m.icon;
             const isActive = mode === m.id;
@@ -133,7 +134,7 @@ const ModeSelector: React.FC<ModeSelectorProps> = ({ mode, onModeChange, compact
                     Sign in
                   </span>
                 ) : itemRemaining !== null ? (
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full leading-none shrink-0 ${itemExhausted ? 'bg-gray-100 text-gray-400' : 'bg-green-50 text-green-600'}`}>
+                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full leading-none shrink-0 ${itemExhausted ? 'bg-gray-100 text-gray-400' : isActive ? 'bg-blue-100/70 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>
                     {`${itemRemaining} left`}
                   </span>
                 ) : isActive ? (

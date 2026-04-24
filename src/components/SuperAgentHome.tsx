@@ -1236,7 +1236,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                   onClick={() => {
                     setChatMessage(input.trim());
                   }}
-                  className={`send-btn-active w-8 h-8 rounded-lg flex items-center justify-center transition-all ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                  className={`send-btn-active w-8 h-8 rounded-lg flex items-center justify-center transition-all ${input.trim() ? 'bg-gray-700 text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                     }`}>
                   <I.Send />
                 </button>
