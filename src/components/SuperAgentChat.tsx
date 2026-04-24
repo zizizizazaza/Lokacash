@@ -1223,25 +1223,56 @@ function buildRealKnowledgeGraph(
         data: { summary: topicLabel || 'Pending research topic' },
     });
 
-    // 2. Knowledge source nodes — from completed research modules.
-    // One node per distinct data-gathering track (web / web3 / stock analysis).
-    const knowledgeMeta: Array<{ id: string; label: string; kind: string; summary: string }> = [];
+    // 2. Knowledge source nodes — hub + source children.
+    // For each data-gathering track (search / web3 / analysis), create a hub
+    // node connected to the topic, plus up to `MAX_SOURCES_PER_HUB` individual
+    // source children branching off the hub. Lets users see the actual
+    // domains that informed the debate (coingecko, x.com, coindesk, …)
+    // without cluttering the graph with all 15+ items at once.
+    const MAX_SOURCES_PER_HUB = 5;
+    const knowledgeMeta: Array<{
+        id: string; label: string; kind: string; summary: string;
+        moduleType: 'search' | 'web3' | 'analysis';
+    }> = [];
     const seenKinds = new Set<string>();
     for (const m of modules) {
         if (m.status !== 'completed' && m.status !== 'active') continue;
         const t = m.type;
         if (seenKinds.has(t)) continue;
         if (t === 'search') {
-            knowledgeMeta.push({ id: 'knowledge_search', label: 'News & Reports', kind: 'news_feed', summary: 'Web search results — news, filings, analyst reports.' });
+            knowledgeMeta.push({ id: 'knowledge_search', label: 'News & Reports', kind: 'news_feed', summary: 'Web search results — news, filings, analyst reports.', moduleType: 'search' });
             seenKinds.add(t);
         } else if (t === 'web3') {
-            knowledgeMeta.push({ id: 'knowledge_web3', label: 'On-chain Data', kind: 'data_feed', summary: 'OKX price, funding, open interest + CoinGecko markets.' });
+            knowledgeMeta.push({ id: 'knowledge_web3', label: 'On-chain Data', kind: 'data_feed', summary: 'OKX price, funding, open interest + CoinGecko markets.', moduleType: 'web3' });
             seenKinds.add(t);
         } else if (t === 'analysis') {
-            knowledgeMeta.push({ id: 'knowledge_analysis', label: 'Stock Fundamentals', kind: 'data_feed', summary: 'Realtime quote + fundamentals + historical OHLC.' });
+            knowledgeMeta.push({ id: 'knowledge_analysis', label: 'Stock Fundamentals', kind: 'data_feed', summary: 'Realtime quote + fundamentals + historical OHLC.', moduleType: 'analysis' });
             seenKinds.add(t);
         }
     }
+    // Helper: dedupe + cap by domain so we don't render 15 coindesk entries.
+    const pickTopSources = (mod: ThinkingModule | undefined, limit: number): Array<{ domain: string; title: string; url?: string }> => {
+        if (!mod) return [];
+        const raw: Array<{ domain: string; title: string; url?: string }> = [];
+        const d = mod.data as any;
+        if (Array.isArray(d?.sources)) {
+            for (const s of d.sources) raw.push({ domain: s.domain, title: s.title, url: s.url });
+        }
+        if (Array.isArray(d?.sections)) {
+            for (const sec of d.sections) {
+                if (Array.isArray(sec?.sources)) {
+                    for (const s of sec.sources) raw.push({ domain: s.domain, title: s.title, url: s.url });
+                }
+            }
+        }
+        const byDomain = new Map<string, { domain: string; title: string; url?: string }>();
+        for (const item of raw) {
+            if (!item?.domain) continue;
+            if (!byDomain.has(item.domain)) byDomain.set(item.domain, item);
+            if (byDomain.size >= limit) break;
+        }
+        return Array.from(byDomain.values());
+    };
     for (const k of knowledgeMeta) {
         nodes.push({
             id: k.id, type: 'knowledge', label: k.label, group: 'knowledge',
@@ -1253,6 +1284,31 @@ function buildRealKnowledgeGraph(
             source: k.id, target: 'topic_main',
             type: 'informs', label: 'informs',
         });
+        // Add up to N source sub-nodes branching off this hub.
+        const mod = modules.find(m => m.type === k.moduleType);
+        const topSources = pickTopSources(mod, MAX_SOURCES_PER_HUB);
+        for (const src of topSources) {
+            const sid = `src_${k.moduleType}_${src.domain.replace(/[^a-z0-9]/gi, '_')}`;
+            // Avoid duplicate id if same domain appears under two hubs
+            if (nodes.find(n => n.id === sid)) continue;
+            const shortTitle = src.title && src.title.length > 0
+                ? (src.title.length > 28 ? src.title.slice(0, 26) + '…' : src.title)
+                : src.domain;
+            nodes.push({
+                id: sid, type: 'knowledge', label: shortTitle, group: 'knowledge',
+                x: 0, y: 0,
+                data: {
+                    knowledge_type: 'source',
+                    summary: `${src.domain}${src.url ? ' — ' + src.url : ''}`,
+                    detail: src.title || src.domain,
+                },
+            });
+            edges.push({
+                id: `edge_${k.id}_${sid}`,
+                source: k.id, target: sid,
+                type: 'informs', label: 'provides',
+            });
+        }
     }
 
     // 3. Agent role nodes — from selectedAgentIds. Pending until the
@@ -1402,6 +1458,12 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
     const svgRef = useRef<SVGSVGElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [hoverNode, setHoverNode] = useState<{ node: any; x: number; y: number } | null>(null);
+    // Position cache: when `data` changes (new node added mid-flight), seed
+    // the simulation with each existing node's last-known x/y so only the
+    // NEW nodes get placed by force, old nodes stay anchored. Without this
+    // the whole graph re-shuffles on every progressive reveal and the user
+    // sees the scene jump.
+    const positionCacheRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
     // Styling maps by node.type — simplified palette: neutral + 3 semantic accents
     const NEUTRAL = { fill: '#f8fafc', stroke: '#94a3b8', text: '#334155' };
@@ -1470,6 +1532,19 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
 
         const nodes = data.nodes.map(d => ({ ...d }));
         const edges = data.edges.map(d => ({ ...d }));
+
+        // Seed positions from cache so progressive reveals don't reshuffle.
+        // Existing nodes keep their last-known coordinates; only brand-new
+        // nodes enter the simulation without a position (force will place
+        // them near their neighbours via the link/charge forces).
+        const cache = positionCacheRef.current;
+        nodes.forEach((n: any) => {
+            const cached = cache.get(n.id);
+            if (cached) {
+                n.x = cached.x;
+                n.y = cached.y;
+            }
+        });
 
         // ── Staged reveal: stages match left-panel phases ──
         // Stage 0 = Team summoned (asset + roles) — visible immediately
@@ -1638,6 +1713,14 @@ const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean
 
             node
                 .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
+
+            // Persist positions so the next data refresh can rehydrate from
+            // the same coordinates and avoid the reshuffle jump.
+            nodes.forEach((n: any) => {
+                if (typeof n.x === 'number' && typeof n.y === 'number') {
+                    cache.set(n.id, { x: n.x, y: n.y });
+                }
+            });
         });
 
         // ── Auto-fit: scale the whole graph to the container once the layout settles ──
@@ -2873,6 +2956,37 @@ const RoundtableWorkbench: React.FC<{
     const rounds = thinking.rtRounds || [];
     const totalOps = rounds.reduce((n, r) => n + r.agents.length, 0);
 
+    // ── Memoize graph data so the D3 simulation doesn't thrash on every
+    // streaming token. We key on serialized snapshots of ONLY the fields
+    // that change the graph structure — adding/removing agents, rounds
+    // completing, consensus arriving, modules transitioning from active
+    // to completed, and source lists growing. Content streaming, TOC
+    // updates, scroll state etc. no longer invalidate the graph.
+    const graphStructureKey = useMemo(() => {
+        const agents = (thinking.selectedAgentIds || []).join('|');
+        const roundsKey = (thinking.rtRounds || [])
+            .map(r => r.agents.map(a => `${a.agentId}:${a.verdict || ''}:${a.confidence ?? ''}`).join(','))
+            .join(';');
+        const c = thinking.rtConsensus;
+        const consensusKey = c ? `${c.status}|${c.finalVerdict || ''}|${c.finalConfidence ?? ''}|${c.conflictRate ?? ''}` : '';
+        const modulesKey = (thinking.modules || [])
+            .map(m => {
+                const sources = (m.data as any)?.sources?.length ?? 0;
+                const sections = (m.data as any)?.sections?.length ?? 0;
+                return `${m.type}:${m.status}:${sources}:${sections}`;
+            })
+            .join(';');
+        return `${agents}#${roundsKey}#${consensusKey}#${modulesKey}#${topicLabel}`;
+    }, [thinking, topicLabel]);
+
+    const graphData = useMemo(
+        () => buildRealKnowledgeGraph(thinking, topicLabel),
+        // Intentionally skip `thinking` reference — we key off the
+        // derived structure snapshot so content-only updates don't thrash.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [graphStructureKey],
+    );
+
     // Scroll active agent's first utterance into view when on Debate tab
     useEffect(() => {
         if (tab !== 'debate' || !activeAgentId || !debateScrollRef.current) return;
@@ -3009,7 +3123,7 @@ const RoundtableWorkbench: React.FC<{
                     {tab === 'graph' ? (
                         <div className="absolute inset-0">
                             <KnowledgeGraphView
-                                data={buildRealKnowledgeGraph(thinking, topicLabel)}
+                                data={graphData}
                                 animate={isLive}
                             />
                         </div>
