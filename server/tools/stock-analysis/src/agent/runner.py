@@ -647,7 +647,7 @@ def run_agent_loop(
                     progress_callback({
                         "type": "thinking",
                         "step": step + 1,
-                        "message": "已具备关键证据，正在生成最终结论...",
+                        "message": "All evidence has been gathered, generating the final answer...",
                     })
 
                 messages.append(

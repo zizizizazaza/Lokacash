@@ -1839,36 +1839,68 @@ const PlanPipeline: React.FC<{ thinking: ThinkingFlow; compact?: boolean }> = ({
 
     const stages = useMemo(() => {
         if (isRt) {
+            // ── Roundtable 5-dot stepper, driven by REAL backend signals ──
+            // Previously these dots were driven by `rtDataSearch` /
+            // `rtRounds` / `rtPreparationStatus` etc, which were populated
+            // by the demo timer chain in handleSummonConfirm. After we
+            // disabled the demo, those signals never advance, so the dots
+            // would freeze. Now we read directly from:
+            //   • thinking.modules         — real backend emitter events
+            //   • thinking.rtRounds        — fed by agent_responded events
+            //   • thinking.rtConsensus     — fed by consensus_done event
+            //   • thinking.isActive        — false once stream_done fires
             const dataArr = thinking.rtDataSearch || [];
             const dataActive = dataArr.some(s => s.status === 'active');
-            const dataDone = dataArr.length > 0 && dataArr.every(s => s.status === 'done');
+            const dataDoneFromDemo = dataArr.length > 0 && dataArr.every(s => s.status === 'done');
             const roundsArr = thinking.rtRounds || [];
             const roundsActive = roundsArr.some(r => r.status === 'active');
             const roundsDone = roundsArr.length > 0 && roundsArr.every(r => r.status === 'done');
+            const mods = thinking.modules || [];
+            const dataModuleCompleted = mods.some(
+                m => (m.type === 'search' || m.type === 'analysis' || m.type === 'web3') && m.status === 'completed'
+            );
+            const dataModuleActive = mods.some(
+                m =>
+                    (m.type === 'search' || m.type === 'analysis' || m.type === 'web3') &&
+                    (m.status === 'active' || (m.status as string) === 'analyzing')
+            );
+            const consensusDone = thinking.rtConsensus?.status === 'done';
+            const consensusActive = thinking.rtConsensus?.status === 'active'
+                || mods.some(m => m.type === 'consensus' && m.status === 'active');
+            const reportActive = thinking.isActive && consensusDone;
+            const reportDone = thinking.rtReportStatus === 'done'
+                || (!thinking.isActive && consensusDone);
+
             return [
                 { key: 'summon', label: 'Summon',
-                    done: thinking.rtPreparationStatus === 'done',
-                    active: thinking.rtPreparationStatus !== 'done' && !dataActive && !roundsActive },
+                    done: roundsArr.length > 0 || roundsActive || consensusActive || consensusDone || thinking.rtPreparationStatus === 'done',
+                    active: thinking.rtPreparationStatus !== 'done' && roundsArr.length === 0 && !consensusActive && !consensusDone },
                 { key: 'research', label: 'Research',
-                    done: dataDone, active: dataActive },
+                    done: dataModuleCompleted || dataDoneFromDemo,
+                    active: !dataModuleCompleted && (dataActive || dataModuleActive) },
                 { key: 'debate', label: 'Debate',
-                    done: roundsDone, active: roundsActive },
+                    done: roundsDone || consensusDone,
+                    active: !consensusDone && (roundsActive || (roundsArr.length > 0 && !roundsDone)) },
                 { key: 'consensus', label: 'Consensus',
-                    done: thinking.rtConsensus?.status === 'done',
-                    active: thinking.rtConsensus?.status === 'active' },
+                    done: consensusDone,
+                    active: !consensusDone && consensusActive },
                 { key: 'report', label: 'Report',
-                    done: thinking.rtReportStatus === 'done',
-                    active: thinking.rtReportStatus === 'active' },
+                    done: reportDone,
+                    active: !reportDone && reportActive },
             ];
         }
         const trace = thinking.toolTrace || [];
         const anyRunning = trace.some(t => t.status === 'running');
         const anyDone = trace.some(t => t.status === 'done');
+        // Research turns green once all tools stop running — don't gate on
+        // !thinking.isActive, since that's also true during the Respond/
+        // synthesis phase (tools are done but model is still streaming).
+        const researchDone = anyDone && !anyRunning;
         return [
             { key: 'route', label: 'Route',
                 done: !!thinking.routedMode, active: !thinking.routedMode && thinking.isActive },
             { key: 'research', label: 'Research',
-                done: anyDone && !anyRunning && !thinking.isActive,
+                done: researchDone,
                 active: anyRunning },
             { key: 'respond', label: 'Respond',
                 done: !thinking.isActive,
@@ -2429,6 +2461,130 @@ const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> =
     );
 };
 
+/**
+ * Per-persona "thinking…" rotating activity messages so the panel feels
+ * alive while we wait for backend agents to finish their LLM calls.
+ * Each persona category gets a tailored activity vocabulary so the user
+ * sees what kind of work each analyst is actually doing.
+ */
+const THINKING_ACTIVITIES: Record<string, string[]> = {
+    fundamental_specialist: [
+        'Parsing latest 10-K filing…', 'Cross-checking peer margins…', 'Inspecting FCF conversion…', 'Stress-testing the moat…', 'Screening earnings quality…',
+    ],
+    valuation_specialist: [
+        'Building DCF model…', 'Calibrating WACC…', 'Reverse-engineering implied growth…', 'Comparing peer multiples…', 'Sizing margin of safety…',
+    ],
+    macro_specialist: [
+        'Reading latest CPI print…', 'Watching the yield curve…', 'Gauging liquidity regime…', 'Mapping cycle position…', 'Decoding central-bank tone…',
+    ],
+    risk_specialist: [
+        'Estimating tail-risk exposure…', 'Running stress scenarios…', 'Tracking correlation shifts…', 'Modeling max drawdown…', 'Pricing hedge cost…',
+    ],
+    sentiment_focus: [
+        'Sampling social sentiment…', 'Scoring news polarity…', 'Counting insider transactions…', 'Spotting retail/institutional divergence…', 'Calibrating bull/bear ratio…',
+    ],
+    event_driven: [
+        'Mapping the catalyst calendar…', 'Hunting M&A signals…', 'Assessing regulatory moves…', 'Reading option-implied moves…', 'Pricing event premium…',
+    ],
+    allocation_specialist: [
+        'Computing marginal correlation…', 'Evaluating portfolio fit…', 'Auditing sector exposure…', 'Checking rebalance thresholds…', 'Sizing tracking error…',
+    ],
+    fund_specialist: [
+        'Analyzing holdings concentration…', 'Comparing fee structures…', 'Detecting style drift…', 'Calibrating capture ratios…', 'Reviewing manager incentives…',
+    ],
+    options_specialist: [
+        'Reading the vol surface…', 'Calibrating Greeks exposure…', 'Comparing IV vs RV…', 'Measuring put/call skew…', 'Modeling theta decay…',
+    ],
+    crypto_specialist: [
+        'Counting active on-chain addresses…', 'Watching exchange netflow…', 'Tracking stablecoin supply…', 'Measuring TVL deltas…', 'Comparing funding rates…',
+    ],
+    buffett_style: [
+        'Inspecting moat durability…', 'Grading capital allocation…', 'Calibrating intrinsic value…', 'Demanding margin of safety…', 'Testing circle of competence…',
+    ],
+    munger_style: [
+        'Inverting the failure paths…', 'Auditing management incentives…', 'Applying mental models…', 'Probing accounting choices…', 'Stress-testing common sense…',
+    ],
+    burry_style: [
+        'Hunting deep contrarian setups…', 'Reading the debt maturity wall…', 'Comparing EV vs liquidation…', 'Spotting insider anomalies…', 'Pinpointing concrete catalysts…',
+    ],
+    lynch_style: [
+        'Computing PEG ratio…', 'Inspecting unit economics…', 'Watching insider buying…', 'Sharpening the two-minute thesis…', 'Sniffing for diworsification…',
+    ],
+    wood_style: [
+        "Applying Wright's Law…", 'Projecting 5-yr TAM…', 'Sizing R&D intensity…', 'Mapping cost curves…', 'Pricing platform optionality…',
+    ],
+    soros_style: [
+        'Identifying reflexive loops…', 'Spotting narrative dislocations…', 'Watching trend inflection points…', 'Probing policy credibility…', 'Reading positioning extremes…',
+    ],
+    dalio_style: [
+        'Locating the debt-cycle phase…', 'Calibrating all-weather exposure…', 'Pricing currency-debasement risk…', 'Tracking cross-asset correlation…', 'Auditing risk-parity weights…',
+    ],
+};
+const DEFAULT_THINKING_ACTIVITIES = [
+    'Gathering relevant data…', 'Analyzing market structure…', 'Calibrating valuation inputs…', 'Comparing historical analogs…', 'Forming an independent view…',
+];
+
+const ThinkingAnalystsList: React.FC<{ allAgents: typeof SUMMON_POOL }> = ({ allAgents }) => {
+    // Cycle index advances every 1.6s. All agents share the same tick to
+    // keep animations in sync; per-agent variation comes from index offset.
+    const [tick, setTick] = useState(0);
+    useEffect(() => {
+        const id = setInterval(() => setTick(t => t + 1), 1600);
+        return () => clearInterval(id);
+    }, []);
+    if (!allAgents.length) {
+        return (
+            <div className="h-full flex items-center justify-center py-6">
+                <span className="text-[12px] text-gray-400 italic">Summoning analysts…</span>
+            </div>
+        );
+    }
+    return (
+        <div className="space-y-2 py-1">
+            {allAgents.map((a, i) => {
+                const activities = THINKING_ACTIVITIES[a.id] || DEFAULT_THINKING_ACTIVITIES;
+                // Stagger per-agent so they don't all switch text at the same instant.
+                const idx = (tick + i * 2) % activities.length;
+                const activity = activities[idx];
+                return (
+                    <div
+                        key={a.id}
+                        className="flex items-center gap-2 px-2 py-1.5"
+                        style={{ animation: `summon-text 0.4s ease-out ${i * 80}ms both` }}
+                    >
+                        <div
+                            className="shrink-0 rounded-full p-[2px]"
+                            style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
+                        >
+                            <div className="rounded-full border-2 border-white overflow-hidden" style={{ width: 24, height: 24 }}>
+                                <AgentAvatarImg nameOrId={a.id} size={24} />
+                            </div>
+                        </div>
+                        <span className="text-[12px] font-medium text-gray-700 shrink-0">
+                            {a.name}
+                        </span>
+                        <span className="inline-flex gap-0.5 ml-0.5 shrink-0">
+                            {[0, 1, 2].map(d => (
+                                <span key={d} className="w-1 h-1 rounded-full bg-gray-400"
+                                    style={{ animation: `summon-dot 1.2s ease-in-out ${d * 0.18}s infinite` }} />
+                            ))}
+                        </span>
+                        {/* Rolling activity text — each tick fades old line out and new line in */}
+                        <span
+                            key={`${a.id}-${idx}`}
+                            className="text-[11px] text-gray-500 italic ml-1 truncate"
+                            style={{ animation: 'summon-text 0.45s ease-out both' }}
+                            title={activity}
+                        >
+                            {activity}
+                        </span>
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
 const RoundtableWorkbench: React.FC<{
     thinking: ThinkingFlow;
     isLive: boolean;
@@ -2613,9 +2769,13 @@ const RoundtableWorkbench: React.FC<{
                     ) : (
                         <div ref={debateScrollRef} className="absolute inset-0 overflow-y-auto px-4 py-3">
                             {rounds.length === 0 ? (
-                                <div className="h-full flex items-center justify-center">
-                                    <p className="text-[12px] text-gray-400 italic">Debate hasn't started yet…</p>
-                                </div>
+                                isLive ? (
+                                    <ThinkingAnalystsList allAgents={allAgents} />
+                                ) : (
+                                    <div className="h-full flex items-center justify-center">
+                                        <p className="text-[12px] text-gray-400 italic">Debate hasn't started yet…</p>
+                                    </div>
+                                )
                             ) : (
                                 <div className={fullscreen ? "space-y-8" : "space-y-5"}>
                                     {rounds.map(round => {
@@ -2686,6 +2846,54 @@ const RoundtableWorkbench: React.FC<{
                                                         </div>
                                                     );
                                                 })}
+                                                {/* Placeholders for agents in this round who have not
+                                                    responded YET. Without these, an active round looks
+                                                    blank for 5-15s while LLM calls run. We render a
+                                                    lightweight "thinking" row per pending persona so
+                                                    the user sees who's still working. */}
+                                                {round.status !== 'done' && (() => {
+                                                    const respondedIds = new Set(round.agents.map(a => a.agentId));
+                                                    const pending = allAgents.filter(a => !respondedIds.has(a.id));
+                                                    if (pending.length === 0) return null;
+                                                    return (
+                                                        <div className="space-y-2 pt-1">
+                                                            {pending.map((a, pi) => {
+                                                                const activities = THINKING_ACTIVITIES[a.id] || DEFAULT_THINKING_ACTIVITIES;
+                                                                // Use round number + agent index as a stable rotation seed
+                                                                // so each row shows a different activity message.
+                                                                const idx = (round.round * 7 + pi * 3) % activities.length;
+                                                                return (
+                                                                    <div
+                                                                        key={`${round.round}-pending-${a.id}`}
+                                                                        className="flex items-center gap-2 px-2 py-1 opacity-70"
+                                                                        style={{ animation: `summon-text 0.4s ease-out ${pi * 60}ms both` }}
+                                                                    >
+                                                                        <div
+                                                                            className="shrink-0 rounded-full p-[2px]"
+                                                                            style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
+                                                                        >
+                                                                            <div className="rounded-full border-2 border-white overflow-hidden" style={{ width: 22, height: 22 }}>
+                                                                                <AgentAvatarImg nameOrId={a.id} size={22} />
+                                                                            </div>
+                                                                        </div>
+                                                                        <span className="text-[11.5px] font-medium text-gray-600 shrink-0">
+                                                                            {a.name}
+                                                                        </span>
+                                                                        <span className="inline-flex gap-0.5 ml-0.5 shrink-0">
+                                                                            {[0, 1, 2].map(d => (
+                                                                                <span key={d} className="w-1 h-1 rounded-full bg-gray-400"
+                                                                                    style={{ animation: `summon-dot 1.2s ease-in-out ${d * 0.18}s infinite` }} />
+                                                                            ))}
+                                                                        </span>
+                                                                        <span className="text-[10.5px] text-gray-400 italic ml-1 truncate">
+                                                                            {activities[idx]}
+                                                                        </span>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                         );
@@ -4568,7 +4776,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const nextStatus = isDowngradeToActive ? prevStatus : incoming;
                     mods[modIdx] = { ...prev, status: nextStatus as any };
                     if (data.data) {
-                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...data.data };
+                        // When we block a status downgrade, also protect the
+                        // nested data.status field so renderers (e.g. ConsensusModule
+                        // which reads data.status to drive its sub-step UI) don't
+                        // see the module flip back to an earlier state.
+                        const incomingData = isDowngradeToActive
+                            ? Object.fromEntries(
+                                Object.entries(data.data).filter(([k]) => k !== 'status'),
+                            )
+                            : data.data;
+                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...incomingData };
                     }
                 }
 
@@ -5544,6 +5761,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             };
         });
 
+        // ── Demo animation gate ──
+        // When true, the legacy mock-data + timed reveal still runs
+        // (useful for offline UI previewing). When false (default in
+        // production), the panel scaffolds empty and waits for real
+        // backend events to fill it in. We turned this OFF after Stage 5
+        // wired the AgentRoom / Debate Tab to live socket events —
+        // otherwise users see ~30s of fake "Revenue grew 18%" mock
+        // before real consensus output arrives.
+        const USE_DEMO_ANIMATION = false;
+
         // ── Build final-state data (used to hydrate each stage) ──
         const finalR1Agents: RtAgentInference[] = r1Agents.map((a, i) => ({
             agentId: a.id,
@@ -5656,12 +5883,35 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
         // Clear any previous timers (e.g. rapid re-confirm) before scheduling
         rtDemoTimersRef.current.forEach(clearTimeout);
-        rtDemoTimersRef.current = steps.map(s => setTimeout(s.run, s.t));
+        rtDemoTimersRef.current = USE_DEMO_ANIMATION
+            ? steps.map(s => setTimeout(s.run, s.t))
+            : [];
         // Send REAL selection to backend — 4 system (always on) + user-picked
         // enhanced/master personas. Demo injection above is UI preview only.
         const systemIds = SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id);
         const userPickedIds = [...selectedSummonIds].filter(id => !systemIds.includes(id));
         const realAnalystIds = [...systemIds, ...userPickedIds];
+
+        // When demo is off, also overwrite the demo state init's
+        // `selectedAgentIds: demoAgentIds` (which can include 3 unrelated
+        // master personas as "preview" picks) with the actual roster the
+        // user chose. The onAnalystsSelected socket event will refresh this
+        // again with backend-resolved metadata, but doing it eagerly avoids
+        // a momentary flash of the wrong avatars in the AgentRoom.
+        if (!USE_DEMO_ANIMATION) {
+            setThinkingProcesses(prev => {
+                const existing = prev[nextMsgIdx];
+                if (!existing) return prev;
+                return {
+                    ...prev,
+                    [nextMsgIdx]: {
+                        ...existing,
+                        selectedAgentIds: realAnalystIds,
+                    },
+                };
+            });
+        }
+
         sendToAI(text, messages, realAnalystIds);
         setTimeout(scrollUserMsgToTop, 150);
     }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop, selectedSummonIds]);

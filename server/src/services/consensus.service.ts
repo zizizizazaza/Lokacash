@@ -94,6 +94,88 @@ export async function pyFetch<T = any>(path: string, options: RequestInit = {}):
   return res.json() as Promise<T>;
 }
 
+/**
+ * Stream events from aegean's POST /groups/:id/consensus/stream SSE endpoint.
+ *
+ * Each `data: ...\\n\\n` chunk is a JSON event from the coordinator's
+ * event_sink. The terminating event is `{type:'final_result', result:{...}}`
+ * — we resolve the returned promise with `result`. Intermediate events are
+ * forwarded to `onEvent` so the caller can fire socket emits in real time.
+ */
+async function streamConsensus(
+  groupId: string,
+  body: Record<string, unknown>,
+  onEvent: (event: ConsensusStreamEvent) => void,
+): Promise<any> {
+  const url = `${CONSENSUS_BASE}/groups/${groupId}/consensus/stream`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Python SSE ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let finalResult: any = null;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // SSE messages are separated by blank lines.
+      const parts = buf.split('\n\n');
+      buf = parts.pop() ?? '';
+      for (const part of parts) {
+        const dataLine = part.split('\n').find((l) => l.startsWith('data: '));
+        if (!dataLine) continue;
+        const json = dataLine.slice('data: '.length).trim();
+        if (!json) continue;
+        let evt: ConsensusStreamEvent;
+        try {
+          evt = JSON.parse(json) as ConsensusStreamEvent;
+        } catch (parseErr) {
+          console.warn('[Consensus SSE] bad JSON:', json.slice(0, 120));
+          continue;
+        }
+        try {
+          onEvent(evt);
+        } catch (cbErr) {
+          console.warn('[Consensus SSE] onEvent threw:', (cbErr as Error).message);
+        }
+        if (evt.type === 'final_result') finalResult = evt.result;
+        if (evt.type === 'error') {
+          throw new Error(`aegean stream error: ${evt.message}`);
+        }
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* noop */ }
+  }
+
+  if (!finalResult) {
+    throw new Error('aegean SSE closed without a final_result event');
+  }
+  return finalResult;
+}
+
+/** Live event from aegean's per-agent SSE stream during consensus. */
+export type ConsensusStreamEvent =
+  | { type: 'consensus_started'; consensus_id: string; task_preview?: string }
+  | { type: 'leader_elected'; consensus_id: string; agent_id: string }
+  | { type: 'round_started'; consensus_id: string; round_number: number; is_refinement: boolean }
+  | { type: 'agent_completed'; consensus_id: string; agent_id: string; round_number: number; is_refinement: boolean; answer: string; confidence: number }
+  | { type: 'agent_failed'; consensus_id: string; agent_id: string; round_number: number; is_refinement: boolean; error: string }
+  | { type: 'round_completed'; consensus_id: string; round_number: number; solution_count: number }
+  | { type: 'consensus_completed'; consensus_id: string; success: boolean; rounds_used: number; consensus_reached: boolean; execution_time: number }
+  | { type: 'final_result'; result: any }
+  | { type: 'error'; message: string };
+
 export interface RunConsensusOptions {
   /**
    * Optional list of analyst persona IDs to include in this run.
@@ -101,6 +183,14 @@ export interface RunConsensusOptions {
    * IDs must exist in ANALYST_CATALOG — unknown IDs are dropped.
    */
   analystIds?: string[];
+  /**
+   * Optional callback fired for every live event emitted during the
+   * consensus run (per-agent completion, round transitions, etc.).
+   * When provided, this function uses the SSE streaming endpoint instead
+   * of the synchronous POST /consensus and forwards each event to the
+   * callback in real time.
+   */
+  onLiveEvent?: (event: ConsensusStreamEvent) => void;
 }
 
 export async function runConsensusEngine(
@@ -181,17 +271,74 @@ export async function runConsensusEngine(
   const messageId = msgResult.message_id;
 
   // ── Step 4: Execute consensus ────────────────────────────
-  console.log(`[Consensus] Step 4: Executing consensus (threshold=0.6)...`);
-  const consensusResult = await pyFetch(`/groups/${groupId}/consensus`, {
-    method: 'POST',
-    body: JSON.stringify({
-      task: message,
-      message_id: messageId,
-      quorum_threshold: 0.6,
-      stability_horizon: 1,
-      max_rounds: 2,
-    }),
-  });
+  // max_rounds is computed dynamically from the roster size, not hard-coded.
+  // Reasoning: more personas need more refinement turns to read each other's
+  // peer stances and adjust. With 4 personas 3 rounds is enough; with 12 you
+  // want ~6. Aegean's stability_horizon also kicks in for early-stop when
+  // the candidate stops moving (rare with divergent personas, but possible).
+  //
+  // Tunable via env:
+  //   CONSENSUS_MIN_ROUNDS       (default 3) — never go below this
+  //   CONSENSUS_MAX_ROUNDS_CAP   (default 6) — hard upper bound (cost gate)
+  //   CONSENSUS_ROUNDS_PER_AGENT (default 0.5) — multiplier on roster size
+  //   CONSENSUS_STABILITY_HORIZON (default 2) — consecutive stable rounds for early-stop
+  //
+  // Reference: aegean's own defaults (env.example: AEGEAN_MAX_ROUNDS=5,
+  //            ConsensusConfig Pydantic default: 5, group_chat_api: 3).
+  const minRounds = Number(process.env.CONSENSUS_MIN_ROUNDS || 3);
+  const maxRoundsCap = Number(process.env.CONSENSUS_MAX_ROUNDS_CAP || 6);
+  const roundsPerAgent = Number(process.env.CONSENSUS_ROUNDS_PER_AGENT || 0.5);
+  const stabilityHorizon = Number(process.env.CONSENSUS_STABILITY_HORIZON || 2);
+  const dynamicMaxRounds = Math.min(
+    maxRoundsCap,
+    Math.max(minRounds, Math.ceil(members.length * roundsPerAgent)),
+  );
+  console.log(
+    `[Consensus] Step 4: Executing consensus (members=${members.length} max_rounds=${dynamicMaxRounds} stability_horizon=${stabilityHorizon} streaming=${options.onLiveEvent ? 'yes' : 'no'})...`,
+  );
+  const consensusBody = {
+    task: message,
+    message_id: messageId,
+    quorum_threshold: 0.6,
+    stability_horizon: stabilityHorizon,
+    max_rounds: dynamicMaxRounds,
+  };
+
+  let consensusResult: any;
+  if (options.onLiveEvent) {
+    // ── Streaming path: consume SSE so the caller sees per-agent events ──
+    try {
+      consensusResult = await streamConsensus(
+        groupId,
+        consensusBody,
+        options.onLiveEvent,
+      );
+    } catch (sseErr) {
+      const msg = (sseErr as Error).message || String(sseErr);
+      // Graceful fallback: if aegean hasn't been restarted with the new
+      // /consensus/stream endpoint, the server returns 404. Roll back to
+      // the synchronous POST so the request still completes, and log a
+      // clear hint so the operator knows to restart aegean.
+      if (msg.includes('404')) {
+        console.warn(
+          `[Consensus] /consensus/stream returned 404 — aegean likely needs restart. ` +
+          `Falling back to non-streaming POST /consensus.`,
+        );
+        consensusResult = await pyFetch(`/groups/${groupId}/consensus`, {
+          method: 'POST',
+          body: JSON.stringify(consensusBody),
+        });
+      } else {
+        throw sseErr;
+      }
+    }
+  } else {
+    // ── Legacy synchronous path (no live progress) ──
+    consensusResult = await pyFetch(`/groups/${groupId}/consensus`, {
+      method: 'POST',
+      body: JSON.stringify(consensusBody),
+    });
+  }
   console.log(`[Consensus] Step 4 ✅ Consensus finished`);
   try {
     const raw = JSON.stringify(consensusResult, null, 2);

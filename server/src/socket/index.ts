@@ -3034,18 +3034,26 @@ For each guru in the simulation data, create a detailed subsection. If the user 
             emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
             // Detect language so experts respond consistently
             const isZhTask = /[\u4e00-\u9fff]/.test(userContent);
-            const langInstruction = isZhTask
-              ? '\n\n重要：你的所有分析和结论必须全部使用中文。不要评价报告本身的质量，而是对分析主题给出你自己的独立分析和判断。'
-              : '\n\nIMPORTANT: Provide your own independent analysis of the topic, NOT a review of the report quality. Respond entirely in English.';
-            const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${userContent}"
+            // Force ALL persona answers to English regardless of the user's
+            // question language. Mixed-language output (some personas Chinese,
+            // others English) was confusing in earlier tests, and personas'
+            // own system prompts are English-native (Buffett "owner-earnings",
+            // Burry "EV vs liquidation", etc.) so English is their natural
+            // mode. The final report synthesis (Claude Deep Research pass)
+            // will translate to the user's language if needed.
+            void isZhTask;  // detection still useful for downstream report
+            const langHeader =
+              '[LANGUAGE LOCK] Your entire answer MUST be in English. ' +
+              'This applies to every field: SIGNAL / CONFIDENCE / KEY_EVIDENCE / ' +
+              'RATIONALE / WOULD_CHANGE_MY_MIND. Keep tickers as-is. ' +
+              'Do not switch to Chinese or any other language at any point.\n\n';
+            const langFooter =
+              '\n\nReminder: respond entirely in English. Follow the system ' +
+              'prompt schema strictly.';
+            const consensusTask = `${langHeader}Question: "${userContent}"
 
-Focus on:
-1. Your directional view (bullish/bearish/neutral) with conviction level
-2. Key factors supporting your view
-3. Main risks to your thesis
-4. Specific price levels or targets if applicable
-
-Research context:\n${synFullContent || contextString}${langInstruction}`;
+Raw research context (from upstream tools — search / stock data / web3):
+${synFullContent || contextString}${langFooter}`;
             // Pull analyst roster from frontend (Roundtable UI ≥5 selection).
             const analystIdsRaw = Array.isArray(data.analystIds) && data.analystIds.length > 0
               ? data.analystIds
@@ -3104,11 +3112,57 @@ Research context:\n${synFullContent || contextString}${langInstruction}`;
               analysts: rosterPayload,
             });
 
+            // Real-time live events: each persona's LLM completion is
+            // forwarded to the frontend Debate Tab the moment it arrives,
+            // not after the whole consensus finishes. Powered by aegean's
+            // /groups/:id/consensus/stream SSE endpoint added 2026-04-24.
+            // Track which (round, agentId) pairs we've already emitted so
+            // duplicate refinement events don't fan out twice.
+            const seenAgentRound = new Set<string>();
             const consensusResult = await runConsensusEngine(
               userId,
               'roundtable',
               consensusTask,
-              { analystIds },
+              {
+                analystIds,
+                onLiveEvent: (evt) => {
+                  if (isAborted()) return;
+                  // Round transitions
+                  if (evt.type === 'round_started') {
+                    socket.emit('agent:chat:round_started', {
+                      sessionId,
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
+                    return;
+                  }
+                  if (evt.type === 'round_completed') {
+                    socket.emit('agent:chat:round_completed', {
+                      sessionId,
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
+                    return;
+                  }
+                  if (evt.type === 'agent_completed') {
+                    const key = `${evt.round_number}:${evt.agent_id}`;
+                    if (seenAgentRound.has(key)) return;
+                    seenAgentRound.add(key);
+                    const answer = evt.answer || '';
+                    socket.emit('agent:chat:agent_responded', {
+                      sessionId,
+                      analystId: evt.agent_id,
+                      round: evt.round_number,
+                      confidence: evt.confidence ?? 0,
+                      summary: answer.slice(0, 400),
+                      answer,
+                    });
+                    return;
+                  }
+                  // (We ignore consensus_started / leader_elected / agent_failed
+                  //  for now — frontend doesn't render them yet.)
+                },
+              },
             );
             savedConsensusResult = consensusResult;
             
@@ -3131,58 +3185,11 @@ Research context:\n${synFullContent || contextString}${langInstruction}`;
               emitter.emitModule('consensus', 'active', { status: 'discussing', round: r, maxRounds: 3 });
             }
 
-            // ▶ NEW EVENTS: fine-grained per-round / per-agent updates so the
-            // frontend Debate Tab, Graph, and Activity Log can render live
-            // (rather than popping everything in at the very end).
-            // Rationale: aegean /consensus is synchronous, so we don't get
-            // events DURING the call; we simulate gradual reveal here with a
-            // staggered emit loop so the UI animates nicely.
-            const STAGGER_MS = 120;
-            let stagger = 0;
-            for (let r = 1; r <= roundsUsed; r++) {
-              setTimeout(() => {
-                if (isAborted()) return;
-                socket.emit('agent:chat:round_started', {
-                  sessionId,
-                  round: r,
-                  maxRounds: roundsUsed,
-                });
-              }, stagger);
-              stagger += STAGGER_MS;
-              // In this final pass we only have the last round's responses
-              // from the /consensus endpoint. Fan them out per round so the UI
-              // Debate Tab timeline gets something for every round.
-              for (const resp of agentResponses) {
-                const analystIdCaptured: string = String(resp.agentId ?? '');
-                const answerCaptured: string = String(resp.answer ?? '');
-                const confCaptured: number =
-                  typeof resp.confidence === 'number' ? resp.confidence : 0;
-                const roundCaptured = r;
-                setTimeout(() => {
-                  if (isAborted()) return;
-                  socket.emit('agent:chat:agent_responded', {
-                    sessionId,
-                    analystId: analystIdCaptured,
-                    round: roundCaptured,
-                    confidence: confCaptured,
-                    // Keep answer bounded so very long LLM outputs don't bloat
-                    // the socket frame; full answer is still in consensusResult.
-                    summary: answerCaptured.slice(0, 400),
-                    answer: answerCaptured,
-                  });
-                }, stagger);
-                stagger += STAGGER_MS;
-              }
-              setTimeout(() => {
-                if (isAborted()) return;
-                socket.emit('agent:chat:round_completed', {
-                  sessionId,
-                  round: r,
-                  maxRounds: roundsUsed,
-                });
-              }, stagger);
-              stagger += STAGGER_MS;
-            }
+            // (Per-agent reveals are now emitted live via onLiveEvent above —
+            // we no longer post-fan-out from the synchronous result, since
+            // that lost per-round identity and caused the "all rounds
+            // identical" bug. The streaming SSE fires one event per real
+            // LLM completion, so the Debate Tab updates as agents finish.)
 
             if (agentResponses.length > 0) {
               expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
@@ -3221,8 +3228,12 @@ Research context:\n${synFullContent || contextString}${langInstruction}`;
               result: consensusResult
             });
 
-            // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate
-            emitter.emitModule('consensus', 'active', { status: 'synthesizing', round: roundsUsed + 1, maxRounds: 3 });
+            // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate.
+            // IMPORTANT: do NOT emit 'consensus active' here — that would overwrite the just-emitted
+            // 'consensus completed' state with status='synthesizing', causing the right-side Process
+            // panel's ConsensusModule to revert to "Building consensus group" (step 0) for the entire
+            // 100s+ Claude streaming phase. Consensus IS done; the next phase is report-writing.
+            emitter.emitModule('report', 'active', { phase: 'deep_research_synthesis' });
             // In Roundtable mode synFullContent is empty (Phase 1 skipped),
             // so fold the "Initial Analysis Draft" section only when it exists.
             const deepResearchInput = synFullContent

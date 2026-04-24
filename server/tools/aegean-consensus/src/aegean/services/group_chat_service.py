@@ -605,6 +605,7 @@ class GroupChatService:
         stability_horizon: int = 2,
         max_rounds: int = 3,
         risk_context: Optional[Dict[str, Any]] = None,
+        event_sink=None,
     ) -> GroupConsensusResult:
         """
         Execute consensus/collaboration with group members.
@@ -675,7 +676,7 @@ class GroupChatService:
             # Consensus mode (default): all agents answer same question, weighted voting
             result = await self._execute_consensus_voting(
                 agents, task, quorum_threshold, stability_horizon, max_rounds,
-                discussion_tracker
+                discussion_tracker, event_sink=event_sink,
             )
         
         execution_time = (datetime.now() - start_time).total_seconds()
@@ -861,16 +862,20 @@ class GroupChatService:
         stability_horizon: int,
         max_rounds: int,
         discussion_tracker: DiscussionTracker,
+        event_sink=None,
     ) -> Dict[str, Any]:
         """
         Consensus mode: all agents answer same question, weighted voting.
+
+        Optional ``event_sink`` is forwarded to ``coordinator.run_consensus``
+        so SSE producers can stream per-agent completion events live.
         """
         decision_engine = WeightedDecisionEngine(
             quorum_threshold=quorum_threshold,
             stability_horizon=stability_horizon,
             agent_registry=self.agent_registry
         )
-        
+
         registry = AgentRegistry()
         for agent in agents:
             registry.register_agent(agent)
@@ -890,17 +895,17 @@ class GroupChatService:
             decision_engine=decision_engine,
         )
 
-        result = await coordinator.run_consensus(task)
+        result = await coordinator.run_consensus(task, event_sink=event_sink)
 
         # Report each agent's INITIAL (round-1) solution as agent_responses.
-        # Previous behaviour reassigned agent_responses inside the loop, so
-        # downstream consumers only saw the last round — and because
-        # MinimalAgent.refine_solution collapses every agent to the majority
-        # answer, the UI ends up showing 5 identical Debate Tab entries.
-        # Initial round preserves each persona's independent stance.
+        # IMPORTANT: do NOT gate this on result.success — when personas
+        # intentionally hold divergent views (e.g. Buffett bullish, Burry
+        # bearish), the coordinator may exhaust max_rounds without
+        # convergence (success=False). That is a feature, not a failure.
+        # We still want to surface every persona's stance to the UI.
         agent_responses = []
         discussion_rounds = []
-        if result.success and coordinator.state.solutions_history:
+        if coordinator.state.solutions_history:
             agent_responses = list(coordinator.state.solutions_history[0])
             for round_num, solutions in enumerate(coordinator.state.solutions_history, 1):
                 round_disc = discussion_tracker.record_round(
