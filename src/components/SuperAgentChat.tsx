@@ -528,15 +528,28 @@ function parsePersonaVerdict(answer: string): 'Bullish' | 'Bearish' | 'Neutral' 
 }
 
 /**
- * Extract a short reasoning snippet from a persona's raw answer. Prefers the
- * RATIONALE section if the persona followed the schema, else uses the first
- * ~200 chars.
+ * Extract a reasoning snippet from a persona's raw answer. Prefers the
+ * RATIONALE section if the persona followed the schema, else uses the body.
+ * Truncates at ~800 chars but NEVER mid-word / mid-sentence — prior 400-char
+ * hard slice was producing cut-offs like "to consider it mo" / "ETF flows ov".
  */
 function parsePersonaReasoning(answer: string): string {
     if (!answer) return '';
     const m = answer.match(/RATIONALE:\s*([\s\S]+?)(?:\n[A-Z_]+:|\n\n|$)/i);
-    if (m && m[1].trim()) return m[1].trim().slice(0, 400);
-    return answer.slice(0, 400);
+    const raw = (m && m[1].trim()) ? m[1].trim() : answer;
+    const MAX = 800;
+    if (raw.length <= MAX) return raw;
+    const chunk = raw.slice(0, MAX);
+    // Prefer cutting at the last full sentence inside the window (latin + CJK).
+    const sentenceEnds = [...chunk.matchAll(/[.!?。！？]/g)];
+    if (sentenceEnds.length > 0) {
+        const lastEnd = sentenceEnds[sentenceEnds.length - 1].index! + 1;
+        if (lastEnd >= MAX * 0.55) return chunk.slice(0, lastEnd).trim() + ' …';
+    }
+    // Fallback: cut at last whitespace so we never chop a word in half.
+    const lastWs = chunk.search(/\s\S*$/);
+    if (lastWs >= MAX * 0.8) return chunk.slice(0, lastWs) + ' …';
+    return chunk.trimEnd() + '…';
 }
 
 const AGENT_COLORS: Record<string, string> = {

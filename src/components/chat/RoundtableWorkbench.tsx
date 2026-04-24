@@ -24,6 +24,63 @@ import { AgentAvatarImg, SUMMON_POOL, fmtTs, AVATAR_MAP } from '../SuperAgentCha
 
 type TermLine = { ts: string; level: 'info' | 'run' | 'ok' | 'err' | 'hdr'; text: string };
 
+/**
+ * Render an agent's reasoning text with markdown citations like
+ *   "...price stability ([Intellectia](https://intellectia.ai/...))..."
+ * converted into compact chip-style source badges that match the main
+ * report view. Raw [label](url) syntax inside chat bubbles was bleeding
+ * full URLs into the transcript; this turns them into clickable pills.
+ * Only matches `https?://` URLs to avoid false positives on prose brackets.
+ */
+function renderReasoningWithCitations(text: string): React.ReactNode[] {
+    if (!text) return [];
+    const parts: React.ReactNode[] = [];
+    const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+    let last = 0;
+    let match: RegExpExecArray | null;
+    let key = 0;
+    // Strip trailing or surrounding parens around the whole citation.
+    while ((match = re.exec(text)) !== null) {
+        const [full, label, url] = match;
+        // Plain text before this citation
+        let start = match.index;
+        let end = start + full.length;
+        // Trim a leading ' (' and trailing ')' if the LLM wrapped the whole
+        // citation in parentheses (a common pattern).
+        const before = text.slice(last, start);
+        const trailing = text.slice(end, end + 1);
+        const cleanedBefore = before.replace(/\s*\(\s*$/, '');
+        const ate = before.length - cleanedBefore.length;
+        if (ate > 0 && trailing === ')') {
+            end += 1; // skip the closing paren too
+        }
+        if (cleanedBefore) parts.push(<span key={`t${key++}`}>{cleanedBefore}</span>);
+        const host = (() => {
+            try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
+        })();
+        const shortLabel = label.length > 18 ? label.slice(0, 16) + '…' : label;
+        parts.push(
+            <a
+                key={`c${key++}`}
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={host}
+                className="inline-flex items-center gap-1 mx-0.5 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight text-gray-500 bg-gray-50 hover:bg-gray-100 border border-gray-200/60 transition-colors no-underline hover:no-underline align-middle"
+            >
+                <svg className="w-2.5 h-2.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+                <span>{shortLabel}</span>
+            </a>
+        );
+        last = end;
+    }
+    const tail = text.slice(last);
+    if (tail) parts.push(<span key={`t${key++}`}>{tail}</span>);
+    return parts;
+}
+
 interface KGNode {
     id: string;
     type: 'asset' | 'role' | 'evidence' | 'knowledge' | 'conclusion' | 'agent' | 'task' | 'stance';
@@ -1490,7 +1547,7 @@ export const RoundtableWorkbench: React.FC<{
                                                                     <div
                                                                         className={`inline-block max-w-full border border-gray-200/80 bg-white px-3 py-2 transition-shadow rounded-2xl ${side === 'right' ? 'rounded-tr-md' : 'rounded-tl-md'} ${isActiveAgent ? 'shadow-sm' : ''}`}
                                                                     >
-                                                                        <p className="text-[11.5px] leading-relaxed text-gray-700 whitespace-pre-wrap">{a.reasoning}</p>
+                                                                        <p className="text-[11.5px] leading-relaxed text-gray-700 whitespace-pre-wrap">{renderReasoningWithCitations(a.reasoning)}</p>
                                                                     </div>
                                                                 )}
                                                             </div>
