@@ -406,34 +406,41 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
             <button
               key={`${c.sym}-${i}`}
               onClick={() => onAsk?.(`What's driving ${c.name} (${c.sym}) today?`)}
-              className={`group flex items-center gap-3 px-4 sm:px-5 py-3.5 text-left transition-colors hover:bg-gray-50 border-gray-100 ${col > 0 ? 'border-l' : ''} ${row > 0 ? 'border-t' : ''}`}
+              className={`group flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 px-3 sm:px-5 py-3 sm:py-3.5 text-left transition-colors hover:bg-gray-50 border-gray-100 ${col > 0 ? 'border-l' : ''} ${row > 0 ? 'border-t' : ''}`}
             >
-              {c.icon ? (
-                <img
-                  src={c.icon}
-                  alt={c.sym}
-                  width={22}
-                  height={22}
-                  loading="lazy"
-                  className="shrink-0 w-[22px] h-[22px] rounded-full ring-1 ring-gray-200 bg-white"
-                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                />
-              ) : (
-                <span className="shrink-0 w-[22px] h-[22px] rounded-full bg-gray-100 text-[9px] font-bold text-gray-500 flex items-center justify-center">{c.sym.slice(0, 2)}</span>
-              )}
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-[12px] font-bold tracking-wide text-gray-800">{c.sym}</span>
-                  <span className="text-[10.5px] text-gray-400 truncate">{c.name}</span>
-                </div>
-                <div className="mt-0.5 flex items-baseline gap-2">
-                  <span className="text-[15px] font-semibold text-gray-900 tabular-nums">${fmtPrice(live)}</span>
-                  <span className={`text-[11px] font-semibold tabular-nums ${up ? 'text-emerald-600' : 'text-rose-500'}`}>
-                    {up ? '▲' : '▼'} {Math.abs(c.chg).toFixed(1)}%
-                  </span>
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0 w-full sm:flex-1">
+                {c.icon ? (
+                  <img
+                    src={c.icon}
+                    alt={c.sym}
+                    width={22}
+                    height={22}
+                    loading="lazy"
+                    className="shrink-0 w-[22px] h-[22px] rounded-full ring-1 ring-gray-200 bg-white"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                  />
+                ) : (
+                  <span className="shrink-0 w-[22px] h-[22px] rounded-full bg-gray-100 text-[9px] font-bold text-gray-500 flex items-center justify-center">{c.sym.slice(0, 2)}</span>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-[12px] font-bold tracking-wide text-gray-800">{c.sym}</span>
+                    <span className="text-[10.5px] text-gray-400 truncate">{c.name}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-baseline gap-1.5 sm:gap-2">
+                    <span className="text-[14px] sm:text-[15px] font-semibold text-gray-900 tabular-nums truncate">${fmtPrice(live)}</span>
+                    <span className={`text-[11px] font-semibold tabular-nums shrink-0 ${up ? 'text-emerald-600' : 'text-rose-500'}`}>
+                      {up ? '▲' : '▼'} {Math.abs(c.chg).toFixed(1)}%
+                    </span>
+                  </div>
                 </div>
               </div>
-              <svg width={56} height={24} viewBox="0 0 56 24" className="shrink-0" aria-hidden>
+              <svg
+                viewBox="0 0 56 24"
+                preserveAspectRatio="none"
+                className="shrink-0 w-full h-[20px] sm:w-[56px] sm:h-[24px] opacity-90"
+                aria-hidden
+              >
                 <path
                   d={sparkPath(c.spark, 56, 24)}
                   fill="none"
@@ -441,6 +448,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
                   strokeWidth={1.5}
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  vectorEffect="non-scaling-stroke"
                 />
               </svg>
             </button>
