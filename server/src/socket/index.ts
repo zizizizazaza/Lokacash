@@ -3171,11 +3171,26 @@ ${synFullContent || contextString}${langFooter}`;
             // Collect individual expert perspectives with structured debate context
             let expertDebateContext = '';
             const agentResponses = consensusResult.consensus?.agentResponses || [];
-            const nameMap: Record<string, string> = {
-              agent_0: 'Fundamental Analyst',
-              agent_1: 'Macro Strategist',
-              agent_2: 'Sentiment Engine',
-              agent_3: 'Quant Tracker',
+            // Resolve agent IDs to their real catalog names so the synthesis
+            // LLM cites "Warren Buffett / Fundamental Analyst" etc. instead of
+            // falling back to "Expert 1 / 专家1" generic placeholders. The prior
+            // nameMap only covered the 4 legacy IDs (agent_0..agent_3); every
+            // modern persona like fundamental_specialist / buffett_style /
+            // munger_style dropped through to the numeric fallback.
+            const isZhQuery = /[一-鿿]/.test(userContent || '');
+            const resolveAgentName = (agentId: string, idx: number): string => {
+              const persona = getAnalystById(agentId);
+              if (persona) {
+                return isZhQuery ? persona.displayName.zh : persona.displayName.en;
+              }
+              // Legacy aegean IDs that predate the catalog
+              const legacy: Record<string, string> = {
+                agent_0: 'Fundamental Analyst',
+                agent_1: 'Macro Strategist',
+                agent_2: 'Sentiment Engine',
+                agent_3: 'Quant Tracker',
+              };
+              return legacy[agentId] || `Expert ${idx + 1}`;
             };
             const roundsUsed = Number(consensusResult.consensus?.roundsUsed ?? 1) || 1;
             const consensusReached = consensusResult.consensus?.consensusReached !== false;
@@ -3197,9 +3212,18 @@ ${synFullContent || contextString}${langFooter}`;
               expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
               expertDebateContext += `Consensus confidence: ${Math.round(Number(consensusResult.consensus?.confidence ?? 0) * 100)}%\n\n`;
               expertDebateContext += `Final Consensus Verdict:\n${finalAnswerText}\n\n`;
+              // IMPORTANT naming rule — each position below is labelled with a
+              // specific analyst name (e.g. "Warren Buffett", "Fundamental
+              // Analyst"). The report MUST cite these exact names when
+              // referencing a position. Do NOT replace them with generic
+              // placeholders like "Expert 1 / 专家1 / Analyst A" — the reader
+              // picked these personas and needs to see them by name.
+              expertDebateContext += isZhQuery
+                ? `【命名规则】下方每一位专家的名字都必须在正文中原样引用(如"沃伦·巴菲特视角认为…"),禁止替换成"专家1/专家2"等匿名编号。\n\n`
+                : `[NAMING RULE] Each position below is labelled with a specific analyst name. Your report MUST reference them by these exact names when attributing views (e.g. "Warren Buffett's lens argues…"). Do NOT substitute with "Expert 1 / Analyst A / 专家1" or any numeric placeholder.\n\n`;
               expertDebateContext += `Individual Expert Positions:\n`;
               agentResponses.forEach((resp: any, idx: number) => {
-                const name = nameMap[resp.agentId] || `Expert ${idx + 1}`;
+                const name = resolveAgentName(resp.agentId, idx);
                 const conf = Math.round((resp.confidence || 0) * 100);
                 expertDebateContext += `--- ${name} (${conf}% confidence) ---\n${resp.answer}\n\n`;
               });
