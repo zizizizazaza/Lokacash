@@ -346,11 +346,30 @@ export function extractQuoteSnapshot(content: string): { quote: QuoteData | null
     }
   }
 
+  // Guard against LLM hallucinating a descriptive sentence in place of a
+  // numeric price (e.g. "68亿-290亿总市值区间(3月26日报214元…)"). A real
+  // price string is at most ~15 chars — anything longer than 20 or packed
+  // with Chinese connector words is definitely not a price. Rejecting it
+  // here prevents the QuoteCard's shrink-0 price column from blowing out
+  // the header and squashing the company name into a vertical strip.
+  const looksLikePrice = (v?: string) => {
+    if (!v) return false;
+    const t = v.trim();
+    if (t.length > 20) return false;
+    // Must contain at least one digit
+    if (!/\d/.test(t)) return false;
+    // Reject if it contains obvious descriptive markers
+    if (/[区间到至报价涨停跌停日月]/.test(t)) return false;
+    return true;
+  };
+
+  const rawPrice = data['last price'] || data['last'] || data['最新价'] || data['现价'] || undefined;
+
   const quote: QuoteData = {
     symbol,
     name: data['name'] || data['股票名称'] || data['项目名称'] || data['名称'] || undefined,
     market: data['market'] || data['所属市场'] || data['市场'] || data['交易所'] || undefined,
-    price: data['last price'] || data['last'] || data['最新价'] || data['现价'] || undefined,
+    price: looksLikePrice(rawPrice) ? rawPrice : undefined,
     change:
       data['change (%)'] || data['change'] || data['chg%'] ||
       data['24小时涨跌幅'] || data['24h change (%)'] || data['24h change'] ||
@@ -466,20 +485,20 @@ export function QuoteCard({
     <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
       {/* Header */}
       <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2.5">
-            <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{quote.symbol}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none truncate">{quote.symbol}</span>
             {quote.market && (
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase`}>{quote.market}</span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase shrink-0`}>{quote.market}</span>
             )}
           </div>
-          {quote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide">{quote.name}</p>}
+          {quote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide truncate">{quote.name}</p>}
         </div>
         {ok(quote.price) && (
-          <div className="text-right shrink-0 flex flex-col items-end">
-            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{quote.price}</p>
+          <div className="text-right flex flex-col items-end min-w-0 max-w-[45%]">
+            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight truncate max-w-full">{quote.price}</p>
             {ok(quote.change) && (
-              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${changeBg} ${changeColor} tabular-nums`}>
+              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${changeBg} ${changeColor} tabular-nums truncate max-w-full`}>
                 {isPositive && <span className="mr-0.5">▲</span>}
                 {isNegative && <span className="mr-0.5">▼</span>}
                 {quote.change}
