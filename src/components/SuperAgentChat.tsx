@@ -1188,47 +1188,77 @@ const STATIC_KG_DATA: KnowledgeGraphData = {
 const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
 
 /**
- * Build a knowledge graph from the real roundtable state flowing in from
- * `agent_responded` / `consensus_done` socket events. Nodes:
- *   - 1 central topic node (from the user's prompt / chat title)
- *   - N role nodes — one per selected analyst — with initial/final signal,
- *     confidence and whether they changed position between round 1 and N
- *   - 1 conclusion node — final verdict, confidence, conflict rate
- * Edges:
- *   - role → topic (analyzes)
- *   - role → conclusion (converges_to, labelled with their final signal)
- *   - role ↔ role (challenges) when two agents' final verdicts disagree
+ * Build a progressive knowledge graph from whatever roundtable state is
+ * available right now — the graph grows in stages as data arrives:
  *
- * Returns null when there's no usable data yet, letting the caller fall
- * back to a placeholder or the demo graph.
+ *   Stage 0: Summon done                → topic + N pending role nodes
+ *   Stage 1: Research modules complete  → + knowledge source nodes
+ *   Stage 2: Round 1 agents respond     → + evidence nodes (per stance)
+ *   Stage 3: Consensus done             → + conclusion node + challenge edges
+ *
+ * Never returns null and never falls back to demo AAPL data. At minimum
+ * returns the topic node + selected agents (pending). The caller can trust
+ * this to render a meaningful graph at every stage of a roundtable turn.
  */
 function buildRealKnowledgeGraph(
     thinking: ThinkingFlow | undefined,
     topicLabel: string = 'Research Topic',
-): KnowledgeGraphData | null {
-    if (!thinking) return null;
-    const agentIds = thinking.selectedAgentIds || [];
-    const rounds = thinking.rtRounds || [];
-    const consensus = thinking.rtConsensus;
-    if (agentIds.length === 0 || rounds.length === 0) return null;
-
-    const firstRoundAgents = rounds[0]?.agents || [];
-    const lastRoundAgents = rounds[rounds.length - 1]?.agents || [];
-    // Need at least one agent with a real response before the graph is meaningful.
-    const anyResponded = lastRoundAgents.some(a => a.status === 'done' && a.verdict);
-    if (!anyResponded) return null;
-
+): KnowledgeGraphData {
     const nodes: KGNode[] = [];
     const edges: KGEdge[] = [];
 
+    const agentIds = thinking?.selectedAgentIds || [];
+    const rounds = thinking?.rtRounds || [];
+    const consensus = thinking?.rtConsensus;
+    const modules = thinking?.modules || [];
+
+    // 1. Topic node — always present
+    const topicDisplay = topicLabel.length > 26 ? topicLabel.slice(0, 24) + '…' : topicLabel;
     nodes.push({
         id: 'topic_main',
         type: 'asset',
-        label: topicLabel.length > 24 ? topicLabel.slice(0, 22) + '…' : topicLabel,
+        label: topicDisplay || 'Research Topic',
         group: 'center',
         x: 0, y: 0,
-        data: { summary: topicLabel },
+        data: { summary: topicLabel || 'Pending research topic' },
     });
+
+    // 2. Knowledge source nodes — from completed research modules.
+    // One node per distinct data-gathering track (web / web3 / stock analysis).
+    const knowledgeMeta: Array<{ id: string; label: string; kind: string; summary: string }> = [];
+    const seenKinds = new Set<string>();
+    for (const m of modules) {
+        if (m.status !== 'completed' && m.status !== 'active') continue;
+        const t = m.type;
+        if (seenKinds.has(t)) continue;
+        if (t === 'search') {
+            knowledgeMeta.push({ id: 'knowledge_search', label: 'News & Reports', kind: 'news_feed', summary: 'Web search results — news, filings, analyst reports.' });
+            seenKinds.add(t);
+        } else if (t === 'web3') {
+            knowledgeMeta.push({ id: 'knowledge_web3', label: 'On-chain Data', kind: 'data_feed', summary: 'OKX price, funding, open interest + CoinGecko markets.' });
+            seenKinds.add(t);
+        } else if (t === 'analysis') {
+            knowledgeMeta.push({ id: 'knowledge_analysis', label: 'Stock Fundamentals', kind: 'data_feed', summary: 'Realtime quote + fundamentals + historical OHLC.' });
+            seenKinds.add(t);
+        }
+    }
+    for (const k of knowledgeMeta) {
+        nodes.push({
+            id: k.id, type: 'knowledge', label: k.label, group: 'knowledge',
+            x: 0, y: 0,
+            data: { knowledge_type: k.kind, summary: k.summary },
+        });
+        edges.push({
+            id: `edge_${k.id}_topic`,
+            source: k.id, target: 'topic_main',
+            type: 'informs', label: 'informs',
+        });
+    }
+
+    // 3. Agent role nodes — from selectedAgentIds. Pending until the
+    //    backend emits a per-agent response, then filled in progressively.
+    const firstRoundAgents = rounds[0]?.agents || [];
+    const lastRoundAgents = rounds[rounds.length - 1]?.agents || [];
 
     for (const agentId of agentIds) {
         const meta = SUMMON_POOL.find(a => a.id === agentId);
@@ -1237,19 +1267,15 @@ function buildRealKnowledgeGraph(
         const last = lastRoundAgents.find(a => a.agentId === agentId);
         const initial = (first?.verdict || '').toLowerCase();
         const final = (last?.verdict || initial || '').toLowerCase();
-        const confidence = ((last?.confidence ?? first?.confidence ?? 50) as number) / 100;
+        const confidence = ((last?.confidence ?? first?.confidence ?? 0) as number) / 100;
         const summary = last?.reasoning || first?.reasoning || meta.role;
         const changed = !!initial && !!final && initial !== final;
         const roleId = `role_${agentId}`;
         nodes.push({
-            id: roleId,
-            type: 'role',
-            label: meta.name,
-            group: 'role',
+            id: roleId, type: 'role', label: meta.name, group: 'role',
             x: 0, y: 0,
             data: {
-                agentId,
-                color: meta.color,
+                agentId, color: meta.color,
                 initial_signal: initial || 'pending',
                 final_signal: final || 'pending',
                 confidence,
@@ -1259,21 +1285,65 @@ function buildRealKnowledgeGraph(
         });
         edges.push({
             id: `edge_${roleId}_topic`,
-            source: roleId,
-            target: 'topic_main',
-            type: 'analyzes',
-            label: 'analyzes',
+            source: roleId, target: 'topic_main',
+            type: 'analyzes', label: 'analyzes',
+        });
+        // Every role draws from every knowledge source — visually shows
+        // the committee is informed by the same evidence pool.
+        for (const k of knowledgeMeta) {
+            edges.push({
+                id: `edge_${k.id}_${roleId}`,
+                source: k.id, target: roleId,
+                type: 'informs', label: 'informs',
+            });
+        }
+    }
+
+    // 4. Evidence nodes — one per agent who has reached a verdict. The
+    //    evidence label compresses the agent's stance into a short phrase
+    //    and polarity is inferred from bullish/bearish/buy/sell keywords.
+    const strongAgents = lastRoundAgents.filter(a => a.status === 'done' && a.verdict);
+    for (const a of strongAgents) {
+        const meta = SUMMON_POOL.find(s => s.id === a.agentId);
+        if (!meta) continue;
+        const verdict = (a.verdict || '').toLowerCase();
+        const polarity =
+            /bull|buy|long|加多|看多|看涨|买入/.test(verdict) ? 'positive'
+            : /bear|sell|short|看空|看跌|做空|卖出/.test(verdict) ? 'negative'
+            : 'neutral';
+        const eid = `evidence_${a.agentId}`;
+        const label = `${meta.name} · ${a.verdict}`;
+        nodes.push({
+            id: eid, type: 'evidence',
+            label,
+            group: polarity === 'positive' ? 'evidence_positive'
+                 : polarity === 'negative' ? 'evidence_negative'
+                 : 'evidence_neutral',
+            x: 0, y: 0,
+            data: {
+                polarity,
+                importance: 'medium',
+                category: 'stance',
+                detail: a.reasoning || '',
+                cited_by: [meta.name],
+            },
+        });
+        edges.push({
+            id: `edge_role_${a.agentId}_${eid}`,
+            source: `role_${a.agentId}`, target: eid,
+            type: 'cites', label: 'cites',
         });
     }
 
+    // 5. Conclusion node + converges/challenges edges — only after
+    //    consensus is reached.
     const hasConclusion = consensus && (consensus.status === 'done' || !!consensus.finalVerdict);
     if (hasConclusion) {
         const finalVerdict = (consensus!.finalVerdict || 'HOLD').toUpperCase();
         const finalConf = Math.round(consensus!.finalConfidence ?? 50);
         const conflict = Math.round(consensus!.conflictRate ?? 0);
         nodes.push({
-            id: 'conclusion_action',
-            type: 'conclusion',
+            id: 'conclusion_action', type: 'conclusion',
             label: `Final: ${finalVerdict} · ${finalConf}%`,
             group: 'conclusion',
             x: 0, y: 0,
@@ -1283,6 +1353,7 @@ function buildRealKnowledgeGraph(
                 summary: `Committee verdict: ${finalVerdict}. Weighted confidence ${finalConf}%. Conflict rate ${conflict}%.`,
             },
         });
+        // Each role → conclusion
         for (const agentId of agentIds) {
             const roleId = `role_${agentId}`;
             if (!nodes.find(n => n.id === roleId)) continue;
@@ -1290,14 +1361,22 @@ function buildRealKnowledgeGraph(
             const vlow = (last?.verdict || '').toLowerCase();
             edges.push({
                 id: `edge_${roleId}_final`,
-                source: roleId,
-                target: 'conclusion_action',
+                source: roleId, target: 'conclusion_action',
                 type: 'converges_to',
                 label: vlow ? `supports_${vlow}` : 'converges_to',
             });
         }
-        // Pairwise disagreement edges — draw once per pair, only when both
-        // sides reached a non-empty verdict and they differ.
+        // Each evidence → conclusion
+        for (const a of strongAgents) {
+            const eid = `evidence_${a.agentId}`;
+            if (!nodes.find(n => n.id === eid)) continue;
+            edges.push({
+                id: `edge_${eid}_final`,
+                source: eid, target: 'conclusion_action',
+                type: 'supports', label: 'supports',
+            });
+        }
+        // Pairwise disagreement between roles (drawn once per pair)
         for (let i = 0; i < agentIds.length; i++) {
             for (let j = i + 1; j < agentIds.length; j++) {
                 const a = lastRoundAgents.find(x => x.agentId === agentIds[i]);
@@ -1307,10 +1386,8 @@ function buildRealKnowledgeGraph(
                 if (av && bv && av !== bv) {
                     edges.push({
                         id: `edge_challenge_${agentIds[i]}_${agentIds[j]}`,
-                        source: `role_${agentIds[i]}`,
-                        target: `role_${agentIds[j]}`,
-                        type: 'challenges',
-                        label: 'disagrees',
+                        source: `role_${agentIds[i]}`, target: `role_${agentIds[j]}`,
+                        type: 'challenges', label: 'disagrees',
                     });
                 }
             }
@@ -2932,7 +3009,7 @@ const RoundtableWorkbench: React.FC<{
                     {tab === 'graph' ? (
                         <div className="absolute inset-0">
                             <KnowledgeGraphView
-                                data={buildRealKnowledgeGraph(thinking, topicLabel) || buildKnowledgeGraph()}
+                                data={buildRealKnowledgeGraph(thinking, topicLabel)}
                                 animate={isLive}
                             />
                         </div>
