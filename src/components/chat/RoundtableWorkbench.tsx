@@ -27,58 +27,81 @@ type TermLine = { ts: string; level: 'info' | 'run' | 'ok' | 'err' | 'hdr'; text
 /**
  * Render an agent's reasoning text with markdown citations like
  *   "...price stability ([Intellectia](https://intellectia.ai/...))..."
- * converted into compact chip-style source badges that match the main
- * report view. Raw [label](url) syntax inside chat bubbles was bleeding
- * full URLs into the transcript; this turns them into clickable pills.
- * Only matches `https?://` URLs to avoid false positives on prose brackets.
+ * converted into compact chip-style source badges. Citations are **moved
+ * to the end of the sentence they appear in** so the prose reads cleanly
+ * and all sources land in a natural "footnote" position after the period.
+ * Also strips LLM-added surrounding parens so no orphan "( )" remains.
  */
 function renderReasoningWithCitations(text: string): React.ReactNode[] {
     if (!text) return [];
-    const parts: React.ReactNode[] = [];
-    const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
-    let key = 0;
-    // Strip trailing or surrounding parens around the whole citation.
-    while ((match = re.exec(text)) !== null) {
-        const [full, label, url] = match;
-        // Plain text before this citation
-        let start = match.index;
-        let end = start + full.length;
-        // Trim a leading ' (' and trailing ')' if the LLM wrapped the whole
-        // citation in parentheses (a common pattern).
-        const before = text.slice(last, start);
-        const trailing = text.slice(end, end + 1);
-        const cleanedBefore = before.replace(/\s*\(\s*$/, '');
-        const ate = before.length - cleanedBefore.length;
-        if (ate > 0 && trailing === ')') {
-            end += 1; // skip the closing paren too
+
+    // Captures [label](url) with any surrounding whitespace and optional
+    // wrapping parens — so we eat "(..., [X](u))" cleanly as one unit.
+    const CITE_RE = /\s*\(?\s*\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)\s*\)?/g;
+
+    // Split text into sentences. We keep the terminal punctuation attached
+    // to its sentence so the rendered output reads naturally.
+    const rawSentences: string[] = [];
+    let buf = '';
+    for (let i = 0; i < text.length; i++) {
+        buf += text[i];
+        if (/[.!?。！？]/.test(text[i])) {
+            const next = text[i + 1];
+            if (!next || /\s/.test(next)) {
+                rawSentences.push(buf);
+                buf = '';
+            }
         }
-        if (cleanedBefore) parts.push(<span key={`t${key++}`}>{cleanedBefore}</span>);
-        const host = (() => {
-            try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
-        })();
-        const shortLabel = label.length > 18 ? label.slice(0, 16) + '…' : label;
-        parts.push(
-            <a
-                key={`c${key++}`}
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={host}
-                className="inline-flex items-center gap-1 mx-0.5 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight text-gray-500 bg-gray-50 hover:bg-gray-100 border border-gray-200/60 transition-colors no-underline hover:no-underline align-middle"
-            >
-                <svg className="w-2.5 h-2.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                </svg>
-                <span>{shortLabel}</span>
-            </a>
-        );
-        last = end;
     }
-    const tail = text.slice(last);
-    if (tail) parts.push(<span key={`t${key++}`}>{tail}</span>);
-    return parts;
+    if (buf) rawSentences.push(buf);
+
+    const nodes: React.ReactNode[] = [];
+    let key = 0;
+
+    for (let si = 0; si < rawSentences.length; si++) {
+        const sentence = rawSentences[si];
+        const cites: Array<{ label: string; url: string }> = [];
+        // Strip every citation (and its paren wrapper) out of the sentence,
+        // capturing them so we can render them after the sentence body.
+        const cleaned = sentence
+            .replace(CITE_RE, (_full, label: string, url: string) => {
+                cites.push({ label, url });
+                return '';
+            })
+            // Normalize whitespace left behind by the strip, and pull any
+            // stranded punctuation (". , ;") back against the preceding word.
+            .replace(/\s+/g, ' ')
+            .replace(/\s+([.!?。！？,;:])/g, '$1');
+
+        const body = si === 0 ? cleaned.trimStart() : cleaned;
+        if (body) {
+            nodes.push(<span key={`s${key++}`}>{body}</span>);
+        }
+
+        for (const c of cites) {
+            const host = (() => {
+                try { return new URL(c.url).hostname.replace(/^www\./, ''); } catch { return c.url; }
+            })();
+            const shortLabel = c.label.length > 18 ? c.label.slice(0, 16) + '…' : c.label;
+            nodes.push(
+                <a
+                    key={`c${key++}`}
+                    href={c.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={host}
+                    className="inline-flex items-center gap-1 ml-1 px-1.5 py-[1px] rounded-full text-[10.5px] font-medium leading-tight text-gray-500 bg-gray-50 hover:bg-white hover:text-gray-900 hover:border-gray-900/40 hover:shadow-sm border border-gray-200/60 transition-all duration-150 no-underline hover:no-underline align-middle cursor-pointer"
+                >
+                    <svg className="w-2.5 h-2.5 shrink-0 opacity-70 group-hover:opacity-100" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                    </svg>
+                    <span>{shortLabel}</span>
+                </a>
+            );
+        }
+    }
+
+    return nodes;
 }
 
 interface KGNode {
