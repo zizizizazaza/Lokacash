@@ -1535,33 +1535,102 @@ Text: "${query}"`;
             ? plan.capabilities.analysis.tickers
             : ['SPY', 'QQQ'];
         }
-        // Detect if user mentioned specific named gurus
-        const GURU_NAME_MAP: Record<string, string> = {
-          'damodaran': 'aswath_damodaran', 'aswath damodaran': 'aswath_damodaran',
-          'ben graham': 'ben_graham', 'graham': 'ben_graham', 'benjamin graham': 'ben_graham',
-          'bill ackman': 'bill_ackman', 'ackman': 'bill_ackman',
-          'cathie wood': 'cathie_wood', 'cathie': 'cathie_wood',
-          'charlie munger': 'charlie_munger', 'munger': 'charlie_munger',
-          'michael burry': 'michael_burry', 'burry': 'michael_burry', 'dr. burry': 'michael_burry',
-          'mohnish pabrai': 'mohnish_pabrai', 'pabrai': 'mohnish_pabrai',
-          'nassim taleb': 'nassim_taleb', 'taleb': 'nassim_taleb',
-          'peter lynch': 'peter_lynch', 'lynch': 'peter_lynch',
-          'phil fisher': 'phil_fisher', 'fisher': 'phil_fisher', 'philip fisher': 'phil_fisher',
-          'rakesh jhunjhunwala': 'rakesh_jhunjhunwala', 'rakesh': 'rakesh_jhunjhunwala', 'jhunjhunwala': 'rakesh_jhunjhunwala',
-          'stanley druckenmiller': 'stanley_druckenmiller', 'druckenmiller': 'stanley_druckenmiller',
-          'warren buffett': 'warren_buffett', 'buffett': 'warren_buffett', 'warren': 'warren_buffett',
-        };
-        const queryLower = userContent.toLowerCase();
-        const mentionedSet = new Set<string>();
-        // Sort by length descending to match longer phrases first
-        const sortedKeys = Object.keys(GURU_NAME_MAP).sort((a, b) => b.length - a.length);
-        for (const phrase of sortedKeys) {
-          if (queryLower.includes(phrase)) {
-            mentionedSet.add(GURU_NAME_MAP[phrase]);
-          }
+      }
+
+      // Detect if user mentioned specific named gurus (works in ALL modes, not just guru-council agent)
+      const GURU_NAME_MAP: Record<string, string> = {
+        // English
+        'damodaran': 'aswath_damodaran', 'aswath damodaran': 'aswath_damodaran',
+        'ben graham': 'ben_graham', 'graham': 'ben_graham', 'benjamin graham': 'ben_graham',
+        'bill ackman': 'bill_ackman', 'ackman': 'bill_ackman',
+        'cathie wood': 'cathie_wood', 'cathie': 'cathie_wood',
+        'charlie munger': 'charlie_munger', 'munger': 'charlie_munger',
+        'michael burry': 'michael_burry', 'burry': 'michael_burry', 'dr. burry': 'michael_burry',
+        'mohnish pabrai': 'mohnish_pabrai', 'pabrai': 'mohnish_pabrai',
+        'nassim taleb': 'nassim_taleb', 'taleb': 'nassim_taleb',
+        'peter lynch': 'peter_lynch', 'lynch': 'peter_lynch',
+        'phil fisher': 'phil_fisher', 'fisher': 'phil_fisher', 'philip fisher': 'phil_fisher',
+        'rakesh jhunjhunwala': 'rakesh_jhunjhunwala', 'rakesh': 'rakesh_jhunjhunwala', 'jhunjhunwala': 'rakesh_jhunjhunwala',
+        'stanley druckenmiller': 'stanley_druckenmiller', 'druckenmiller': 'stanley_druckenmiller',
+        'warren buffett': 'warren_buffett', 'buffett': 'warren_buffett', 'warren': 'warren_buffett',
+        // Chinese
+        '达摩达兰': 'aswath_damodaran', '阿斯沃思': 'aswath_damodaran',
+        '格雷厄姆': 'ben_graham', '本·格雷厄姆': 'ben_graham', '本杰明·格雷厄姆': 'ben_graham',
+        '阿克曼': 'bill_ackman', '比尔·阿克曼': 'bill_ackman',
+        '凯茜·伍德': 'cathie_wood', '木头姐': 'cathie_wood', '凯西·伍德': 'cathie_wood',
+        '芒格': 'charlie_munger', '查理·芒格': 'charlie_munger', '查理芒格': 'charlie_munger',
+        '伯里': 'michael_burry', '迈克尔·伯里': 'michael_burry', '大空头': 'michael_burry',
+        '帕布莱': 'mohnish_pabrai', '莫尼什·帕布莱': 'mohnish_pabrai',
+        '塔勒布': 'nassim_taleb', '纳西姆·塔勒布': 'nassim_taleb', '黑天鹅': 'nassim_taleb',
+        '彼得·林奇': 'peter_lynch', '林奇': 'peter_lynch', '彼得林奇': 'peter_lynch',
+        '费雪': 'phil_fisher', '菲利普·费雪': 'phil_fisher', '菲利普费雪': 'phil_fisher',
+        '德鲁肯米勒': 'stanley_druckenmiller', '斯坦利·德鲁肯米勒': 'stanley_druckenmiller',
+        '巴菲特': 'warren_buffett', '沃伦·巴菲特': 'warren_buffett', '沃伦巴菲特': 'warren_buffett', '股神': 'warren_buffett',
+      };
+
+      const queryLowerForGuru = userContent.toLowerCase();
+      const mentionedGuruSet = new Set<string>();
+      const sortedGuruKeys = Object.keys(GURU_NAME_MAP).sort((a, b) => b.length - a.length);
+      for (const phrase of sortedGuruKeys) {
+        if (queryLowerForGuru.includes(phrase.toLowerCase())) {
+          mentionedGuruSet.add(GURU_NAME_MAP[phrase]);
         }
-        if (mentionedSet.size > 0) {
-          plan.specificGurus = Array.from(mentionedSet);
+      }
+
+      // Check if user asked about an investor but none in our roster matched
+      // Heuristic patterns: "X怎么看" / "X的观点" / "X 说" / "what does X think" / "X's view" etc.
+      const investorIntentPattern = /(怎么看|的观点|的看法|会怎么|如何看待|的建议|的策略|what does .+ (think|say)|.+'s (view|take|opinion|thought))/i;
+      const hasInvestorIntent = investorIntentPattern.test(userContent);
+      if (hasInvestorIntent && mentionedGuruSet.size === 0 && data.agentId !== 'guru-council') {
+        // Try to detect a person-like name that's NOT in our list
+        // Simple check: capital-case English name OR Chinese person-like name (2-4 chars around investor terms)
+        const hasNonRosterInvestorName =
+          /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?/.test(userContent) ||
+          /[\u4e00-\u9fff]{2,4}(?=(怎么看|的观点|的看法|会怎么|如何看待))/.test(userContent);
+        if (hasNonRosterInvestorName) {
+          const availableList = [
+            'Warren Buffett (巴菲特)', 'Charlie Munger (芒格)', 'Peter Lynch (彼得·林奇)',
+            'Ben Graham (格雷厄姆)', 'Phil Fisher (费雪)', 'Bill Ackman (阿克曼)',
+            'Cathie Wood (木头姐)', 'Michael Burry (大空头)', 'Stanley Druckenmiller',
+            'Mohnish Pabrai', 'Nassim Taleb (黑天鹅)', 'Aswath Damodaran', 'Rakesh Jhunjhunwala',
+          ];
+          const isZh = /[\u4e00-\u9fff]/.test(userContent);
+          const msg = isZh
+            ? `你提到的这位投资人暂不在 Loka 的大师名单里。目前可用的大师有：\n\n${availableList.map(n => '- ' + n).join('\n')}\n\n你可以换一位再问，或者切换到 Roundtable 模式听一轮集体观点。`
+            : `The investor you mentioned isn't in Loka's guru roster yet. Available gurus:\n\n${availableList.map(n => '- ' + n).join('\n')}\n\nTry asking about one of them, or switch to Roundtable mode for a collective view.`;
+          emitter.emitModule('search', 'active', { variant: 'data_providers', providers: [] });
+          emitter.emitProgress(msg);
+          emitter.emitModule('done', 'completed', { duration: 0 });
+          emitter.emitStreamDone(msg);
+          try {
+            await prisma.chatMessage.create({
+              data: { userId, sessionId, role: 'assistant', content: msg, agentId: 'superagent' }
+            });
+          } catch (_) {}
+          activeChatSessions.delete(sessionId);
+          finishChatReplayBuffer(sessionId);
+          chatAbortControllers.delete(sessionId);
+          return;
+        }
+      }
+
+      if (mentionedGuruSet.size > 0) {
+        plan.specificGurus = Array.from(mentionedGuruSet);
+        // In non-roundtable modes, auto-promote to guru-council flow so the single-guru prompt kicks in
+        if (data.agentId !== 'guru-council' && data.mode !== 'roundtable') {
+          plan.isSimpleChat = false;
+          plan.queryType = 'guru-council';
+          plan.capabilities.simulate.needed = true;
+          if (!plan.capabilities.search.needed) {
+            plan.capabilities.search.needed = true;
+            plan.capabilities.search.query = plan.capabilities.search.query || data.content;
+          }
+          if (!plan.capabilities.simulate.tickers?.length) {
+            plan.capabilities.simulate.tickers = plan.capabilities.analysis?.tickers?.length
+              ? plan.capabilities.analysis.tickers
+              : ['SPY'];
+          }
+          console.log(`[agent:chat:guru] auto-promoted to guru-council for mentioned gurus: ${plan.specificGurus.join(',')}`);
         }
       }
 
@@ -2684,7 +2753,78 @@ ${contextString}
 `;
 
       // ─── Guru Council Prompt ───
-      const guruCouncilPrompt = `You are moderating a roundtable of legendary investors analyzing a specific asset or market question.
+      // Named-guru mode: user explicitly mentioned 1+ gurus outside of Roundtable. Answer only those gurus, no council framing.
+      const isNamedGurusOnly =
+        plan.queryType === 'guru-council'
+        && plan.specificGurus?.length > 0
+        && data.mode !== 'roundtable';
+      const namedGuruList: string[] = isNamedGurusOnly
+        ? plan.specificGurus.map((k: string) => k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()))
+        : [];
+      const namedGurusPrompt = `You are channeling the voice of specific investors the user explicitly asked about. Answer as each named investor in their own style, optimized for SCANNABLE reading.
+
+The user named these investors: ${namedGuruList.join(', ')}. Do NOT include any other investors. Do NOT frame this as a "roundtable" or "council". Do NOT produce consensus/disagreement/synthesis sections. Only the named investor${namedGuruList.length > 1 ? 's speak' : ' speaks'}.
+
+=== INPUT ===
+Question: ${userContent}
+Context (may include simulation signals, fundamental metrics, and search results):
+${contextString}
+
+=== OUTPUT STRUCTURE ===
+
+# ${namedGuruList.length === 1 ? `${namedGuruList[0]}'s Take on [Asset/Topic]` : `${namedGuruList.join(' vs ')}: on [Asset/Topic]`}
+
+${namedGuruList.length > 1
+  ? 'For EACH named investor, produce ONE self-contained section below using the scaffolding. Each investor is fully independent — no cross-references, no "they agree/disagree" text anywhere.\n\n---\n'
+  : ''}${namedGuruList.map((name) => `## ${name}
+
+**🟢 Bullish / 🔴 Bearish / 🟡 Neutral · Conviction XX%** *(one line, pick one signal and the conviction % from simulation data)*
+
+> **Bottom line (${name})** — ONE punchy sentence in ${name}'s voice that captures the verdict. No fluff.
+
+### The Framework
+2-3 tight sentences on ${name}'s specific methodology. Name the mental models (e.g. "margin of safety", "circle of competence", "tail risk", "PEG < 1"). This is NOT generic investing — speak to what makes ${name} distinctive.
+
+### Key Numbers at a Glance
+A compact markdown table with 4-6 rows of the most important metrics from the context. Format:
+
+| Metric | Value | ${name}'s Read |
+|---|---|---|
+| (metric) | (value) | (one-phrase read: ✅ good / ⚠️ watch / 🚫 red flag) |
+
+Pick metrics that MATTER to ${name} specifically — not a generic dump. Buffett cares about ROIC + moat; Burry cares about debt + insider activity; Lynch cares about PEG + growth category; Taleb cares about tail exposure + antifragility.
+
+### The Analysis
+3-5 labeled mini-paragraphs, each starting with a **bolded lead-in** for scannability. Each is 2-4 sentences max. Example structure:
+
+**Valuation tension** — ${name}'s take on the price vs. fundamentals story, with specific numbers. [Source](url)
+
+**Growth signals** — Is the top-line thesis still intact? What do the numbers say? [Source](url)
+
+**The [distinctive factor]** — The ${name}-specific angle (moat, key-man risk, tail exposure, etc.). [Source](url)
+
+Keep each block focused on ONE idea. No walls of prose.
+
+### Risks on the Radar
+3-5 concise bullets, each **bolded** lead phrase + explanation. Frame them the way ${name} actually thinks about risk — not generic "macro uncertainty" boilerplate.
+
+### What Would Change ${name}'s Mind
+2-3 CONCRETE, measurable triggers. Each bullet starts with a condition ("If revenue growth returns to double digits…" / "If the stock trades below \$X…"). Quantify wherever possible.
+`).join('\n\n---\n\n')}
+
+═══ RULES ═══
+1. ONLY the named investor${namedGuruList.length > 1 ? 's' : ''}: ${namedGuruList.join(', ')}. No other guru names. No roundtable/council/consensus framing.
+2. STRUCTURE IS NON-NEGOTIABLE: every named investor gets the six sub-sections in this exact order: verdict line → bottom line quote → Framework → Key Numbers table → Analysis (with bolded lead-ins) → Risks on the Radar → What Would Change Their Mind.
+3. TABLE is REQUIRED. Use real numbers from the context. If a specific metric is missing, write "data pending" — do not fabricate.
+4. SCANNABILITY > COMPLETENESS: short paragraphs, bold lead-ins, bullets. No wall-of-text analysis blocks.
+5. VOICE: Use each investor's actual published frameworks and characteristic phrases. "I do not short stories, but I do not pay full price for them either" (Damodaran). "Price is what you pay, value is what you get" (Buffett). Etc.
+6. LANGUAGE: Match the user's language entirely. Chinese query = all Chinese (including table headers and signal labels). English query = all English.
+7. CITATIONS: At the END of a paragraph or table cell, format [Source](url). Never mid-sentence. Never wrap in parentheses. Never list URLs separately.
+8. LENGTH: 500-900 words per investor. Total: ${namedGuruList.length * 600}-${namedGuruList.length * 900} words.
+9. HEADINGS: # for title only. ## for each investor name. ### for sub-sections within. **bold** for metric leads, numbers, and emphasis. NEVER prefix headings with numbers like "1.", "2.".
+`;
+
+      const guruCouncilPrompt = isNamedGurusOnly ? namedGurusPrompt : `You are moderating a roundtable of legendary investors analyzing a specific asset or market question.
 
 Your job is to present each guru's perspective through their known investment framework, then synthesize a consensus recommendation. This is NOT a generic summary — each guru must speak in character with their known methodology.
 

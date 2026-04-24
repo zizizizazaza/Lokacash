@@ -1748,427 +1748,6 @@ export const fmtTs = (ms: number) => {
 // Unified workbench card (replaces RoundtableGraphInline):
 //   left column  = rich agent roster (avatar + name + role + bio + tags)
 //   right column = tabs (Graph | Debate) — no redundant top bar
-<<<<<<< HEAD
-=======
-const ROUNDTABLE_AGENT_PROFILES: Record<string, { bio: string; tags: string[]; skills: string[]; framework: string }> = {
-    fundamental_specialist: { bio: 'Deep-dives into financial statements, earnings quality, and intrinsic value.', tags: ['Financials', 'Earnings', 'Valuation'], skills: ['DCF Modeling', 'Ratio Analysis', 'Earnings Quality'], framework: 'Bottom-up fundamental analysis with emphasis on margin of safety.' },
-    valuation_specialist:    { bio: 'Builds multi-scenario valuation models to determine fair value ranges.', tags: ['DCF', 'Comparable', 'Models'], skills: ['DCF', 'Relative Valuation', 'Sum-of-Parts'], framework: 'Multi-model convergence with scenario-weighted fair value.' },
-    macro_specialist:        { bio: 'Tracks macro trends, interest rates, and policy shifts that move markets.', tags: ['Macro', 'Rates', 'Policy'], skills: ['Macro Forecasting', 'Cross-Asset', 'Policy Analysis'], framework: 'Top-down macro overlay with cross-asset correlation analysis.' },
-    risk_specialist:         { bio: 'Identifies tail risks, stress-tests portfolios, and models downside scenarios.', tags: ['Risk', 'Hedging', 'Stress Test'], skills: ['VaR', 'Stress Testing', 'Scenario Analysis'], framework: 'Risk-first approach with pre-mortem analysis and Monte Carlo simulations.' },
-    allocation_specialist:   { bio: 'Optimizes asset allocation across ETFs, sectors, and geographies.', tags: ['ETF', 'Allocation', 'Diversification'], skills: ['MPT', 'Factor Exposure', 'Rebalancing'], framework: 'Modern portfolio theory with factor-based tilts.' },
-    fund_specialist:         { bio: 'Evaluates fund performance, manager quality, and fee structures.', tags: ['Funds', 'Alpha', 'Selection'], skills: ['Fund Screening', 'Alpha Analysis', 'Fee Optimization'], framework: 'Quantitative fund selection with qualitative manager assessment.' },
-    options_specialist:      { bio: 'Designs options strategies and analyzes Greeks for risk/reward optimization.', tags: ['Options', 'Greeks', 'Volatility'], skills: ['Options Pricing', 'Greeks Analysis', 'Vol Surface'], framework: 'Volatility-driven strategy selection with Greeks-based risk management.' },
-    crypto_specialist:       { bio: 'Analyzes crypto assets, on-chain data, and DeFi protocol metrics.', tags: ['Crypto', 'On-Chain', 'DeFi'], skills: ['On-Chain Analysis', 'Token Economics', 'Protocol Metrics'], framework: 'On-chain data analysis combined with token economic modeling.' },
-    macro_enhanced:          { bio: 'Advanced macro analysis with emphasis on regime changes and cross-asset flows.', tags: ['Deep Macro', 'Regimes', 'Flows'], skills: ['Regime Detection', 'Flow Analysis', 'Cycle Mapping'], framework: 'Multi-layer macro regime identification with flow-of-funds tracking.' },
-    risk_enhanced:           { bio: 'Fractal risk modeling with advanced tail-risk and correlation-breakdown detection.', tags: ['Fractal', 'Tail Risk', 'Correlation'], skills: ['Fractal Analysis', 'Extreme Value Theory', 'Contagion Modeling'], framework: 'Non-linear risk modeling using fractal geometry and extreme value theory.' },
-    event_driven:            { bio: 'Identifies catalysts, earnings surprises, and event-driven trading opportunities.', tags: ['Events', 'Catalysts', 'M&A'], skills: ['Event Detection', 'Catalyst Mapping', 'Timeline Analysis'], framework: 'Event timeline analysis with probability-weighted outcome modeling.' },
-    sentiment_focus:         { bio: 'Gauges market sentiment from social media, news flow, and positioning data.', tags: ['Sentiment', 'Social', 'NLP'], skills: ['NLP Sentiment', 'Social Listening', 'Positioning Analysis'], framework: 'Multi-source sentiment aggregation with contrarian signal detection.' },
-    portfolio_view:          { bio: 'Evaluates how positions fit within an overall portfolio context.', tags: ['Portfolio', 'Fit', 'Impact'], skills: ['Position Sizing', 'Correlation Analysis', 'Rebalancing'], framework: 'Portfolio-aware evaluation with correlation-adjusted sizing.' },
-    buffett_style:           { bio: 'Value-investing lens — wide moats, durable economics, and margin of safety.', tags: ['Value', 'Moats', 'Long-term'], skills: ['Moat Analysis', 'Owner Earnings', 'Margin of Safety'], framework: 'Buy wonderful businesses at fair prices, hold forever.' },
-    munger_style:            { bio: 'Mental-models multidisciplinary thinking with inversion and circle of competence.', tags: ['Mental Models', 'Inversion', 'Quality'], skills: ['Inversion', 'Lollapalooza Effects', 'Circle of Competence'], framework: 'Multidisciplinary mental models with inversion checks.' },
-    dalio_style:             { bio: 'All-weather regime thinking — balance risk across macro environments.', tags: ['All-Weather', 'Regime', 'Macro'], skills: ['Risk Parity', 'Macro Cycles', 'Diversification'], framework: 'Balance risk across growth/inflation regimes — all-weather.' },
-    soros_style:             { bio: 'Reflexivity-driven macro bets when market beliefs and fundamentals diverge.', tags: ['Reflexivity', 'Macro', 'Asymmetric'], skills: ['Reflexivity Detection', 'Macro Thesis', 'Asymmetric Bets'], framework: 'Find reflexive feedback loops — bet when conviction is high.' },
-    lynch_style:             { bio: 'Invest in what you know — find fast growers at reasonable prices.', tags: ['GARP', 'Growth', 'Stock Picking'], skills: ['Fast Grower Detection', 'PEG Analysis', 'Stock Categories'], framework: 'Invest in what you understand — find fast growers at reasonable valuation.' },
-    graham_style:            { bio: 'Classic deep-value screening — NCAV, net-net, Mr. Market psychology.', tags: ['Deep Value', 'NCAV', 'Mr. Market'] , skills: ['Net-Net Screening', 'Margin of Safety', 'Mr. Market Discipline'], framework: 'Defensive investing — wide margin of safety, Mr. Market as servant.' },
-};
-
-// ─── RoundtableAgentModal — click an agent card to expand full details ──
-const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> = ({ agentId, onClose }) => {
-    const agent = SUMMON_POOL.find(a => a.id === agentId);
-    const profile = ROUNDTABLE_AGENT_PROFILES[agentId];
-    useEffect(() => {
-        const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-        window.addEventListener('keydown', onEsc);
-        return () => window.removeEventListener('keydown', onEsc);
-    }, [onClose]);
-    if (!agent) return null;
-    const isMaster = agent.group === 'master';
-    return (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
-            <div
-                className={`bg-white rounded-2xl shadow-2xl w-[360px] max-h-[85vh] overflow-hidden mx-4 relative ${isMaster ? 'master-card-shine' : ''}`}
-                style={isMaster ? { background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 45%, #fff7ed 100%)' } : undefined}
-                onClick={e => e.stopPropagation()}
-            >
-                {/* Colored top bar tied to agent color */}
-                <div className="h-1" style={{ background: `linear-gradient(90deg, ${agent.color}, ${agent.color}60)` }} />
-                <div className="relative px-5 pt-5 pb-4 border-b border-gray-100">
-                    <button onClick={onClose} className="absolute top-3 right-3 p-1 rounded-full hover:bg-gray-100 transition-colors">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
-                    <div className="flex items-center gap-3">
-                        <div className="rounded-full p-[2px] shrink-0" style={{ background: `linear-gradient(135deg, ${agent.color}, ${agent.color}88)` }}>
-                            <div className="rounded-full border-2 border-white overflow-hidden">
-                                <AgentAvatarImg nameOrId={agent.id} size={52} />
-                            </div>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <h3 className="text-[15px] font-bold text-gray-900 truncate">{agent.name}</h3>
-                            <p className="text-[11px] text-gray-500 mt-0.5">{agent.role}</p>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-3 flex-wrap">
-                        <span className={`text-[9px] px-2 py-[2px] rounded-full font-semibold tracking-wide uppercase ${
-                            agent.group === 'system' ? 'bg-blue-50 text-blue-500 border border-blue-100' :
-                            isMaster ? 'bg-amber-50 text-amber-600 border border-amber-200' :
-                            'bg-emerald-50 text-emerald-600 border border-emerald-100'
-                        }`}>{agent.group === 'system' ? 'Core' : isMaster ? 'Master' : 'Specialist'}</span>
-                        {profile?.tags.map((tag, i) => (
-                            <span key={i} className="text-[9.5px] px-1.5 py-[2px] rounded-md bg-gray-100 text-gray-500 font-medium">{tag}</span>
-                        ))}
-                    </div>
-                </div>
-                {profile && (
-                    <div className="px-5 py-4 space-y-4 overflow-y-auto max-h-[60vh]">
-                        <div>
-                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">About</h4>
-                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.bio}</p>
-                        </div>
-                        <div>
-                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">Skills</h4>
-                            <div className="flex flex-wrap gap-1.5">
-                                {profile.skills.map((s, i) => (
-                                    <span key={i} className="px-2 py-[3px] bg-blue-50 border border-blue-100 rounded-md text-[10.5px] text-blue-600 font-medium">{s}</span>
-                                ))}
-                            </div>
-                        </div>
-                        <div>
-                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">Thinking Framework</h4>
-                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.framework}</p>
-                        </div>
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-};
-
-const RoundtableWorkbench: React.FC<{
-    thinking: ThinkingFlow;
-    isLive: boolean;
-}> = ({ thinking, isLive }) => {
-    const agentIds = thinking.selectedAgentIds || [];
-    const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
-    const pickedExtras = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
-    const allAgents = useMemo(() => {
-        const out = [...systemAgents];
-        const seen = new Set(systemAgents.map(a => a.id));
-        for (const a of pickedExtras) {
-            if (!seen.has(a.id)) { out.push(a); seen.add(a.id); }
-        }
-        return out;
-    }, [agentIds]);
-
-    const [activeAgentId, setActiveAgentId] = useState<string>(allAgents[0]?.id || '');
-    const [tab, setTab] = useState<'graph' | 'debate' | 'log'>('graph');
-    const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
-    const [fullscreen, setFullscreen] = useState(false);
-    const debateScrollRef = useRef<HTMLDivElement | null>(null);
-
-    // Close fullscreen on ESC
-    useEffect(() => {
-        if (!fullscreen) return;
-        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-    }, [fullscreen]);
-
-    // Keep active agent valid when roster changes
-    useEffect(() => {
-        if (!allAgents.find(a => a.id === activeAgentId) && allAgents[0]) {
-            setActiveAgentId(allAgents[0].id);
-        }
-    }, [allAgents, activeAgentId]);
-
-    const rounds = thinking.rtRounds || [];
-    const totalOps = rounds.reduce((n, r) => n + r.agents.length, 0);
-
-    // Scroll active agent's first utterance into view when on Debate tab
-    useEffect(() => {
-        if (tab !== 'debate' || !activeAgentId || !debateScrollRef.current) return;
-        const el = debateScrollRef.current.querySelector<HTMLDivElement>(`[data-agent="${activeAgentId}"]`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, [activeAgentId, tab]);
-
-    if (!allAgents.length) return null;
-
-    const statusDot = (s?: 'pending' | 'active' | 'done') =>
-        s === 'done' ? 'bg-emerald-500'
-        : s === 'active' ? 'bg-blue-500 animate-pulse'
-        : 'bg-gray-300';
-
-    const verdictPillCls = (v?: string) => {
-        if (!v) return 'bg-gray-100 text-gray-500';
-        const up = v.toLowerCase();
-        if (up.includes('bull') || up.includes('buy')) return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-500/20';
-        if (up.includes('bear') || up.includes('sell')) return 'bg-red-50 text-red-700 ring-1 ring-red-500/20';
-        return 'bg-gray-100 text-gray-600 ring-1 ring-gray-200';
-    };
-
-    return (
-        <div className="mb-8">
-            <div
-                className={fullscreen
-                    ? "fixed inset-0 z-[70] bg-gray-50 overflow-hidden flex"
-                    : "rounded-2xl border border-gray-200 bg-gray-50 shadow-[0_2px_14px_-3px_rgba(15,23,42,0.08)] overflow-hidden flex"}
-                style={fullscreen ? undefined : { height: 600 }}
-            >
-            {/* ── LEFT: Rich agent roster ── */}
-            <div className="w-[260px] shrink-0 border-r border-gray-200 flex flex-col bg-gray-100/70 backdrop-blur-sm">
-                <div className="px-4 pt-3 pb-2 flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
-                    <span className="text-[11px] font-semibold tracking-[0.06em] uppercase text-gray-700">Agent Room</span>
-                    <span className="text-[10px] font-semibold text-gray-400 tabular-nums">({allAgents.length})</span>
-                </div>
-                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1.5">
-                    {allAgents.map(a => {
-                        const state = rounds.length > 0
-                            ? rounds[rounds.length - 1].agents.find(x => x.agentId === a.id)?.status
-                            : (isLive ? 'active' : 'pending');
-                        const profile = ROUNDTABLE_AGENT_PROFILES[a.id];
-                        const isMaster = a.group === 'master';
-                        return (
-                            <div
-                                key={a.id}
-                                className={`group relative w-full rounded-xl cursor-pointer overflow-hidden transition-all ${
-                                    isMaster ? 'master-card-shine' : ''
-                                } hover:bg-white hover:shadow-sm hover:-translate-y-px`}
-                                style={isMaster ? { background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 45%, #fff7ed 100%)' } : undefined}
-                                onClick={() => setExpandedAgent(a.id)}
-                            >
-                                <div className="flex items-start gap-2.5 p-2.5 relative">
-                                    {/* Colored ring around avatar */}
-                                    <div className="relative shrink-0">
-                                        <div
-                                            className="rounded-full p-[2px]"
-                                            style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
-                                        >
-                                            <div className="rounded-full border-2 border-white overflow-hidden">
-                                                <AgentAvatarImg nameOrId={a.id} size={38} />
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-[12px] font-bold truncate text-gray-800">{a.name}</p>
-                                        {profile?.bio && (
-                                            <p className="text-[10.5px] text-gray-500 leading-snug mt-0.5 line-clamp-2">{profile.bio}</p>
-                                        )}
-                                        {profile?.tags && profile.tags.length > 0 && (
-                                            <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-                                                {profile.tags.slice(0, 3).map(t => (
-                                                    <span key={t} className="text-[9px] font-medium px-1.5 py-[1px] rounded-full bg-gray-100 text-gray-500">{t}</span>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
-
-            {/* ── RIGHT: tabs only (no redundant detail header) ── */}
-            <div className="flex-1 flex flex-col min-w-0">
-                <div className="flex items-center border-b border-gray-100 px-3 shrink-0">
-                    {(['graph', 'debate', 'log'] as const).map(t => {
-                        const isActive = tab === t;
-                        const label = t === 'graph' ? 'Graph' : t === 'debate' ? 'Debate' : 'Activity Log';
-                        return (
-                            <button
-                                key={t}
-                                onClick={() => setTab(t)}
-                                className={`relative px-3 py-2.5 text-[12px] font-semibold transition-colors ${isActive ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600'}`}
-                            >
-                                <span className="flex items-center gap-1.5">
-                                    {label}
-                                    {t === 'debate' && totalOps > 0 && (
-                                        <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-gray-100 text-gray-500">{totalOps}</span>
-                                    )}
-                                    {t === 'log' && isLive && (
-                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                    )}
-                                </span>
-                                {isActive && <span className="absolute left-3 right-3 -bottom-px h-[2px] bg-gray-900 rounded-full" />}
-                            </button>
-                        );
-                    })}
-                    {isLive && (
-                        <span className="ml-auto mr-2 inline-flex items-center gap-1 text-[10px] text-blue-500">
-                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />live
-                        </span>
-                    )}
-                    <button
-                        onClick={() => setFullscreen(f => !f)}
-                        className={`${isLive ? '' : 'ml-auto'} mr-1 w-7 h-7 rounded-md flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors`}
-                        title={fullscreen ? 'Exit fullscreen (ESC)' : 'Expand'}
-                    >
-                        {fullscreen ? (
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
-                            </svg>
-                        ) : (
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-                            </svg>
-                        )}
-                    </button>
-                </div>
-
-                <div className="flex-1 min-h-0 relative">
-                    {tab === 'graph' ? (
-                        <div className="absolute inset-0">
-                            <KnowledgeGraphView data={buildKnowledgeGraph()} animate={isLive} />
-                        </div>
-                    ) : tab === 'log' ? (
-                        <div className="absolute inset-0 flex flex-col">
-                            <TerminalLogPanel thinking={thinking} />
-                        </div>
-                    ) : (
-                        <div ref={debateScrollRef} className="absolute inset-0 overflow-y-auto px-4 py-3">
-                            {rounds.length === 0 ? (
-                                <div className="h-full flex items-center justify-center">
-                                    <p className="text-[12px] text-gray-400 italic">Debate hasn't started yet…</p>
-                                </div>
-                            ) : (
-                                <div className={fullscreen ? "space-y-8" : "space-y-5"}>
-                                    {rounds.map(round => {
-                                        const roundLabel = round.round === 1 ? 'Thesis Formation' : round.round === 2 ? 'Cross Validation' : `Round ${round.round}`;
-                                        return (
-                                        <div key={round.round}>
-                                            <div className="flex items-center gap-2 mb-2.5 sticky top-0 py-1 z-10">
-                                                <span className="text-[10px] font-semibold tracking-[0.08em] uppercase text-gray-500">
-                                                    <span className="text-gray-400">Round {round.round} · </span>{roundLabel}
-                                                </span>
-                                                {round.status === 'active' && (
-                                                    <span className="inline-flex items-center gap-1 text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-blue-500/10 text-blue-600">
-                                                        <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />live
-                                                    </span>
-                                                )}
-                                                {round.status === 'done' && (
-                                                    <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-emerald-500/10 text-emerald-700">done</span>
-                                                )}
-                                            </div>
-                                            <div className={fullscreen ? "space-y-5" : "space-y-3"}>
-                                                {round.agents.map(a => {
-                                                    const pool = SUMMON_POOL.find(p => p.id === a.agentId);
-                                                    const isActiveAgent = a.agentId === activeAgentId;
-                                                    const accentColor = pool?.color || '#6B7280';
-                                                    // Position: Bullish → left, Bearish → right. Others default to left.
-                                                    const verdictLower = (a.verdict || '').toLowerCase();
-                                                    const isBearish = verdictLower.includes('bear') || verdictLower.includes('sell');
-                                                    const side: 'left' | 'right' = isBearish ? 'right' : 'left';
-                                                    return (
-                                                        <div
-                                                            key={`${round.round}-${a.agentId}`}
-                                                            data-agent={a.agentId}
-                                                            className={`flex items-start gap-2.5 ${side === 'right' ? 'flex-row-reverse' : ''}`}
-                                                        >
-                                                            {/* Avatar with colored gradient ring — matches left roster */}
-                                                            <button
-                                                                onClick={() => setActiveAgentId(a.agentId)}
-                                                                className="shrink-0 rounded-full p-[2px]"
-                                                                style={{ background: `linear-gradient(135deg, ${accentColor}, ${accentColor}88)` }}
-                                                                title={pool?.name || a.agentName}
-                                                            >
-                                                                <div className="rounded-full border-2 border-white overflow-hidden">
-                                                                    <AgentAvatarImg nameOrId={a.agentId} size={30} />
-                                                                </div>
-                                                            </button>
-                                                            <div className={`min-w-0 max-w-[78%] pt-0.5 flex flex-col ${side === 'right' ? 'items-end' : 'items-start'}`}>
-                                                                {/* Name + meta row (outside bubble, social-chat style) */}
-                                                                <div className={`flex items-center gap-1.5 mb-1 px-1 flex-wrap leading-none ${side === 'right' ? 'flex-row-reverse' : ''}`}>
-                                                                    <span className="text-[11px] font-semibold text-gray-700">{pool?.name || a.agentName}</span>
-                                                                    {a.verdict && (
-                                                                        <span className={`text-[9.5px] font-bold px-1.5 py-[1px] rounded-full ${verdictPillCls(a.verdict)}`}>
-                                                                            {a.verdict}
-                                                                        </span>
-                                                                    )}
-                                                                    {a.changedMind && (
-                                                                        <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-amber-500/10 text-amber-700">changed mind</span>
-                                                                    )}
-                                                                </div>
-                                                                {/* Bubble — content only */}
-                                                                {a.reasoning && (
-                                                                    <div
-                                                                        className={`inline-block max-w-full border border-gray-200/80 bg-white px-3 py-2 transition-shadow rounded-2xl ${side === 'right' ? 'rounded-tr-md' : 'rounded-tl-md'} ${isActiveAgent ? 'shadow-sm' : ''}`}
-                                                                    >
-                                                                        <p className="text-[11.5px] leading-relaxed text-gray-700 whitespace-pre-wrap">{a.reasoning}</p>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-                    )}
-                </div>
-            </div>
-            </div>
-            {/* Status caption below the workbench */}
-            {(() => {
-                const reportStatus = thinking.rtReportStatus;
-                const consensusStatus = thinking.rtConsensus?.status;
-                const roundsArr = thinking.rtRounds || [];
-                const debating = roundsArr.some(r => r.status === 'active');
-                const researching = (thinking.rtDataSearch || []).some(s => s.status === 'active');
-                const agentCount = allAgents.length;
-                const agentWord = agentCount === 1 ? 'Agent' : 'Agents';
-                let label = '';
-                let done = false;
-                if (reportStatus === 'done') { label = `${agentCount} ${agentWord} finished the debate — report ready`; done = true; }
-                else if (reportStatus === 'active') label = `Consensus reached — ${agentCount} ${agentWord} finalizing the report…`;
-                else if (consensusStatus === 'active') label = `${agentCount} ${agentWord} reaching consensus…`;
-                else if (debating) label = `${agentCount} ${agentWord} debating at the roundtable…`;
-                else if (researching) label = 'Gathering background research…';
-                else if (thinking.rtPreparationStatus === 'done' && isLive) label = `${agentCount} ${agentWord} assembled — debate starting`;
-                if (!label) return null;
-                return (
-                    <div className="mt-5 flex items-center gap-2.5 px-1">
-                        {/* Avatar stack */}
-                        <div className="flex -space-x-1.5">
-                            {allAgents.slice(0, 6).map(a => (
-                                <div
-                                    key={a.id}
-                                    className="w-5 h-5 rounded-full border-[1.5px] border-white overflow-hidden shadow-sm"
-                                    title={a.name}
-                                    style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
-                                >
-                                    <AgentAvatarImg nameOrId={a.id} size={18} />
-                                </div>
-                            ))}
-                            {allAgents.length > 6 && (
-                                <div className="w-5 h-5 rounded-full border-[1.5px] border-white bg-gray-200 flex items-center justify-center text-[9px] font-semibold text-gray-600 shadow-sm">
-                                    +{allAgents.length - 6}
-                                </div>
-                            )}
-                        </div>
-                        {!done && isLive && (
-                            <span className="relative flex w-1.5 h-1.5 shrink-0">
-                                <span className="absolute inline-flex h-full w-full rounded-full bg-violet-500 opacity-60 animate-ping" />
-                                <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-violet-500" />
-                            </span>
-                        )}
-                        <span className={`text-[11.5px] font-medium tracking-wide ${done ? 'text-gray-600' : 'text-gray-500'}`}>{label}</span>
-                    </div>
-                );
-            })()}
-            {expandedAgent && (
-                <RoundtableAgentModal agentId={expandedAgent} onClose={() => setExpandedAgent(null)} />
-            )}
-        </div>
-    );
-};
-
-// Legacy alias kept for any lingering references during the refactor.
-const RoundtableGraphInline = RoundtableWorkbench;
->>>>>>> 7d68c1b (feat(ui): polish ModeSelector + Agent Room styling)
 
 // ─── ThinkingProcessSidePanel (modular right panel) ─────────
 const ThinkingProcessSidePanel: React.FC<{
@@ -3235,17 +2814,60 @@ const ThinkingProcessSidePanel: React.FC<{
 };
 
 // ─── Summarize user question into a short topic title ──────
-const STOP_WORDS = new Set(['THE', 'AND', 'FOR', 'NOT', 'ARE', 'BUT', 'HOW', 'WHY', 'CAN', 'YOU', 'HAS', 'WAS', 'HIS', 'HER', 'ALL', 'ANY', 'WHO', 'ITS', 'GET', 'LET', 'MAY', 'OUR', 'SAY', 'SHE', 'TOO', 'USE', 'WAY', 'NOW']);
+const STOP_WORDS = new Set(['THE', 'AND', 'FOR', 'NOT', 'ARE', 'BUT', 'HOW', 'WHY', 'CAN', 'YOU', 'HAS', 'WAS', 'HIS', 'HER', 'ALL', 'ANY', 'WHO', 'ITS', 'GET', 'LET', 'MAY', 'OUR', 'SAY', 'SHE', 'TOO', 'USE', 'WAY', 'NOW', 'FROM', 'WITH', 'VIEW', 'TAKE']);
+
+// Detect guru names mentioned in the query → returns display-friendly short name
+const GURU_TITLE_MAP: Array<[RegExp, string]> = [
+    [/\b(warren\s+)?buffett\b|巴菲特|股神/i, 'Buffett'],
+    [/\b(charlie\s+)?munger\b|芒格/i, 'Munger'],
+    [/\b(peter\s+)?lynch\b|林奇/i, 'Lynch'],
+    [/\b(ben(jamin)?\s+)?graham\b|格雷厄姆/i, 'Graham'],
+    [/\b(phil(ip)?\s+)?fisher\b|费雪/i, 'Fisher'],
+    [/\b(bill\s+)?ackman\b|阿克曼/i, 'Ackman'],
+    [/\bcathie(\s+wood)?\b|木头姐/i, 'Cathie Wood'],
+    [/\b(michael\s+)?burry\b|伯里|大空头/i, 'Burry'],
+    [/\b(mohnish\s+)?pabrai\b|帕布莱/i, 'Pabrai'],
+    [/\b(nassim\s+)?taleb\b|塔勒布|黑天鹅/i, 'Taleb'],
+    [/\b(stanley\s+)?druckenmiller\b|德鲁肯米勒/i, 'Druckenmiller'],
+    [/\b(aswath\s+)?damodaran\b|达摩达兰/i, 'Damodaran'],
+    [/\bjhunjhunwala\b|rakesh/i, 'Jhunjhunwala'],
+];
+
+function detectGurus(q: string): string[] {
+    const found = new Set<string>();
+    for (const [re, name] of GURU_TITLE_MAP) {
+        if (re.test(q)) found.add(name);
+    }
+    return Array.from(found);
+}
+
 function summarizeTitle(raw: string): string {
     if (!raw) return 'New Chat';
     const q = raw.replace(/[？?！!。]+$/g, '').trim();
     const tickers = [...new Set((q.match(/\b[A-Z]{2,5}\b/g) || []).filter(t => !STOP_WORDS.has(t)))];
+    const gurus = detectGurus(q);
+    const isZh = /[\u4e00-\u9fff]/.test(q);
+
+    // Guru-centric queries → "TSLA: Damodaran's Take" / "巴菲特看 TSLA"
+    if (gurus.length > 0) {
+        const subject = tickers[0] || (() => {
+            // Try extract a subject noun before/after the guru mention
+            const m = q.match(/(?:on|about|for|看|怎么看|的观点|分析)\s*([A-Za-z\u4e00-\u9fff0-9\.\-]{2,20})/i);
+            return m ? m[1].trim() : '';
+        })();
+        const guruStr = gurus.length === 1 ? gurus[0] : gurus.slice(0, 2).join(' & ');
+        if (subject) return isZh ? `${guruStr}看${subject}` : `${subject}: ${guruStr}'s Take`;
+        return isZh ? `${guruStr}的观点` : `${guruStr}'s View`;
+    }
 
     const cmpMatch = q.match(/(?:compare|对比|vs\.?)\s+(.{2,15})\s+(?:vs\.?|and|与|和|跟)\s+(.{2,15})/i);
     if (cmpMatch) return `${cmpMatch[1].trim()} vs ${cmpMatch[2].trim().replace(/\s*(fundamentals|for|的|基本面).*/i, '')} Comparison`;
 
-    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,30}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况).*)?$/i);
-    if (analyzeMatch) return `${analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim()} Analysis`;
+    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,30}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况|from|by).*)?$/i);
+    if (analyzeMatch) {
+        const subject = analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim();
+        return `${subject} Analysis`;
+    }
 
     const buyMatch = q.match(/(?:is|should|are|值得|适合|能不能|可以)\s+(.{2,20}?)\s+(?:still\s+)?(?:a\s+)?(?:buy|worth|invest|入手|买入|购买)/i);
     if (buyMatch) return `${buyMatch[1].replace(/^(i|we)\s+/i, '').trim()} Investment Outlook`;
@@ -3272,8 +2894,8 @@ function summarizeTitle(raw: string): string {
         .replace(/^(search|find|look|check|tell me|give me|show me)\s+(for|about|into|up)?\s*/i, '')
         .trim();
     const words = core.split(/\s+/);
-    const short = words.length > 5 ? words.slice(0, 5).join(' ') : core;
-    return short.length > 25 ? short.slice(0, 22) + '…' : short;
+    const short = words.length > 8 ? words.slice(0, 8).join(' ') : core;
+    return short.length > 50 ? short.slice(0, 48) + '…' : short;
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -3771,7 +3393,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         return keys.length > 0 ? keys[keys.length - 1] : -1;
     })();
     const tocMsgInWebMode = tocVisibleMsgIdx >= 0 && msgViewMode[tocVisibleMsgIdx] === 'web';
-    const showToc = tocHeadings.length > 0 && !tocMsgInWebMode;
+    const showToc = tocHeadings.length >= 3 && !tocMsgInWebMode;
 
     // Scroll-spy: track which heading is currently in view + TOC floating position.
     // Uses rAF throttling + ResizeObserver + delayed recalcs so the active item
@@ -5287,7 +4909,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
                     {/* Chat column header (above chat content only) */}
                     <div className="flex items-center justify-between px-5 py-4 shrink-0">
-                        <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
+                        <h1 className="text-[13px] font-semibold text-gray-800 truncate flex-1 min-w-0 mr-4">{chatTitle}</h1>
                         <PlanUpgradeEntry size="sm" hideIfMax />
                     </div>
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
@@ -5307,18 +4929,29 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                 <ul className="space-y-0.5">
                                                     {(() => {
                                                         // Filter and optimize TOC hierarchy:
-                                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
+                                                        // 1. If there's only one level-2 heading, promote its
+                                                        //    level-3 children to top-level (avoid the "1 section
+                                                        //    → everything under it" redundant tree).
+                                                        // 2. Otherwise, collapse level-3 items when the level-2
+                                                        //    parent has only 1 child.
                                                         const filtered = tocHeadings.filter(h => h.level >= 2);
-                                                        const optimized: typeof filtered = [];
-                                                        for (let fi = 0; fi < filtered.length; fi++) {
-                                                            const h = filtered[fi];
-                                                            if (h.level === 2) {
-                                                                optimized.push(h);
-                                                            } else if (h.level >= 3) {
-                                                                let siblingCount = 0;
-                                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
-                                                                // Only show sub-items if there are 2+ siblings
-                                                                if (siblingCount >= 2) optimized.push(h);
+                                                        const level2Count = filtered.filter(h => h.level === 2).length;
+                                                        let optimized: typeof filtered = [];
+                                                        if (level2Count <= 1) {
+                                                            optimized = filtered
+                                                                .filter(h => h.level >= 3)
+                                                                .map(h => ({ ...h, level: 2 }));
+                                                            if (optimized.length === 0) optimized = filtered;
+                                                        } else {
+                                                            for (let fi = 0; fi < filtered.length; fi++) {
+                                                                const h = filtered[fi];
+                                                                if (h.level === 2) {
+                                                                    optimized.push(h);
+                                                                } else if (h.level >= 3) {
+                                                                    let siblingCount = 0;
+                                                                    for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
+                                                                    if (siblingCount >= 2) optimized.push(h);
+                                                                }
                                                             }
                                                         }
                                                         return optimized;
@@ -6224,16 +5857,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     value={inputText}
                                     onChange={e => setInputText(e.target.value)}
                                     onPaste={handleChatPaste}
-                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                                    placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up…'}
-                                    disabled={isStreaming || voiceState !== 'idle'}
+                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isStreaming) handleSend(); } }}
+                                    placeholder={voiceState !== 'idle' ? '' : isStreaming ? 'Waiting for reply… type your next message' : 'Ask a follow-up…'}
+                                    disabled={voiceState !== 'idle'}
                                     className="w-full bg-transparent outline-none resize-none text-[14.5px] text-gray-900 placeholder:text-gray-400 px-5 pt-4 pb-1 leading-relaxed overflow-y-auto"
                                     style={{ minHeight: '50px', maxHeight: '180px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
                                 <div className="flex items-center justify-between px-2.5 pb-2.5 pt-0.5">
                                     {/* Left: Mode selector — plain text, ChatGPT/Claude style */}
                                     <div className="flex items-center gap-1">
-<<<<<<< HEAD
                                         <ModeSelector
                                             mode={chatMode}
                                             onModeChange={setChatMode}
@@ -6242,49 +5874,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             isGuest={!api.isAuthenticated}
                                             onLockedClick={() => window.dispatchEvent(new Event('show-auth-modal'))}
                                         />
-=======
-                                        <div className="relative" ref={chatModeRef}>
-                                            <button
-                                                onClick={() => setChatModeOpen(v => !v)}
-                                                title={`Mode: ${currentChatMode.label} — ${currentChatMode.desc}`}
-                                                className={`inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[12.5px] text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition-colors mode-icon-${chatMode}`}
-                                            >
-                                                <span className={`mode-icon-anim ${chatMode === 'roundtable' ? 'text-blue-600' : 'text-gray-400'}`}>{React.createElement(currentChatMode.icon)}</span>
-                                                <span className={`font-medium ${chatMode === 'roundtable' ? 'text-blue-700' : ''}`}>{currentChatMode.label}</span>
-                                                <svg className="w-3 h-3 text-gray-400 transition-transform" style={{ transform: chatModeOpen ? 'rotate(180deg)' : undefined }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
-                                            </button>
-                                            {chatModeOpen && (
-                                                <div className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-gray-200 rounded-xl shadow-[0_20px_50px_-10px_rgba(15,23,42,0.25)] overflow-hidden z-30" style={{ animation: 'menu-pop 0.15s ease-out' }}>
-                                                    <div className="px-3.5 pt-2.5 pb-1.5 text-[11px] font-medium text-gray-400">Chat Mode</div>
-                                                    {CHAT_MODES.map(m => {
-                                                        const MIcon = m.icon;
-                                                        const isActive = chatMode === m.id;
-                                                        return (
-                                                            <button
-                                                                key={m.id}
-                                                                onClick={() => {
-                                                                    setChatMode(m.id);
-                                                                    setChatModeOpen(false);
-                                                                }}
-                                                                className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors mode-icon-${m.id} ${isActive ? 'bg-blue-50/70' : 'hover:bg-gray-50'}`}
-                                                            >
-                                                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${isActive ? 'bg-blue-100/70 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>
-                                                                    <span className="mode-icon-anim"><MIcon /></span>
-                                                                </div>
-                                                                <div className="min-w-0 flex-1">
-                                                                    <p className={`text-[13px] font-semibold ${isActive ? 'text-blue-700' : 'text-gray-800'}`}>{m.label}</p>
-                                                                    <p className={`text-[11px] leading-tight ${isActive ? 'text-blue-600/70' : 'text-gray-500'}`}>{m.desc}</p>
-                                                                </div>
-                                                                {isActive && (
-                                                                    <svg className="w-4 h-4 text-blue-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
-                                                                )}
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-                                        </div>
->>>>>>> 7d68c1b (feat(ui): polish ModeSelector + Agent Room styling)
                                     </div>
                                     {/* Right: action buttons */}
                                     <div className="flex items-center gap-0.5">
@@ -6314,14 +5903,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                             title={isStreaming ? 'Stop generating' : 'Send'}
                                             aria-label={isStreaming ? 'Stop generating' : 'Send'}
                                             className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-all ml-1 ${isStreaming
-                                                    ? 'bg-white text-gray-700 border border-gray-300 hover:border-red-400 hover:text-red-500 hover:bg-red-50 shadow-sm'
+                                                    ? 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
                                                     : inputText.trim()
                                                         ? 'bg-gray-700 text-white hover:bg-gray-800 shadow-[0_6px_16px_-4px_rgba(55,65,81,0.35)] hover:-translate-y-[1px]'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                                                 }`}
                                         >
                                             {isStreaming ? (
-                                                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3" /></svg>
+                                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                                    <circle cx="12" cy="12" r="9" />
+                                                    <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" stroke="none" />
+                                                </svg>
                                             ) : (
                                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
                                             )}

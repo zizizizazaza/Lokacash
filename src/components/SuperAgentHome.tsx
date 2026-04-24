@@ -486,6 +486,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const navigate = useNavigate();
   const location = useLocation();
   const [input, setInput] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [mode, setMode] = useState<'auto' | 'fast' | 'roundtable'>('auto');
@@ -1165,6 +1166,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
             )}
             <textarea
               key={phIdx}
+              ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
               onPaste={handleHomePaste}
@@ -1309,7 +1311,17 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
               {/* Guru carousel — only for guru-council, wider than input box */}
               {selectedAgent === 'guru-council' && (
                 <div className="-mx-20 md:-mx-40" style={{ animation: 'fade-up 0.45s var(--ease-out-expo) 0.1s both' }}>
-                  <GuruCarousel onSelect={(name) => setInput(`Analyze my portfolio from ${name}'s perspective`)} />
+                  <GuruCarousel onSelect={(name) => {
+                    const prompt = `What would ${name} say about `;
+                    setInput(prompt);
+                    setTimeout(() => {
+                      const el = inputRef.current;
+                      if (el) {
+                        el.focus();
+                        el.setSelectionRange(prompt.length, prompt.length);
+                      }
+                    }, 0);
+                  }} />
                 </div>
               )}
 
