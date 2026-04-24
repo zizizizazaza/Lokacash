@@ -24,18 +24,18 @@ function envInt(name: string, fallback: number): number {
 // PLAN_{TIER}_FAST / PLAN_{TIER}_ROUNDTABLE / PLAN_{TIER}_WINDOW_DAYS
 const PLAN_DEFAULTS: Record<PlanTier, { fast: number; roundtable: number; windowDays: number }> = {
   free: {
-    fast: envInt('PLAN_FREE_FAST', 10),
-    roundtable: envInt('PLAN_FREE_ROUNDTABLE', 2),
+    fast: envInt('PLAN_FREE_FAST', 20),
+    roundtable: envInt('PLAN_FREE_ROUNDTABLE', 3),
     windowDays: envInt('PLAN_FREE_WINDOW_DAYS', 7),
   },
   pro: {
-    fast: envInt('PLAN_PRO_FAST', 200),
-    roundtable: envInt('PLAN_PRO_ROUNDTABLE', 50),
+    fast: envInt('PLAN_PRO_FAST', 300),
+    roundtable: envInt('PLAN_PRO_ROUNDTABLE', 75),
     windowDays: envInt('PLAN_PRO_WINDOW_DAYS', 30),
   },
   max: {
-    fast: envInt('PLAN_MAX_FAST', 500),
-    roundtable: envInt('PLAN_MAX_ROUNDTABLE', 150),
+    fast: envInt('PLAN_MAX_FAST', 800),
+    roundtable: envInt('PLAN_MAX_ROUNDTABLE', 225),
     windowDays: envInt('PLAN_MAX_WINDOW_DAYS', 30),
   },
 };
@@ -55,12 +55,12 @@ export function planDefaults(plan: PlanTier) {
 // the Settings page can render them without a separate frontend env.
 export const PLAN_PRICING_USD: Record<Exclude<PlanTier, 'free'>, { monthly: number; yearly: number }> = {
   pro: {
-    monthly: envInt('PLAN_PRO_MONTHLY_USD', 39),
-    yearly: envInt('PLAN_PRO_YEARLY_USD', 389),
+    monthly: envInt('PLAN_PRO_MONTHLY_USD', 49),
+    yearly: envInt('PLAN_PRO_YEARLY_USD', 489),
   },
   max: {
-    monthly: envInt('PLAN_MAX_MONTHLY_USD', 99),
-    yearly: envInt('PLAN_MAX_YEARLY_USD', 987),
+    monthly: envInt('PLAN_MAX_MONTHLY_USD', 109),
+    yearly: envInt('PLAN_MAX_YEARLY_USD', 1087),
   },
 };
 
