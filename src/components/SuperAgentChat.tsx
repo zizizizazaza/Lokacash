@@ -1848,7 +1848,13 @@ const CANNED_THINKING_MESSAGES: Record<string, string[]> = {
 // the right panel. English only — we intentionally ignore backend-provided
 // `planningMessage` which may be Chinese.
 const PlanPipeline: React.FC<{ thinking: ThinkingFlow; compact?: boolean }> = ({ thinking, compact }) => {
-    const isRt = thinking.routedMode === 'roundtable';
+    // A turn counts as Roundtable as soon as ANY of these signals exist —
+    // routedMode arrives only after backend routing completes, but
+    // rtPreparationStatus / selectedAgentIds are set the moment the user
+    // confirms Summon, so the stepper appears immediately for RT flows.
+    const isRt = thinking.routedMode === 'roundtable'
+        || thinking.rtPreparationStatus !== undefined
+        || (thinking.selectedAgentIds?.length ?? 0) > 0;
 
     const stages = useMemo(() => {
         if (isRt) {
@@ -1934,6 +1940,11 @@ const PlanPipeline: React.FC<{ thinking: ThinkingFlow; compact?: boolean }> = ({
         ];
     }, [thinking, isRt]);
 
+    // Product decision: the progress stepper is Roundtable-only. Standard
+    // Auto / Fast queries don't render it at all. We keep the non-RT branch
+    // above (currently unreached) so this decision is easy to revert if the
+    // product stance changes.
+    if (!isRt) return null;
     if (stages.every(s => !s.done && !s.active)) return null;
 
     const txtCls = compact ? 'text-[10px]' : 'text-[10.5px]';
