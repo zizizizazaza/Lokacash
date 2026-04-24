@@ -1187,6 +1187,139 @@ const STATIC_KG_DATA: KnowledgeGraphData = {
 
 const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
 
+/**
+ * Build a knowledge graph from the real roundtable state flowing in from
+ * `agent_responded` / `consensus_done` socket events. Nodes:
+ *   - 1 central topic node (from the user's prompt / chat title)
+ *   - N role nodes — one per selected analyst — with initial/final signal,
+ *     confidence and whether they changed position between round 1 and N
+ *   - 1 conclusion node — final verdict, confidence, conflict rate
+ * Edges:
+ *   - role → topic (analyzes)
+ *   - role → conclusion (converges_to, labelled with their final signal)
+ *   - role ↔ role (challenges) when two agents' final verdicts disagree
+ *
+ * Returns null when there's no usable data yet, letting the caller fall
+ * back to a placeholder or the demo graph.
+ */
+function buildRealKnowledgeGraph(
+    thinking: ThinkingFlow | undefined,
+    topicLabel: string = 'Research Topic',
+): KnowledgeGraphData | null {
+    if (!thinking) return null;
+    const agentIds = thinking.selectedAgentIds || [];
+    const rounds = thinking.rtRounds || [];
+    const consensus = thinking.rtConsensus;
+    if (agentIds.length === 0 || rounds.length === 0) return null;
+
+    const firstRoundAgents = rounds[0]?.agents || [];
+    const lastRoundAgents = rounds[rounds.length - 1]?.agents || [];
+    // Need at least one agent with a real response before the graph is meaningful.
+    const anyResponded = lastRoundAgents.some(a => a.status === 'done' && a.verdict);
+    if (!anyResponded) return null;
+
+    const nodes: KGNode[] = [];
+    const edges: KGEdge[] = [];
+
+    nodes.push({
+        id: 'topic_main',
+        type: 'asset',
+        label: topicLabel.length > 24 ? topicLabel.slice(0, 22) + '…' : topicLabel,
+        group: 'center',
+        x: 0, y: 0,
+        data: { summary: topicLabel },
+    });
+
+    for (const agentId of agentIds) {
+        const meta = SUMMON_POOL.find(a => a.id === agentId);
+        if (!meta) continue;
+        const first = firstRoundAgents.find(a => a.agentId === agentId);
+        const last = lastRoundAgents.find(a => a.agentId === agentId);
+        const initial = (first?.verdict || '').toLowerCase();
+        const final = (last?.verdict || initial || '').toLowerCase();
+        const confidence = ((last?.confidence ?? first?.confidence ?? 50) as number) / 100;
+        const summary = last?.reasoning || first?.reasoning || meta.role;
+        const changed = !!initial && !!final && initial !== final;
+        const roleId = `role_${agentId}`;
+        nodes.push({
+            id: roleId,
+            type: 'role',
+            label: meta.name,
+            group: 'role',
+            x: 0, y: 0,
+            data: {
+                agentId,
+                color: meta.color,
+                initial_signal: initial || 'pending',
+                final_signal: final || 'pending',
+                confidence,
+                changed_position: changed,
+                summary,
+            },
+        });
+        edges.push({
+            id: `edge_${roleId}_topic`,
+            source: roleId,
+            target: 'topic_main',
+            type: 'analyzes',
+            label: 'analyzes',
+        });
+    }
+
+    const hasConclusion = consensus && (consensus.status === 'done' || !!consensus.finalVerdict);
+    if (hasConclusion) {
+        const finalVerdict = (consensus!.finalVerdict || 'HOLD').toUpperCase();
+        const finalConf = Math.round(consensus!.finalConfidence ?? 50);
+        const conflict = Math.round(consensus!.conflictRate ?? 0);
+        nodes.push({
+            id: 'conclusion_action',
+            type: 'conclusion',
+            label: `Final: ${finalVerdict} · ${finalConf}%`,
+            group: 'conclusion',
+            x: 0, y: 0,
+            data: {
+                action: finalVerdict.toLowerCase(),
+                confidence: finalConf / 100,
+                summary: `Committee verdict: ${finalVerdict}. Weighted confidence ${finalConf}%. Conflict rate ${conflict}%.`,
+            },
+        });
+        for (const agentId of agentIds) {
+            const roleId = `role_${agentId}`;
+            if (!nodes.find(n => n.id === roleId)) continue;
+            const last = lastRoundAgents.find(a => a.agentId === agentId);
+            const vlow = (last?.verdict || '').toLowerCase();
+            edges.push({
+                id: `edge_${roleId}_final`,
+                source: roleId,
+                target: 'conclusion_action',
+                type: 'converges_to',
+                label: vlow ? `supports_${vlow}` : 'converges_to',
+            });
+        }
+        // Pairwise disagreement edges — draw once per pair, only when both
+        // sides reached a non-empty verdict and they differ.
+        for (let i = 0; i < agentIds.length; i++) {
+            for (let j = i + 1; j < agentIds.length; j++) {
+                const a = lastRoundAgents.find(x => x.agentId === agentIds[i]);
+                const b = lastRoundAgents.find(x => x.agentId === agentIds[j]);
+                const av = (a?.verdict || '').toLowerCase();
+                const bv = (b?.verdict || '').toLowerCase();
+                if (av && bv && av !== bv) {
+                    edges.push({
+                        id: `edge_challenge_${agentIds[i]}_${agentIds[j]}`,
+                        source: `role_${agentIds[i]}`,
+                        target: `role_${agentIds[j]}`,
+                        type: 'challenges',
+                        label: 'disagrees',
+                    });
+                }
+            }
+        }
+    }
+
+    return { nodes, edges };
+}
+
 // ─── KnowledgeGraphView Component ──────────────────────────
 const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean }> = ({ data, animate = false }) => {
     const svgRef = useRef<SVGSVGElement>(null);
@@ -2625,7 +2758,8 @@ const ThinkingAnalystsList: React.FC<{ allAgents: typeof SUMMON_POOL }> = ({ all
 const RoundtableWorkbench: React.FC<{
     thinking: ThinkingFlow;
     isLive: boolean;
-}> = ({ thinking, isLive }) => {
+    topicLabel?: string;
+}> = ({ thinking, isLive, topicLabel }) => {
     const agentIds = thinking.selectedAgentIds || [];
     const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
     const pickedExtras = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
@@ -2797,7 +2931,10 @@ const RoundtableWorkbench: React.FC<{
                 <div className="flex-1 min-h-0 relative">
                     {tab === 'graph' ? (
                         <div className="absolute inset-0">
-                            <KnowledgeGraphView data={buildKnowledgeGraph()} animate={isLive} />
+                            <KnowledgeGraphView
+                                data={buildRealKnowledgeGraph(thinking, topicLabel) || buildKnowledgeGraph()}
+                                animate={isLive}
+                            />
                         </div>
                     ) : tab === 'log' ? (
                         <div className="absolute inset-0 flex flex-col">
@@ -6276,6 +6413,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         <RoundtableWorkbench
                                                             thinking={thinkingProcesses[i]!}
                                                             isLive={!!thinkingProcesses[i]?.isActive}
+                                                            topicLabel={messages.slice(0, i).reverse().find(m => m.role === 'user')?.content || ''}
                                                         />
                                                     </PlanCardBoundary>
                                                 )}
