@@ -18,9 +18,11 @@ import { runConsensusEngine } from '../services/consensus.service.js';
 import { runWeb3RouterQuery, runOkxCli } from '../services/web3Router.service.js';
 import { researchService } from '../services/research.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
+import { hedgefundService } from '../services/hedgefund.service.js';
 import { getListings, getUpcomingEvents } from './events.js';
 import {
   mapConsensusToSkill,
+  mapHedgeFundToSkill,
   mapOkxMarketSnapshotToSkill,
   mapOkxNewsBundleToSkill,
   mapResearchResultToSkill,
@@ -270,6 +272,60 @@ router.get('/v1/crypto/trending', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /skill/v1/crypto/portfolio-analysis
+ * Body: {
+ *   tickers: string[],         // 1..3 tickers, e.g. ["AAPL", "TSLA", "BTC-USD"]
+ *   analysts?: string[],       // optional: subset of analyst personas
+ *   showReasoning?: boolean    // default true (include full reasoning per analyst)
+ * }
+ *
+ * Multi-analyst portfolio decision pipeline (AI Hedge Fund). Each analyst persona
+ * issues an independent BUY / SELL / HOLD signal per ticker; the framework then
+ * fuses them into a final trading decision with quantity + confidence.
+ *
+ * Heavy operation: 30s-5min depending on ticker count + analyst count.
+ */
+router.post('/v1/crypto/portfolio-analysis', async (req: Request, res: Response) => {
+  const tickersRaw = req.body?.tickers;
+  if (!Array.isArray(tickersRaw) || tickersRaw.length === 0) {
+    return errorResponse(res, 400, 'missing_tickers', 'POST body requires `tickers` (non-empty string array).');
+  }
+  if (tickersRaw.length > 3) {
+    return errorResponse(res, 400, 'too_many_tickers', 'Limit 3 tickers per request to keep latency under 5min.');
+  }
+  const tickers: string[] = [];
+  for (const t of tickersRaw) {
+    if (typeof t !== 'string' || !/^[A-Za-z0-9.\-]{1,12}$/.test(t.trim())) {
+      return errorResponse(res, 400, 'invalid_ticker', `Each ticker must be 1-12 alphanumeric chars. Got: ${t}`);
+    }
+    tickers.push(t.trim().toUpperCase());
+  }
+
+  const analystsRaw = req.body?.analysts;
+  const analysts: string[] | undefined = Array.isArray(analystsRaw)
+    ? analystsRaw.filter((a) => typeof a === 'string' && a.length > 0).slice(0, 10)
+    : undefined;
+
+  const showReasoning = req.body?.showReasoning !== false; // default true
+
+  try {
+    const result = await hedgefundService.runAnalysis({
+      tickers,
+      analysts,
+      showReasoning,
+    });
+    const formatted = hedgefundService.formatReport(result, showReasoning);
+    const mapped = mapHedgeFundToSkill(result, formatted);
+    if (!mapped) {
+      return errorResponse(res, 502, 'upstream_empty', 'Hedge fund pipeline returned no result.');
+    }
+    res.json({ ok: true, data: mapped });
+  } catch (err) {
+    return errorResponse(res, 500, 'portfolio_analysis_failed', (err as Error).message);
+  }
+});
+
 // ════════════════════════════════════════════════════════════════════
 //              /stock/*  —  stock / equity analysis
 // ════════════════════════════════════════════════════════════════════
@@ -335,7 +391,7 @@ router.get('/v1/info', (_req: Request, res: Response) => {
     ok: true,
     data: {
       name: 'lokacash',
-      version: '1.1.0',
+      version: '1.2.0',
       description: 'Lokacash investment intelligence — multi-agent consensus, deep research, crypto market data, stock analysis.',
       endpoints: [
         // /research/*
@@ -343,6 +399,7 @@ router.get('/v1/info', (_req: Request, res: Response) => {
         { method: 'POST', path: '/skill/v1/research/deep', description: 'Deep web + social research on any topic' },
         // /crypto/*
         { method: 'POST', path: '/skill/v1/crypto/deep-research', description: 'Crypto-focused research synthesizing market + sentiment + news' },
+        { method: 'POST', path: '/skill/v1/crypto/portfolio-analysis', description: 'Multi-analyst hedge-fund decision (BUY/SELL/HOLD per ticker, with quantity + confidence)' },
         { method: 'GET', path: '/skill/v1/crypto/sentiment/:symbol', description: 'Per-coin sentiment + catalyst news' },
         { method: 'GET', path: '/skill/v1/crypto/market/:symbol', description: 'Spot price + 24h stats + 7D history' },
         { method: 'GET', path: '/skill/v1/crypto/derivatives/:symbol', description: 'Perpetual funding + OI + orderbook' },

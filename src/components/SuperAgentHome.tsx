@@ -1182,24 +1182,35 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
                 ))}
               </div>
             )}
-            <textarea
-              key={phIdx}
-              ref={inputRef}
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onPaste={handleHomePaste}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
-                  e.preventDefault();
-                  tryStartChat(input);
-                }
-              }}
-              placeholder={homeVoiceState !== 'idle' ? '' : PLACEHOLDERS[phIdx]}
-              rows={3}
-              disabled={homeVoiceState !== 'idle'}
-              className="ph-fade-in w-full bg-transparent outline-none text-[15px] text-gray-900 placeholder:text-gray-400 px-4 pt-4 pb-2 resize-none"
-              style={{ visibility: homeVoiceState !== 'idle' ? 'hidden' : 'visible' }}
-            />
+            <div className="relative">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onPaste={handleHomePaste}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
+                    e.preventDefault();
+                    tryStartChat(input);
+                  }
+                }}
+                rows={3}
+                disabled={homeVoiceState !== 'idle'}
+                className="w-full bg-transparent outline-none text-[15px] text-gray-900 px-4 pt-4 pb-2 resize-none"
+                style={{ visibility: homeVoiceState !== 'idle' ? 'hidden' : 'visible' }}
+              />
+              {/* Fake placeholder overlay — animates without remounting the
+                  textarea, so focus is preserved across rotations. */}
+              {!input && homeVoiceState === 'idle' && (
+                <span
+                  key={phIdx}
+                  aria-hidden="true"
+                  className="ph-fade-in absolute top-4 left-4 right-4 text-[15px] text-gray-400 pointer-events-none select-none whitespace-pre-wrap break-words"
+                >
+                  {PLACEHOLDERS[phIdx]}
+                </span>
+              )}
+            </div>
             {/* Input toolbar */}
             <div className="flex items-center justify-between px-3 pb-3">
               <div className="flex items-center gap-1">

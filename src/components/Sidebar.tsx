@@ -95,6 +95,21 @@ const UserMenu: React.FC<{
   );
 };
 
+// Skeleton row for the Recents list — width varies per row to look like real titles
+const RECENTS_SKELETON_WIDTHS = ['w-4/5', 'w-2/3', 'w-3/4', 'w-1/2', 'w-3/5', 'w-11/12', 'w-2/3', 'w-3/4'];
+const RecentsSkeleton: React.FC<{ isDark?: boolean }> = ({ isDark }) => {
+  const bar = isDark ? 'bg-white/10' : 'bg-gray-200';
+  return (
+    <div className="space-y-1 animate-pulse" aria-label="Loading conversations">
+      {RECENTS_SKELETON_WIDTHS.map((w, i) => (
+        <div key={i} className="px-2 py-1.5">
+          <div className={`h-3 ${w} ${bar} rounded`} />
+        </div>
+      ))}
+    </div>
+  );
+};
+
 export const Sidebar: React.FC<{
   expanded: boolean; onToggle: () => void; page: Page; go: (p: Page) => void;
   isDark: boolean; onToggleDark: () => void;
@@ -107,6 +122,13 @@ export const Sidebar: React.FC<{
   const [desktopUserMenuOpen, setDesktopUserMenuOpen] = useState(false);
   const [mobileUserMenuOpen, setMobileUserMenuOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  // Tracks whether a /chat/conversations fetch is in flight. We treat the
+  // Privy-resolution phase (`!privyReady`) as loading too — it's a real
+  // unknown-auth window, not a "definitely logged out" state. Checking
+  // tokens in storage isn't a substitute: a stored token can be expired,
+  // and we'd have to decode the JWT to know. Privy already does that for
+  // us and exposes the answer via `privyReady`.
+  const [isLoadingConversations, setIsLoadingConversations] = useState<boolean>(isLoggedIn);
   const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set());
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: string, title: string } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -166,14 +188,20 @@ export const Sidebar: React.FC<{
   }, []);
 
   useEffect(() => {
+    // Don't decide anything until Privy has resolved auth state. Touching
+    // state here would prematurely flip the loading flag off and unmount
+    // the skeleton during the Privy-init window.
+    if (!privyReady) return;
     if (!isLoggedIn) {
       setConversations([]);
+      setIsLoadingConversations(false);
       return;
     }
+    setIsLoadingConversations(true);
     const fetchConversations = async () => {
       try {
         const token = sessionStorage.getItem('loka_token') || localStorage.getItem('loka_token');
-        if (!token) return;
+        if (!token) { setIsLoadingConversations(false); return; }
         const res = await fetch(`${API_BASE}/chat/conversations`, {
           headers: { Authorization: `Bearer ${token}` }
         });
@@ -187,6 +215,8 @@ export const Sidebar: React.FC<{
         }
       } catch (err) {
         console.error('Failed to fetch conversations:', err);
+      } finally {
+        setIsLoadingConversations(false);
       }
     };
     fetchConversations();
@@ -200,7 +230,7 @@ export const Sidebar: React.FC<{
     return () => {
       window.removeEventListener('loka-profile-updated', handleAuthReady);
     };
-  }, [isLoggedIn, page]); // Re-fetch when page changes to keep list fresh
+  }, [isLoggedIn, privyReady, page]); // Re-fetch when page changes to keep list fresh
 
   const confirmDelete = async () => {
     if (!deleteConfirm) return;
@@ -299,10 +329,12 @@ export const Sidebar: React.FC<{
 
         {/* Recents */}
         <div className="px-3 flex-1 overflow-y-auto min-h-0">
-          {isLoggedIn && (
+          {(isLoggedIn || !privyReady) && (
             <>
               <p className="px-2 pb-2 text-[11px] font-medium text-gray-400 select-none">Recents</p>
-              {sortedConversations.length > 0 ? (
+              {!privyReady || (isLoadingConversations && conversations.length === 0) ? (
+                <RecentsSkeleton />
+              ) : sortedConversations.length > 0 ? (
                 sortedConversations.map((c) => (
                   <div key={c.id} className="relative group/recent">
                     {renamingId === c.id ? (
@@ -444,10 +476,12 @@ export const Sidebar: React.FC<{
 
         {/* Recents */}
         <div className="px-3 flex-1 overflow-y-auto min-h-0">
-          {isLoggedIn && (
+          {(isLoggedIn || !privyReady) && (
             <>
               <p className={`px-2 pb-2 text-[11px] font-medium ${textMuted} select-none`}>Recents</p>
-              {sortedConversations.length > 0 ? (
+              {!privyReady || (isLoadingConversations && conversations.length === 0) ? (
+                <RecentsSkeleton isDark={isDark} />
+              ) : sortedConversations.length > 0 ? (
                 sortedConversations.map((c) => (
                   <div key={c.id} className="relative group/recent">
                     {renamingId === c.id ? (

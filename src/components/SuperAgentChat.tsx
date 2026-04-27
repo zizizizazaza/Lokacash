@@ -60,9 +60,16 @@ const HtmlReportFrame: React.FC<{ html: string; isStreaming: boolean }> = ({ htm
 @font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Bold.woff2') format('woff2'); font-weight: 700; font-display: swap; }
 :root { --color-text-primary: #1a1a1a; --color-text-secondary: #666; --color-text-tertiary: #999; --color-background-secondary: #f5f5f5; --color-border-tertiary: #e5e5e5; --border-radius-md: 8px; --border-radius-lg: 12px; --font-sans: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.75; font-size: 15px; }
+html, body { overflow-x: hidden; max-width: 100%; width: 100%; touch-action: pan-y; }
+body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.75; font-size: 15px; word-wrap: break-word; overflow-wrap: anywhere; }
 ul, ol { padding-left: 1.2em; margin: 0.5rem 0; text-align: left; }
 li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
+img, video, canvas, svg { max-width: 100%; height: auto; }
+table { width: 100%; max-width: 100%; table-layout: fixed; border-collapse: collapse; }
+th, td { word-wrap: break-word; overflow-wrap: anywhere; }
+pre { max-width: 100%; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+code { word-break: break-word; }
+a { word-break: break-all; }
 </style>
 </head><body>${cleanHtml}
 <style id="loka-report-override">
@@ -95,13 +102,42 @@ li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
       });
     });
   })();
+  function measure() {
+    // Use the larger of body and documentElement to handle browsers that
+    // measure scrollHeight differently. Round up to avoid sub-pixel underflow.
+    var h = Math.ceil(Math.max(
+      document.documentElement.scrollHeight,
+      document.documentElement.offsetHeight,
+      document.body ? document.body.scrollHeight : 0,
+      document.body ? document.body.offsetHeight : 0
+    ));
+    return h;
+  }
+  var lastSent = 0;
   function sendHeight() {
-    var h = document.documentElement.scrollHeight;
+    var h = measure();
+    if (h === lastSent) return;
+    lastSent = h;
     window.parent.postMessage({ type: 'loka-iframe-height', height: h }, '*');
   }
   sendHeight();
-  new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
-  window.addEventListener('load', function() { setTimeout(sendHeight, 300); });
+  // ResizeObserver fires on any size change — catches font swaps, image loads,
+  // CSS-only reflows, anything MutationObserver would miss.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(sendHeight).observe(document.documentElement);
+    if (document.body) new ResizeObserver(sendHeight).observe(document.body);
+  } else {
+    new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
+  }
+  // Re-measure after fonts and late images settle.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(sendHeight).catch(function(){});
+  }
+  window.addEventListener('load', function() {
+    sendHeight();
+    setTimeout(sendHeight, 200);
+    setTimeout(sendHeight, 800);
+  });
 </` + `script>
 </body></html>`;
         iframe.srcdoc = fullDoc;
@@ -109,8 +145,17 @@ li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
 
     useEffect(() => {
         const handler = (e: MessageEvent) => {
+            // CRITICAL: only accept messages from THIS iframe's contentWindow.
+            // Without this guard, every HtmlReportFrame instance on the page
+            // updates its height to whatever any other iframe just posted —
+            // causing all reports to jitter on every tap.
+            if (e.source !== iframeRef.current?.contentWindow) return;
             if (e.data?.type === 'loka-iframe-height' && typeof e.data.height === 'number') {
-                setIframeHeight(Math.min(e.data.height + 4, 5000));
+                // +16 buffer absorbs sub-pixel rounding and any final layout
+                // shift after measure() runs but before the iframe finishes
+                // painting. Cap at 8000 to handle long Roundtable reports.
+                const next = Math.min(e.data.height + 16, 8000);
+                setIframeHeight(prev => (prev === next ? prev : next));
             }
         };
         window.addEventListener('message', handler);
@@ -128,8 +173,9 @@ li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
             <iframe
                 ref={iframeRef}
                 sandbox="allow-scripts"
-                className="w-full border-0 rounded-xl overflow-hidden"
-                style={{ height: iframeHeight, transition: 'height 0.3s ease' }}
+                scrolling="no"
+                className="w-full border-0 rounded-xl block"
+                style={{ height: iframeHeight, display: 'block' }}
                 title="Research Report"
             />
         </div>
@@ -3098,6 +3144,21 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         }
     });
     const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
+    // Skeleton state: true while we're fetching history for an existing session
+    // and have nothing to show yet. Initialized true only when we have a session
+    // id but no in-flight stream populated `messages`. Avoids flashing skeleton
+    // for fresh chats or stream-resume scenarios.
+    const [isLoadingHistory, setIsLoadingHistory] = useState(() => {
+        if (!initialSessionId) return false;
+        try {
+            const raw = sessionStorage.getItem(SA_PENDING_KEY);
+            if (raw) {
+                const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
+                if (p?.streaming && p.sessionId === initialSessionId) return false;
+            }
+        } catch { /* ignore */ }
+        return true;
+    });
 
     // Guest-only: persist chat history to localStorage so conversations
     // survive reloads. Authenticated users are already persisted in the DB.
@@ -4370,6 +4431,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     useEffect(() => {
         if (initialSessionId) {
             api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
+                setIsLoadingHistory(false);
                 if (history && history.length > 0) {
                     const transformedHistory: Message[] = history.map(
                         (m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
@@ -4502,7 +4564,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     // so incoming socket chunks write into the placeholder, not the last user msg.
                     activeMsgIdxRef.current = streamStillActive ? transformedHistory.length : transformedHistory.length - 1;
                 }
-            }).catch(console.error);
+            }).catch((err) => {
+                setIsLoadingHistory(false);
+                console.error(err);
+            });
         }
     }, [initialSessionId]);
 
@@ -4912,7 +4977,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         <h1 className="text-[13px] font-semibold text-gray-800 truncate flex-1 min-w-0 mr-4">{chatTitle}</h1>
                         <PlanUpgradeEntry size="sm" hideIfMax />
                     </div>
-                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
+                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overscroll-y-contain px-4 md:px-6 xl:px-8 py-8 pb-28">
                         <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
                             <div className={`flex items-start gap-6 xl:gap-8 ${showToc ? '' : 'justify-center'}`}>
                                 {showToc && (
@@ -4994,6 +5059,42 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     </aside>
                                 )}
                                 <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
+                            {isLoadingHistory && messages.length === 0 && (
+                                <div className="space-y-8 animate-pulse" aria-label="Loading conversation">
+                                    {/* User bubble skeleton */}
+                                    <div className="flex justify-end">
+                                        <div className="max-w-[60%] px-4 py-3 bg-gray-100 rounded-2xl rounded-br-sm border border-gray-200/70">
+                                            <div className="h-3.5 w-48 bg-gray-200 rounded" />
+                                        </div>
+                                    </div>
+                                    {/* Assistant reply skeleton */}
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex-1 min-w-0 space-y-3">
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-4 h-4 rounded-full bg-gray-200" />
+                                                <div className="h-3 w-24 bg-gray-200 rounded" />
+                                            </div>
+                                            <div className="h-4 w-3/5 bg-gray-200 rounded" />
+                                            <div className="space-y-2 pt-2">
+                                                <div className="h-3 w-full bg-gray-200/80 rounded" />
+                                                <div className="h-3 w-11/12 bg-gray-200/80 rounded" />
+                                                <div className="h-3 w-4/5 bg-gray-200/80 rounded" />
+                                                <div className="h-3 w-2/3 bg-gray-200/80 rounded" />
+                                            </div>
+                                            <div className="flex gap-2 pt-3">
+                                                <div className="h-16 flex-1 bg-gray-100 rounded-xl border border-gray-200/70" />
+                                                <div className="h-16 flex-1 bg-gray-100 rounded-xl border border-gray-200/70" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {/* Second user bubble skeleton */}
+                                    <div className="flex justify-end">
+                                        <div className="max-w-[45%] px-4 py-3 bg-gray-100 rounded-2xl rounded-br-sm border border-gray-200/70">
+                                            <div className="h-3.5 w-32 bg-gray-200 rounded" />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                             {messages.map((msg, i) => (
                                 <div key={i} id={`msg-wrap-${i}`} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
@@ -5074,7 +5175,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     - Roundtable: 5 stages (Summon → Research → Debate → Consensus → Report)
                                                     - Fast / Auto: 3 stages (Route → Research → Respond) */}
                                                 {!!thinkingProcesses[i]?.routedMode && (
-                                                    <div className="mb-3 mt-1">
+                                                    <div className="mb-3 mt-1 -mx-1 px-1 overflow-x-auto md:overflow-visible md:mx-0 md:px-0" style={{ scrollbarWidth: 'none' }}>
                                                         <PlanPipeline thinking={thinkingProcesses[i]} />
                                                     </div>
                                                 )}
@@ -5929,48 +6030,71 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
                 {(() => { if (showThinkingPanel) console.log('[RT-DEBUG] panel check', { chatMode, routedMode: currentThinking?.routedMode, rtPanelExpanded, activeGraphMsgIdx }); return null; })()}
                 {/* ── Unified Process Panel (floating card, same for all modes) ── */}
+                {/* Mobile: fullscreen overlay with backdrop. Desktop (md+): inline side column. */}
                 {showThinkingPanel && currentThinking && (
-                    <div className="w-[440px] shrink-0 p-3 pl-0">
-                        <div className="h-full flex flex-col overflow-hidden bg-[#fafafb] rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
-                            <div className="flex items-center px-4 py-3 gap-2 shrink-0">
-                                <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Process</span>
-                                <div className="flex-1" />
-                                <button onClick={() => setShowThinkingPanel(false)}
-                                    className="w-7 h-7 rounded-lg bg-white/60 hover:bg-white flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
-                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                                </button>
-                            </div>
-                            <div className="flex-1 min-h-0 overflow-hidden">
-                                <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
+                    <>
+                        <div
+                            className="md:hidden fixed inset-0 z-40 bg-black/40"
+                            onClick={() => setShowThinkingPanel(false)}
+                            aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 p-3 md:static md:z-auto md:w-[440px] md:shrink-0 md:p-3 md:pl-0">
+                            <div className="h-full flex flex-col overflow-hidden bg-[#fafafb] rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
+                                <div className="flex items-center px-4 py-3 gap-2 shrink-0">
+                                    <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Process</span>
+                                    <div className="flex-1" />
+                                    <button onClick={() => setShowThinkingPanel(false)}
+                                        aria-label="Close"
+                                        className="w-9 h-9 md:w-7 md:h-7 rounded-lg bg-white/60 hover:bg-white flex items-center justify-center text-gray-500 hover:text-gray-700 transition-all">
+                                        <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                    </button>
+                                </div>
+                                <div className="flex-1 min-h-0 overflow-hidden">
+                                    <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    </>
                 )}
 
                 {/* Standalone Roundtable Panel — only for non-roundtable mode fallback */}
                 {showGraphPanel && !showThinkingPanel && !sourcePanelData && chatMode !== 'roundtable' && (
-                    <div className="w-[540px] shrink-0 p-3 pl-0">
-                        <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] relative">
-                            <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
-                                <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
-                                <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
-                                <div className="flex-1" />
-                                <button onClick={() => setShowGraphPanel(false)}
-                                    className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
-                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                                </button>
-                            </div>
-                            <div className="flex-1 min-h-0 overflow-hidden">
-                                <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && (chatMode as string) === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && (chatMode as string) === 'roundtable'} />
+                    <>
+                        <div
+                            className="md:hidden fixed inset-0 z-40 bg-black/40"
+                            onClick={() => setShowGraphPanel(false)}
+                            aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 p-3 md:static md:z-auto md:w-[540px] md:shrink-0 md:p-3 md:pl-0">
+                            <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] relative">
+                                <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
+                                    <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
+                                    <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
+                                    <div className="flex-1" />
+                                    <button onClick={() => setShowGraphPanel(false)}
+                                        aria-label="Close"
+                                        className="w-9 h-9 md:w-7 md:h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-all">
+                                        <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                    </button>
+                                </div>
+                                <div className="flex-1 min-h-0 overflow-hidden">
+                                    <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && (chatMode as string) === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && (chatMode as string) === 'roundtable'} />
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    </>
                 )}
 
                 {/* Sources Side Panel — floating card */}
                 {sourcePanelData && !showThinkingPanel && (
-                    <div className="w-[400px] shrink-0 p-3 pl-0">
-                        <div className="h-full flex flex-col bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] overflow-hidden">
+                    <>
+                        <div
+                            className="md:hidden fixed inset-0 z-40 bg-black/40"
+                            onClick={() => setSourcePanelData(null)}
+                            aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 p-3 md:static md:z-auto md:w-[400px] md:shrink-0 md:p-3 md:pl-0">
+                            <div className="h-full flex flex-col bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] overflow-hidden">
                         {/* Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
                             <div className="flex items-center gap-2">
@@ -5979,9 +6103,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             </div>
                             <button
                                 onClick={() => setSourcePanelData(null)}
-                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
+                                aria-label="Close"
+                                className="w-9 h-9 md:w-7 md:h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-all"
                             >
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
                         </div>
                         {/* Source list */}
@@ -6020,8 +6145,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 </a>
                             ))}
                         </div>
+                            </div>
                         </div>
-                    </div>
+                    </>
                 )}
             </div>
         </div>

@@ -3,7 +3,7 @@ import Web3DotWave from './Web3DotWave';
 
 /* ═══════════════════════════════════════════════
    Loka Developer Platform — Skill API Documentation
-   Mirrors public/skill.md — 9 endpoints, 3 domains.
+   Mirrors public/skill.md — 10 endpoints, 3 domains.
    Layout references asksurf.ai commands-catalog pattern.
 ═══════════════════════════════════════════════ */
 
@@ -170,6 +170,7 @@ const CopyBtn: React.FC<{ code: string; dark?: boolean }> = ({ code, dark = true
 // ─── Data (mirrors skill.md) ────────────────────
 const BASE_URL = 'https://nftkashai.online/lokacash/api/skill/v1';
 const INSTALL_CMD = 'npx skills add hetu-project/lokacash-skills --skill lokacash';
+const CURL_DEMO = `curl ${BASE_URL}/crypto/market/BTC`;
 
 type DomainKey = 'all' | 'research' | 'crypto' | 'stock';
 type Endpoint = {
@@ -229,6 +230,27 @@ const ENDPOINTS: Endpoint[] = [
     example: `curl -X POST ${BASE_URL}/crypto/deep-research \\
   -H "Content-Type: application/json" \\
   -d '{"query":"Why is ETH underperforming this week?"}'`,
+  },
+  {
+    method: 'POST', path: '/crypto/portfolio-analysis', domain: 'crypto', latency: '30-300s',
+    tags: ['hedge fund', 'multi-analyst', 'portfolio'],
+    desc: 'Multi-analyst hedge-fund decision over 1-3 tickers. Each analyst persona votes BUY/SELL/HOLD; framework fuses into final decision with quantity + confidence.',
+    example: `curl -X POST ${BASE_URL}/crypto/portfolio-analysis \\
+  -H "Content-Type: application/json" \\
+  -d '{"tickers":["AAPL","TSLA"]}'
+
+{
+  "ok": true,
+  "data": {
+    "tickers": ["AAPL", "TSLA"],
+    "decisions": {
+      "AAPL": { "action": "BUY", "quantity": 100, "confidence": 75 },
+      "TSLA": { "action": "HOLD", "quantity": 0, "confidence": 60 }
+    },
+    "analystSignals": { ... },
+    "report": "...full markdown report..."
+  }
+}`,
   },
   {
     method: 'GET', path: '/crypto/sentiment/:symbol', domain: 'crypto',
@@ -386,6 +408,46 @@ const USE_CASES = [
     d: "User asks 'what's the vibe on SOL?' → /crypto/sentiment/SOL → reports bull/bear/neutral ratios + 2 catalyst news.",
     endpoint: '/crypto/sentiment/:symbol',
   },
+  {
+    t: 'Multi-ticker hedge-fund decision',
+    d: "User asks 'AAPL, TSLA, NVDA — what should I do?' → /crypto/portfolio-analysis with all three → reads decisions table + per-analyst signals.",
+    endpoint: '/crypto/portfolio-analysis',
+  },
+];
+
+// Use cases for "For Developers" tab — framed around backend integration patterns,
+// not agent prompts. Same endpoint catalog, different mental model.
+const DEV_USE_CASES = [
+  {
+    t: 'Daily price snapshot job',
+    d: 'Cron at 00:00 UTC → loop your watchlist → GET /crypto/market/:symbol → write to time-series DB. <340ms each, no rate limit during testing.',
+    endpoint: '/crypto/market/:symbol',
+  },
+  {
+    t: 'Catalyst event polling',
+    d: 'Poll /crypto/events?limit=20 hourly, dedupe by id, fan out to your own webhook on new entries. Filter category client-side.',
+    endpoint: '/crypto/events',
+  },
+  {
+    t: 'On-demand stock analysis',
+    d: 'User clicks "Deep Analysis" in your UI → server-side POST → render the returned markdown. 30-60s; queue if blocking the request thread.',
+    endpoint: '/stock/analysis/:ticker',
+  },
+  {
+    t: 'Backend portfolio scoring',
+    d: 'Nightly batch: per user portfolio, POST /crypto/portfolio-analysis with their tickers → store decisions in DB → surface in dashboard.',
+    endpoint: '/crypto/portfolio-analysis',
+  },
+  {
+    t: 'Funding-rate alerting bot',
+    d: 'GET /crypto/derivatives/:symbol every 5min. Threshold on `fundingApr` and OI delta → push alert to Telegram / Slack / PagerDuty.',
+    endpoint: '/crypto/derivatives/:symbol',
+  },
+  {
+    t: 'Embeddable sector report',
+    d: 'POST /research/deep with topic + days=14 → cache the markdown summary → embed in your blog or analyst dashboard.',
+    endpoint: '/research/deep',
+  },
 ];
 
 const NAV_LINKS = [
@@ -446,6 +508,9 @@ const ApiLanding: React.FC = () => {
   const [activeDomain, setActiveDomain] = useState<DomainKey>('all');
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  // Audience tab — drives Hero copy/CTA and Use Cases framing. Default to
+  // 'agent' since Skill is Lokacash's differentiated entry point.
+  const [audience, setAudience] = useState<'agent' | 'developer'>('agent');
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -482,24 +547,50 @@ const ApiLanding: React.FC = () => {
 
       {/* ── Sticky Nav ── */}
       <div className={`sticky top-0 z-50 transition-all duration-300 ${scrolled ? 'bg-white/90 backdrop-blur-md shadow-sm border-b border-gray-200' : 'bg-transparent'}`}>
-        <div className="max-w-[1400px] mx-auto px-4 sm:px-12 flex items-center justify-between h-14">
-          <a href="/" className="flex items-center gap-2 group" title="Back to Loka">
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-12 flex items-center justify-between h-14 gap-3 sm:gap-4">
+          <a href="/" className="flex items-center gap-2 group shrink-0" title="Back to Loka">
             <span className="font-black text-lg tracking-tight text-black group-hover:text-gray-600 transition-colors">Loka</span>
             <span className="text-gray-300 text-sm">/</span>
             <span className="text-sm font-semibold text-gray-500 group-hover:text-gray-700 transition-colors">Developers</span>
           </a>
-          <nav className="hidden md:flex items-center gap-8">
-            {NAV_LINKS.map(link => (
-              <button key={link.href} onClick={() => scrollToSection(link.href)}
-                className="text-sm font-bold text-gray-500 hover:text-black transition-colors">
-                {link.label}
-              </button>
-            ))}
-          </nav>
-          <a href="/skill.md" target="_blank" rel="noopener noreferrer"
-            className={`hidden sm:inline-flex items-center gap-1.5 px-4 py-2 text-sm font-bold bg-black text-white hover:bg-gray-900 transition-all ${scrolled ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-            Skill.md
-          </a>
+
+          {/* Center: audience switcher — always visible while scrolling so users can
+              flip the view mode from anywhere on the page, not just the hero. */}
+          <div className="inline-flex items-center p-0.5 bg-gray-100/80 backdrop-blur-sm border border-gray-200 rounded-full shrink-0">
+            <button
+              onClick={() => setAudience('agent')}
+              className={`px-2.5 sm:px-4 py-1 text-[10px] sm:text-[11px] font-black tracking-wide uppercase rounded-full transition-all ${
+                audience === 'agent' ? 'bg-black text-white shadow-sm' : 'text-gray-500 hover:text-black'
+              }`}
+            >
+              <span className="sm:hidden">Agents</span>
+              <span className="hidden sm:inline">For AI Agents</span>
+            </button>
+            <button
+              onClick={() => setAudience('developer')}
+              className={`px-2.5 sm:px-4 py-1 text-[10px] sm:text-[11px] font-black tracking-wide uppercase rounded-full transition-all ${
+                audience === 'developer' ? 'bg-black text-white shadow-sm' : 'text-gray-500 hover:text-black'
+              }`}
+            >
+              <span className="sm:hidden">Devs</span>
+              <span className="hidden sm:inline">For Developers</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-6 shrink-0">
+            <nav className="hidden lg:flex items-center gap-7">
+              {NAV_LINKS.map(link => (
+                <button key={link.href} onClick={() => scrollToSection(link.href)}
+                  className="text-sm font-bold text-gray-500 hover:text-black transition-colors">
+                  {link.label}
+                </button>
+              ))}
+            </nav>
+            <a href="/skill.md" target="_blank" rel="noopener noreferrer"
+              className={`hidden sm:inline-flex items-center gap-1.5 px-4 py-2 text-sm font-bold bg-black text-white hover:bg-gray-900 transition-all ${scrolled ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+              Skill.md
+            </a>
+          </div>
         </div>
       </div>
 
@@ -529,23 +620,39 @@ const ApiLanding: React.FC = () => {
               No API Key Required
             </div>
           </Reveal>
-          <Reveal delay={150}>
-            <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-[5.5rem] font-black tracking-[-0.04em] leading-[0.95] text-black">
-              One Skill. <span className="text-gray-400">Any Asset.</span>
-              <br />
-              Start Free. <span className="text-gray-400">Zero Setup.</span>
-            </h1>
+          <Reveal delay={150} key={`hero-h1-${audience}`}>
+            {audience === 'agent' ? (
+              <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-[5.5rem] font-black tracking-[-0.04em] leading-[0.95] text-black">
+                One Skill. <span className="text-gray-400">Any Asset.</span>
+                <br />
+                Start Free. <span className="text-gray-400">Zero Setup.</span>
+              </h1>
+            ) : (
+              <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-[5.5rem] font-black tracking-[-0.04em] leading-[0.95] text-black">
+                One API. <span className="text-gray-400">Any Asset.</span>
+                <br />
+                REST in. <span className="text-gray-400">JSON out.</span>
+              </h1>
+            )}
           </Reveal>
-          <Reveal delay={250}>
-            <p className="text-base sm:text-lg md:text-xl text-gray-600 font-medium leading-relaxed max-w-2xl mx-auto mt-8">
-              The unified investment intelligence platform for AI agents.
-              <br />
-              Install the skill. Start querying. No sign-up needed.
-            </p>
+          <Reveal delay={250} key={`hero-sub-${audience}`}>
+            {audience === 'agent' ? (
+              <p className="text-base sm:text-lg md:text-xl text-gray-600 font-medium leading-relaxed max-w-2xl mx-auto mt-8">
+                The unified investment intelligence platform for AI agents.
+                <br />
+                Install the skill. Start querying. No sign-up needed.
+              </p>
+            ) : (
+              <p className="text-base sm:text-lg md:text-xl text-gray-600 font-medium leading-relaxed max-w-2xl mx-auto mt-8">
+                Direct REST access to investment intelligence from your backend.
+                <br />
+                10 endpoints. Stateless responses. No API key during internal testing.
+              </p>
+            )}
           </Reveal>
 
-          {/* Inline install terminal card */}
-          <Reveal delay={350}>
+          {/* Inline terminal card — install (agent) vs curl (developer) */}
+          <Reveal delay={350} key={`hero-terminal-${audience}`}>
             <div className="mt-10 sm:mt-12 max-w-2xl mx-auto">
               <div className="bg-[#0a0a0a] rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.15)] overflow-hidden border border-black/10">
                 <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
@@ -554,40 +661,66 @@ const ApiLanding: React.FC = () => {
                     <span className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" />
                     <span className="w-2.5 h-2.5 rounded-full bg-[#27c93f]" />
                   </div>
-                  <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">install</span>
+                  <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">
+                    {audience === 'agent' ? 'install' : 'try it'}
+                  </span>
                 </div>
                 <div className="relative px-4 sm:px-6 py-5 sm:py-6 text-left">
-                  <div className="font-mono text-[12px] sm:text-[14px] text-gray-300 break-all">
-                    <span className="text-emerald-400">$</span>{' '}
-                    <span className="text-gray-400">npx skills add</span>{' '}
-                    <span className="text-white">hetu-project/lokacash-skills</span>{' '}
-                    <span className="text-emerald-400">--skill lokacash</span>
-                  </div>
+                  {audience === 'agent' ? (
+                    <div className="font-mono text-[12px] sm:text-[14px] text-gray-300 break-all">
+                      <span className="text-emerald-400">$</span>{' '}
+                      <span className="text-gray-400">npx skills add</span>{' '}
+                      <span className="text-white">hetu-project/lokacash-skills</span>{' '}
+                      <span className="text-emerald-400">--skill lokacash</span>
+                    </div>
+                  ) : (
+                    <div className="font-mono text-[12px] sm:text-[14px] text-gray-300 break-all">
+                      <span className="text-emerald-400">$</span>{' '}
+                      <span className="text-gray-400">curl</span>{' '}
+                      <span className="text-white">{BASE_URL}</span>
+                      <span className="text-emerald-400">/crypto/market/BTC</span>
+                    </div>
+                  )}
                   <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                    <CopyBtn code={INSTALL_CMD} />
+                    <CopyBtn code={audience === 'agent' ? INSTALL_CMD : CURL_DEMO} />
                   </div>
                 </div>
               </div>
               <div className="mt-4 text-[12px] text-gray-500">
-                No API key · No sign-up · Works immediately
+                {audience === 'agent'
+                  ? 'No API key · No sign-up · Works immediately'
+                  : 'No auth · No rate limit · Works from any HTTP client'}
               </div>
             </div>
           </Reveal>
 
-          {/* Works with strip */}
-          <Reveal delay={450}>
+          {/* Works-with strip — agent shows IDE/agent surfaces, dev shows HTTP-capable runtimes */}
+          <Reveal delay={450} key={`hero-works-${audience}`}>
             <div className="mt-10 flex items-center justify-center gap-3 sm:gap-5 flex-wrap opacity-90">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Works with</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                {audience === 'agent' ? 'Works with' : 'Call from'}
+              </span>
               <div className="flex items-center gap-3 sm:gap-4">
-                {[
-                  { name: 'Claude Code', initial: 'C' },
-                  { name: 'Cursor', initial: 'Cu' },
-                  { name: 'OpenClaw', initial: 'Oc' },
-                  { name: 'Windsurf', initial: 'W' },
-                  { name: 'Continue', initial: '>_' },
-                  { name: 'Cline', initial: 'Cl' },
-                  { name: 'Aider', initial: 'Ai' },
-                ].map(t => (
+                {(audience === 'agent'
+                  ? [
+                      { name: 'Claude Code', initial: 'C' },
+                      { name: 'Cursor', initial: 'Cu' },
+                      { name: 'OpenClaw', initial: 'Oc' },
+                      { name: 'Windsurf', initial: 'W' },
+                      { name: 'Continue', initial: '>_' },
+                      { name: 'Cline', initial: 'Cl' },
+                      { name: 'Aider', initial: 'Ai' },
+                    ]
+                  : [
+                      { name: 'Node.js', initial: 'JS' },
+                      { name: 'Python', initial: 'Py' },
+                      { name: 'Go', initial: 'Go' },
+                      { name: 'Rust', initial: 'Rs' },
+                      { name: 'Ruby', initial: 'Rb' },
+                      { name: 'PHP', initial: 'Ph' },
+                      { name: 'curl', initial: '$_' },
+                    ]
+                ).map(t => (
                   <div key={t.name} title={t.name}
                     className="w-8 h-8 rounded-lg bg-white/90 backdrop-blur-sm border border-gray-200 flex items-center justify-center text-[10px] font-black text-gray-600 hover:text-black hover:border-black transition-all cursor-default">
                     {t.initial}
@@ -597,28 +730,39 @@ const ApiLanding: React.FC = () => {
             </div>
           </Reveal>
 
-          {/* Primary CTA */}
+          {/* Primary CTA — endpoints catalog is shared; secondary CTA differs */}
           <Reveal delay={550}>
             <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-3">
               <button onClick={() => scrollToSection('#endpoints')}
                 className="px-6 py-3 bg-black text-white text-[13px] font-black tracking-wide uppercase hover:bg-gray-800 transition-colors flex items-center gap-2 rounded-full">
-                Browse 9 Endpoints
+                Browse 10 Endpoints
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
               </button>
-              <a href="/skill.md" target="_blank" rel="noopener noreferrer"
-                className="px-6 py-3 text-[13px] font-black tracking-wide uppercase text-gray-600 hover:text-black transition-colors">
-                Read skill.md
-              </a>
+              {audience === 'agent' ? (
+                <a href="/skill.md" target="_blank" rel="noopener noreferrer"
+                  className="px-6 py-3 text-[13px] font-black tracking-wide uppercase text-gray-600 hover:text-black transition-colors">
+                  Read skill.md
+                </a>
+              ) : (
+                <button onClick={() => scrollToSection('#errors')}
+                  className="px-6 py-3 text-[13px] font-black tracking-wide uppercase text-gray-600 hover:text-black transition-colors">
+                  Errors &amp; Limits
+                </button>
+              )}
             </div>
           </Reveal>
 
-          <Reveal delay={400}>
-            <div className="mt-10 sm:mt-16 flex items-center gap-2 text-[11px] font-mono text-gray-500">
-              <span className="text-gray-400">$</span>
-              <code className="select-all">npm install @loka/sdk</code>
-              <span className="inline-block w-1.5 h-3 bg-black animate-pulse ml-1" />
-            </div>
-          </Reveal>
+          {/* Bottom teaser — only on developer tab; SDK is dev-tool-shaped, not skill-shaped */}
+          {audience === 'developer' && (
+            <Reveal delay={400}>
+              <div className="mt-10 sm:mt-16 flex items-center gap-2 text-[11px] font-mono text-gray-500">
+                <span className="text-gray-400">$</span>
+                <code className="select-all">npm install @loka/sdk</code>
+                <span className="text-gray-400 ml-2">// coming soon</span>
+                <span className="inline-block w-1.5 h-3 bg-black animate-pulse ml-1" />
+              </div>
+            </Reveal>
+          )}
         </div>
       </section>
 
@@ -639,27 +783,47 @@ const ApiLanding: React.FC = () => {
         </div>
       </section>
 
-      {/* ── 2. Feature intro: "Your AI Agent's Investment Brain" (split) ── */}
+      {/* ── 2. Feature intro — split copy + mockup, audience-aware ── */}
       <section id="overview" className="bg-white border-b border-gray-200">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-12 xl:px-24 py-16 sm:py-24">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-16 items-center">
-            <Reveal>
-              <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.25em] mb-5">Lokacash Skill API</div>
-              <h2 className="text-3xl sm:text-4xl md:text-5xl font-black tracking-tight leading-[1.05] mb-5">
-                Your AI Agent's<br />
-                Investment Brain.
-              </h2>
+            <Reveal key={`fi-text-${audience}`}>
+              <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.25em] mb-5">
+                {audience === 'agent' ? 'Lokacash Skill API' : 'Lokacash REST API'}
+              </div>
+              {audience === 'agent' ? (
+                <h2 className="text-3xl sm:text-4xl md:text-5xl font-black tracking-tight leading-[1.05] mb-5">
+                  Your AI Agent's<br />
+                  Investment Brain.
+                </h2>
+              ) : (
+                <h2 className="text-3xl sm:text-4xl md:text-5xl font-black tracking-tight leading-[1.05] mb-5">
+                  Your Backend's<br />
+                  Investment Brain.
+                </h2>
+              )}
               <p className="text-[15px] text-gray-600 leading-relaxed mb-7 max-w-lg">
-                Install once, access everything. One Lokacash skill gives your AI agent institutional-grade research — multi-agent consensus, deep web + social research, crypto market data, and stock analysis.
+                {audience === 'agent'
+                  ? 'Install once, access everything. One Lokacash skill gives your AI agent institutional-grade research — multi-agent consensus, deep web + social research, crypto market data, and stock analysis.'
+                  : 'Plain HTTP. Predictable JSON. One stateless catalog covering investment consensus, deep web + social research, crypto market & derivatives data, and stock analysis.'}
               </p>
               <div className="space-y-3 mb-8">
-                {[
-                  'One-line install into Claude Code, Cursor, OpenClaw',
-                  '9 endpoints across 3 data domains',
-                  'Natural language in → structured JSON out',
-                  'Multi-agent roundtable debate on any asset',
-                  'Unauthenticated during internal testing',
-                ].map(t => (
+                {(audience === 'agent'
+                  ? [
+                      'One-line install into Claude Code, Cursor, OpenClaw',
+                      '10 endpoints across 3 data domains',
+                      'Natural language in → structured JSON out',
+                      'Multi-agent roundtable debate on any asset',
+                      'Unauthenticated during internal testing',
+                    ]
+                  : [
+                      'REST + JSON · stateless · one shared envelope { ok, data | error, hint }',
+                      '10 endpoints across 3 data domains, all GET or POST',
+                      'No SDK required — fetch / axios / requests / curl, your call',
+                      'Latency budget exposed per endpoint (sub-second to 5min)',
+                      'No API key during internal testing · CORS-friendly',
+                    ]
+                ).map(t => (
                   <div key={t} className="flex items-start gap-2.5">
                     <svg className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
                     <span className="text-[13px] text-gray-700">{t}</span>
@@ -668,54 +832,145 @@ const ApiLanding: React.FC = () => {
               </div>
               <button onClick={() => scrollToSection('#endpoints')}
                 className="inline-flex items-center gap-1.5 text-[13px] font-black text-black hover:text-gray-600 transition-colors">
-                Explore the Skill
+                {audience === 'agent' ? 'Explore the Skill' : 'Browse the Endpoints'}
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
               </button>
             </Reveal>
 
-            {/* Right: Chat mockup */}
-            <Reveal delay={200}>
+            {/* Right mockup: agent shows Claude chat session, dev shows real Node code */}
+            <Reveal delay={200} key={`fi-mockup-${audience}`}>
               <div className="bg-[#0a0a0a] rounded-2xl overflow-hidden shadow-[0_25px_60px_rgba(0,0,0,0.18)] border border-black/10">
                 <div className="flex items-center gap-1.5 px-4 py-3 border-b border-white/10">
                   <span className="w-2.5 h-2.5 rounded-full bg-[#ff5f56]" />
                   <span className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" />
                   <span className="w-2.5 h-2.5 rounded-full bg-[#27c93f]" />
-                  <span className="text-[10px] text-gray-500 ml-2 font-mono">claude-code</span>
+                  <span className="text-[10px] text-gray-500 ml-2 font-mono">
+                    {audience === 'agent' ? 'claude-code' : 'analysis.ts'}
+                  </span>
                 </div>
-                <div className="p-5 sm:p-6 font-mono text-[12px] sm:text-[13px] leading-[1.8]">
-                  <div className="text-gray-500 mb-1">You:</div>
-                  <div className="text-gray-200 mb-5">Should I buy TSLA after the Q4 earnings miss?</div>
+                {audience === 'agent' ? (
+                  <div className="p-5 sm:p-6 font-mono text-[12px] sm:text-[13px] leading-[1.8]">
+                    <div className="text-gray-500 mb-1">You:</div>
+                    <div className="text-gray-200 mb-5">Should I buy TSLA after the Q4 earnings miss?</div>
 
-                  <div className="text-gray-500 mb-1">Agent:</div>
-                  <div className="text-gray-200 mb-2">I'll run a multi-agent consensus for you.</div>
-                  <div className="text-pink-400 mb-4">&gt; Running: skill lokacash research/consensus</div>
+                    <div className="text-gray-500 mb-1">Agent:</div>
+                    <div className="text-gray-200 mb-2">I'll run a multi-agent consensus for you.</div>
+                    <div className="text-pink-400 mb-4">&gt; Running: skill lokacash research/consensus</div>
 
-                  <div className="bg-[#000] border border-white/10 rounded-lg p-4">
-                    <div className="text-gray-400 mb-3 text-[11px] font-bold uppercase tracking-widest">TSLA Consensus (4 agents, 2 rounds)</div>
-                    <div className="space-y-1.5">
-                      <div className="flex justify-between text-gray-300">
-                        <span>Final Verdict:</span><span className="text-amber-400 font-bold">Bearish (68%)</span>
-                      </div>
-                      <div className="flex justify-between text-gray-300">
-                        <span>Fundamental:</span><span className="text-red-400">Bearish (72%)</span>
-                      </div>
-                      <div className="flex justify-between text-gray-300">
-                        <span>Macro:</span><span className="text-yellow-400">Neutral (55%)</span>
-                      </div>
-                      <div className="flex justify-between text-gray-300">
-                        <span>Sentiment:</span><span className="text-red-400">Bearish (70%)</span>
-                      </div>
-                      <div className="flex justify-between text-gray-300">
-                        <span>Quant:</span><span className="text-red-400">Bearish (74%)</span>
+                    <div className="bg-[#000] border border-white/10 rounded-lg p-4">
+                      <div className="text-gray-400 mb-3 text-[11px] font-bold uppercase tracking-widest">TSLA Consensus (4 agents, 2 rounds)</div>
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between text-gray-300">
+                          <span>Final Verdict:</span><span className="text-amber-400 font-bold">Bearish (68%)</span>
+                        </div>
+                        <div className="flex justify-between text-gray-300">
+                          <span>Fundamental:</span><span className="text-red-400">Bearish (72%)</span>
+                        </div>
+                        <div className="flex justify-between text-gray-300">
+                          <span>Macro:</span><span className="text-yellow-400">Neutral (55%)</span>
+                        </div>
+                        <div className="flex justify-between text-gray-300">
+                          <span>Sentiment:</span><span className="text-red-400">Bearish (70%)</span>
+                        </div>
+                        <div className="flex justify-between text-gray-300">
+                          <span>Quant:</span><span className="text-red-400">Bearish (74%)</span>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="p-5 sm:p-6 font-mono text-[11.5px] sm:text-[12.5px] leading-[1.7] overflow-x-auto">
+                    <div className="text-gray-500 text-[10px] mb-2 uppercase tracking-widest">// 1 — call</div>
+                    <div className="text-gray-300 mb-1">
+                      <span className="text-violet-400">const</span> r = <span className="text-violet-400">await</span> <span className="text-cyan-400">fetch</span>(
+                    </div>
+                    <div className="text-gray-300 pl-4 mb-1">
+                      <span className="text-orange-300">'{BASE_URL}/research/consensus'</span>,
+                    </div>
+                    <div className="text-gray-300 pl-4 mb-1">
+                      &#123; <span className="text-cyan-300">method</span>: <span className="text-orange-300">'POST'</span>,
+                    </div>
+                    <div className="text-gray-300 pl-6 mb-1">
+                      <span className="text-cyan-300">headers</span>: &#123; <span className="text-orange-300">'Content-Type'</span>: <span className="text-orange-300">'application/json'</span> &#125;,
+                    </div>
+                    <div className="text-gray-300 pl-6 mb-1">
+                      <span className="text-cyan-300">body</span>: <span className="text-cyan-400">JSON</span>.<span className="text-cyan-400">stringify</span>(&#123;
+                    </div>
+                    <div className="text-gray-300 pl-8 mb-1">
+                      <span className="text-cyan-300">question</span>: <span className="text-orange-300">'Should I buy TSLA?'</span>
+                    </div>
+                    <div className="text-gray-300 pl-6 mb-1">&#125;)</div>
+                    <div className="text-gray-300 pl-4 mb-1">&#125;</div>
+                    <div className="text-gray-300 mb-3">);</div>
+
+                    <div className="text-gray-500 text-[10px] mb-2 uppercase tracking-widest">// 2 — read</div>
+                    <div className="text-gray-300 mb-3">
+                      <span className="text-violet-400">const</span> &#123; <span className="text-cyan-300">data</span> &#125; = <span className="text-violet-400">await</span> r.<span className="text-cyan-400">json</span>();
+                    </div>
+
+                    <div className="bg-[#000] border border-white/10 rounded-lg p-3 text-[11px]">
+                      <div className="text-gray-500 mb-1.5 text-[10px] uppercase tracking-widest">// data</div>
+                      <div className="text-gray-300">&#123;</div>
+                      <div className="text-gray-300 pl-3"><span className="text-cyan-300">finalVerdict</span>: <span className="text-orange-300">'Bearish'</span>,</div>
+                      <div className="text-gray-300 pl-3"><span className="text-cyan-300">finalConfidence</span>: <span className="text-amber-300">68</span>,</div>
+                      <div className="text-gray-300 pl-3"><span className="text-cyan-300">agents</span>: <span className="text-gray-500">[ ...4 ]</span>,</div>
+                      <div className="text-gray-300 pl-3"><span className="text-cyan-300">roundsRun</span>: <span className="text-amber-300">2</span>,</div>
+                      <div className="text-gray-300 pl-3"><span className="text-cyan-300">summary</span>: <span className="text-orange-300">'...'</span></div>
+                      <div className="text-gray-300">&#125;</div>
+                    </div>
+                  </div>
+                )}
               </div>
             </Reveal>
           </div>
         </div>
       </section>
+
+      {/* ── 2.5 (Developer-only) Quick Start: auth, base URL, response envelope ── */}
+      {audience === 'developer' && (
+        <section className="bg-[#fafafa] border-b border-gray-200">
+          <div className="max-w-[1400px] mx-auto px-4 sm:px-12 xl:px-24 py-12 sm:py-16">
+            <Reveal>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-px bg-gray-200 border border-gray-200">
+                {/* Base URL */}
+                <div className="bg-white p-5 sm:p-6">
+                  <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3">Base URL</div>
+                  <code className="block text-[12px] font-mono font-bold text-black bg-gray-50 border border-gray-200 px-3 py-2 break-all">
+                    {BASE_URL}
+                  </code>
+                  <p className="text-[11px] text-gray-500 leading-snug mt-3">
+                    All paths in this catalog are appended to the base URL. Production-grade TLS · no regional routing.
+                  </p>
+                </div>
+                {/* Auth */}
+                <div className="bg-white p-5 sm:p-6">
+                  <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3">Auth</div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-sm">None</span>
+                    <span className="text-[11px] text-gray-500">during internal testing</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-snug">
+                    Public release will require a Bearer token in <code className="font-mono text-[10px] bg-gray-50 border border-gray-200 px-1.5 py-0.5">Authorization</code>. Watch this page for migration notes.
+                  </p>
+                </div>
+                {/* Envelope */}
+                <div className="bg-white p-5 sm:p-6">
+                  <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3">Response Envelope</div>
+                  <div className="bg-[#0a0a0a] border border-black/20 rounded-md p-3 text-[10.5px] font-mono leading-[1.6] text-gray-300">
+                    <div>&#123;</div>
+                    <div className="pl-3"><span className="text-cyan-300">"ok"</span>: <span className="text-emerald-400">true</span>,</div>
+                    <div className="pl-3"><span className="text-cyan-300">"data"</span>: &#123; ... &#125;</div>
+                    <div>&#125;</div>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-snug mt-3">
+                    On failure: <code className="font-mono text-[10px] bg-gray-50 border border-gray-200 px-1.5 py-0.5">ok: false</code> with <code className="font-mono text-[10px] bg-gray-50 border border-gray-200 px-1.5 py-0.5">error</code> + <code className="font-mono text-[10px] bg-gray-50 border border-gray-200 px-1.5 py-0.5">hint</code>. Branch on <code className="font-mono text-[10px] bg-gray-50 border border-gray-200 px-1.5 py-0.5">ok</code>.
+                  </p>
+                </div>
+              </div>
+            </Reveal>
+          </div>
+        </section>
+      )}
 
       {/* ── 3. Endpoint Coverage (asksurf Data Coverage style) ── */}
       <section id="coverage" className="bg-[#fafafa] border-b border-gray-200">
@@ -726,7 +981,7 @@ const ApiLanding: React.FC = () => {
                 Endpoint Coverage
               </h2>
               <p className="text-gray-500 text-[15px] sm:text-base leading-relaxed">
-                9 endpoints. 3 data domains. 50+ assets covered. Stateless and unauthenticated during internal testing.
+                10 endpoints. 3 data domains. 50+ assets covered. Stateless and unauthenticated during internal testing.
               </p>
             </div>
           </Reveal>
@@ -859,42 +1114,77 @@ const ApiLanding: React.FC = () => {
               </div>
             </Reveal>
 
-            <Reveal delay={200}>
-              <div className="bg-white border border-gray-200 rounded-2xl p-5 sm:p-7 shadow-[0_10px_40px_rgba(0,0,0,0.06)]">
-                <div className="flex items-center justify-between mb-5 pb-4 border-b border-gray-100">
-                  <div>
-                    <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest">POST /research/consensus</div>
-                    <div className="text-[13px] font-bold text-black mt-1">Should I buy TSLA?</div>
-                  </div>
-                  <div className="px-3 py-1.5 bg-red-50 border border-red-200 rounded-md">
-                    <div className="text-[9px] font-black uppercase tracking-widest text-red-600">Verdict</div>
-                    <div className="text-[15px] font-black text-red-700 leading-tight">Bearish 68%</div>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  {[
-                    { name: 'Fundamental Analyst', verdict: 'Bearish', conf: 72, color: 'red' },
-                    { name: 'Macro Analyst', verdict: 'Neutral', conf: 55, color: 'yellow' },
-                    { name: 'Sentiment Analyst', verdict: 'Bearish', conf: 70, color: 'red' },
-                    { name: 'Quant Analyst', verdict: 'Bearish', conf: 74, color: 'red' },
-                  ].map(a => (
-                    <div key={a.name} className="flex items-center gap-3">
-                      <div className="w-6 h-6 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center text-[10px] font-black text-gray-500 shrink-0">{a.name[0]}</div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[12px] font-bold text-gray-900 truncate">{a.name}</div>
-                        <div className="h-1 bg-gray-100 rounded-full mt-1 overflow-hidden">
-                          <div className={`h-full ${a.color === 'red' ? 'bg-red-500' : a.color === 'yellow' ? 'bg-yellow-500' : 'bg-emerald-500'}`} style={{ width: `${a.conf}%` }} />
-                        </div>
-                      </div>
-                      <div className={`text-[11px] font-bold shrink-0 ${a.color === 'red' ? 'text-red-600' : a.color === 'yellow' ? 'text-yellow-700' : 'text-emerald-600'}`}>{a.verdict} {a.conf}%</div>
+            <Reveal delay={200} key={`consensus-mock-${audience}`}>
+              {audience === 'agent' ? (
+                <div className="bg-white border border-gray-200 rounded-2xl p-5 sm:p-7 shadow-[0_10px_40px_rgba(0,0,0,0.06)]">
+                  <div className="flex items-center justify-between mb-5 pb-4 border-b border-gray-100">
+                    <div>
+                      <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest">POST /research/consensus</div>
+                      <div className="text-[13px] font-bold text-black mt-1">Should I buy TSLA?</div>
                     </div>
-                  ))}
+                    <div className="px-3 py-1.5 bg-red-50 border border-red-200 rounded-md">
+                      <div className="text-[9px] font-black uppercase tracking-widest text-red-600">Verdict</div>
+                      <div className="text-[15px] font-black text-red-700 leading-tight">Bearish 68%</div>
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    {[
+                      { name: 'Fundamental Analyst', verdict: 'Bearish', conf: 72, color: 'red' },
+                      { name: 'Macro Analyst', verdict: 'Neutral', conf: 55, color: 'yellow' },
+                      { name: 'Sentiment Analyst', verdict: 'Bearish', conf: 70, color: 'red' },
+                      { name: 'Quant Analyst', verdict: 'Bearish', conf: 74, color: 'red' },
+                    ].map(a => (
+                      <div key={a.name} className="flex items-center gap-3">
+                        <div className="w-6 h-6 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center text-[10px] font-black text-gray-500 shrink-0">{a.name[0]}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] font-bold text-gray-900 truncate">{a.name}</div>
+                          <div className="h-1 bg-gray-100 rounded-full mt-1 overflow-hidden">
+                            <div className={`h-full ${a.color === 'red' ? 'bg-red-500' : a.color === 'yellow' ? 'bg-yellow-500' : 'bg-emerald-500'}`} style={{ width: `${a.conf}%` }} />
+                          </div>
+                        </div>
+                        <div className={`text-[11px] font-bold shrink-0 ${a.color === 'red' ? 'text-red-600' : a.color === 'yellow' ? 'text-yellow-700' : 'text-emerald-600'}`}>{a.verdict} {a.conf}%</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between text-[10px] text-gray-400">
+                    <span>4 agents · 2 rounds · 78s elapsed</span>
+                    <code className="font-mono">asOf 1745000000000</code>
+                  </div>
                 </div>
-                <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between text-[10px] text-gray-400">
-                  <span>4 agents · 2 rounds · 78s elapsed</span>
-                  <code className="font-mono">asOf 1745000000000</code>
+              ) : (
+                <div className="bg-[#0a0a0a] rounded-2xl overflow-hidden shadow-[0_25px_60px_rgba(0,0,0,0.18)] border border-black/10">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#ff5f56]" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#27c93f]" />
+                    </div>
+                    <span className="text-[10px] text-gray-500 font-mono">200 OK · response.json</span>
+                  </div>
+                  <div className="p-5 sm:p-6 font-mono text-[11.5px] sm:text-[12.5px] leading-[1.65] overflow-x-auto">
+                    <div className="text-gray-300">&#123;</div>
+                    <div className="pl-3 text-gray-300"><span className="text-cyan-300">"ok"</span>: <span className="text-emerald-400">true</span>,</div>
+                    <div className="pl-3 text-gray-300"><span className="text-cyan-300">"data"</span>: &#123;</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"question"</span>: <span className="text-orange-300">"Should I buy TSLA?"</span>,</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"finalVerdict"</span>: <span className="text-orange-300">"Bearish"</span>,</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"finalConfidence"</span>: <span className="text-amber-300">68</span>,</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"summary"</span>: <span className="text-orange-300">"...markdown..."</span>,</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"agents"</span>: [</div>
+                    <div className="pl-9 text-gray-300">&#123;</div>
+                    <div className="pl-12 text-gray-300"><span className="text-cyan-300">"name"</span>: <span className="text-orange-300">"Fundamental Analyst"</span>,</div>
+                    <div className="pl-12 text-gray-300"><span className="text-cyan-300">"verdict"</span>: <span className="text-orange-300">"Bearish"</span>,</div>
+                    <div className="pl-12 text-gray-300"><span className="text-cyan-300">"confidence"</span>: <span className="text-amber-300">72</span>,</div>
+                    <div className="pl-12 text-gray-300"><span className="text-cyan-300">"reasoning"</span>: <span className="text-orange-300">"..."</span></div>
+                    <div className="pl-9 text-gray-300">&#125;,</div>
+                    <div className="pl-9 text-gray-500">// + 3 more agents</div>
+                    <div className="pl-6 text-gray-300">],</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"roundsRun"</span>: <span className="text-amber-300">2</span>,</div>
+                    <div className="pl-6 text-gray-300"><span className="text-cyan-300">"asOf"</span>: <span className="text-amber-300">1745000000000</span></div>
+                    <div className="pl-3 text-gray-300">&#125;</div>
+                    <div className="text-gray-300">&#125;</div>
+                  </div>
                 </div>
-              </div>
+              )}
             </Reveal>
           </div>
         </div>
@@ -911,7 +1201,7 @@ const ApiLanding: React.FC = () => {
                 Sentiment, Events.
               </h2>
               <p className="text-[15px] text-gray-600 leading-relaxed mb-7 max-w-lg">
-                Six crypto-native endpoints cover everything your agent needs — real-time spot price, perpetual funding rates, open interest, 24h sentiment snapshot, catalyst calendar, and trending discovery.
+                Seven crypto-native endpoints cover everything your agent needs — real-time spot price, perpetual funding rates, open interest, 24h sentiment snapshot, catalyst calendar, trending discovery, and multi-analyst hedge-fund portfolio decisions.
               </p>
               <div className="space-y-2.5 text-[13px] text-gray-700">
                 <div className="flex items-start gap-2"><span className="text-gray-400 mt-0.5">·</span><span>Spot price + 24h stats + 7-day history bars</span></div>
@@ -1107,20 +1397,24 @@ const ApiLanding: React.FC = () => {
       {/* ── 5. Use cases ── */}
       <section id="usecases" className="bg-white border-b border-gray-200">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-12 xl:px-24 py-12 sm:py-20">
-          <Reveal>
+          <Reveal key={`uc-header-${audience}`}>
             <div className="max-w-3xl mb-12">
               <div className="inline-flex items-center gap-2 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 border border-gray-300 mb-6">
-                Agent Recipes
+                {audience === 'agent' ? 'Agent Recipes' : 'Integration Patterns'}
               </div>
               <h2 className="text-2xl sm:text-3xl md:text-5xl font-black text-black tracking-tight leading-tight">
-                What an agent<br className="sm:hidden" /> actually does with this.
+                {audience === 'agent' ? (
+                  <>What an agent<br className="sm:hidden" /> actually does with this.</>
+                ) : (
+                  <>How developers<br className="sm:hidden" /> ship with this.</>
+                )}
               </h2>
             </div>
           </Reveal>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-px bg-gray-200 border border-gray-200">
-            {USE_CASES.map((u, i) => (
-              <Reveal key={u.t} delay={i * 80}>
+            {(audience === 'agent' ? USE_CASES : DEV_USE_CASES).map((u, i) => (
+              <Reveal key={`${audience}-${u.t}`} delay={i * 80}>
                 <div className="bg-white p-6 sm:p-7 h-full flex flex-col hover:bg-gray-50 transition-colors">
                   <div className="flex items-center gap-2 mb-4">
                     <div className="w-6 h-6 bg-black text-white text-[10px] font-black flex items-center justify-center">{String(i + 1).padStart(2, '0')}</div>

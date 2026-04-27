@@ -1379,18 +1379,17 @@ export const RoundtableWorkbench: React.FC<{
         <div className="mb-8">
             <div
                 className={fullscreen
-                    ? "fixed inset-0 z-[70] bg-slate-50 overflow-hidden flex"
-                    : "rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-100 via-slate-50 to-slate-100/70 shadow-[0_2px_14px_-3px_rgba(71,85,105,0.16)] overflow-hidden flex"}
-                style={fullscreen ? undefined : { height: 600 }}
+                    ? "fixed inset-0 z-[70] bg-slate-50 overflow-hidden flex flex-col md:flex-row"
+                    : "rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-100 via-slate-50 to-slate-100/70 shadow-[0_2px_14px_-3px_rgba(71,85,105,0.16)] overflow-hidden flex flex-col md:flex-row h-[600px]"}
             >
-            {/* ── LEFT: Rich agent roster ── */}
-            <div className="w-[260px] shrink-0 border-r border-slate-200/70 flex flex-col bg-slate-100/50 backdrop-blur-sm">
-                <div className="px-4 pt-3 pb-2 flex items-center gap-2">
+            {/* ── LEFT (md+) / TOP (mobile): Rich agent roster ── */}
+            <div className="w-full md:w-[260px] shrink-0 border-b md:border-b-0 md:border-r border-slate-200/70 flex flex-col bg-slate-100/50 backdrop-blur-sm h-[152px] md:h-auto">
+                <div className="px-4 pt-3 pb-2 flex items-center gap-2 shrink-0">
                     <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
                     <span className="text-[11px] font-semibold tracking-[0.06em] uppercase text-gray-700">Agent Room</span>
                     <span className="text-[10px] font-semibold text-gray-400 tabular-nums">({allAgents.length})</span>
                 </div>
-                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1.5">
+                <div className="flex-1 min-h-0 overflow-x-auto md:overflow-x-hidden md:overflow-y-auto py-2 px-2 flex md:block gap-1.5 md:gap-0 md:space-y-1.5">
                     {allAgents.map(a => {
                         const state = rounds.length > 0
                             ? rounds[rounds.length - 1].agents.find(x => x.agentId === a.id)?.status
@@ -1400,7 +1399,7 @@ export const RoundtableWorkbench: React.FC<{
                         return (
                             <div
                                 key={a.id}
-                                className={`group relative w-full rounded-xl cursor-pointer overflow-hidden transition-all ${
+                                className={`group relative w-[200px] md:w-full shrink-0 md:shrink rounded-xl cursor-pointer overflow-hidden transition-all ${
                                     isMaster ? 'master-card-shine' : ''
                                 } hover:bg-white hover:shadow-sm hover:-translate-y-px`}
                                 style={isMaster ? { background: 'linear-gradient(135deg, #fffbeb 0%, #ffffff 45%, #fff7ed 100%)' } : undefined}

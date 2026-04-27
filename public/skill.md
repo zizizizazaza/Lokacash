@@ -2,9 +2,9 @@
 name: lokacash
 model: standard
 category: investment
-description: Investment intelligence for AI agents — multi-agent consensus on any investment question, deep cross-source research, crypto market data, and stock analysis. Nine endpoints across three domains.
-version: 1.1.0
-keywords: [investment, crypto, cryptocurrency, stocks, equity, bitcoin, ethereum, trading, sentiment, consensus, research, derivatives, funding rate, fundamentals, technical analysis, events, trending]
+description: Investment intelligence for AI agents — multi-agent consensus on any investment question, deep cross-source research, crypto market data, multi-analyst hedge-fund portfolio decisions, and stock analysis. Ten endpoints across three domains.
+version: 1.2.0
+keywords: [investment, crypto, cryptocurrency, stocks, equity, bitcoin, ethereum, trading, sentiment, consensus, research, derivatives, funding rate, fundamentals, technical analysis, events, trending, hedge fund, portfolio analysis]
 ---
 
 # Lokacash Investment Intelligence Skill
@@ -13,10 +13,10 @@ keywords: [investment, crypto, cryptocurrency, stocks, equity, bitcoin, ethereum
 
 ## What This Skill Does
 
-Lokacash is an investment research platform spanning both **crypto** and **stocks**. This skill exposes 9 HTTP endpoints covering three capability domains:
+Lokacash is an investment research platform spanning both **crypto** and **stocks**. This skill exposes 10 HTTP endpoints covering three capability domains:
 
 - **`/research/*`** — generic capabilities that work for any investment question (crypto, stocks, macro). Multi-agent debate and deep web + social research.
-- **`/crypto/*`** — crypto-specific data: price, derivatives, sentiment, catalyst events.
+- **`/crypto/*`** — crypto-specific data: price, derivatives, sentiment, catalyst events, multi-analyst portfolio decisions.
 - **`/stock/*`** — equity analysis: fundamentals, technical, valuation.
 
 **When to use this skill:**
@@ -24,6 +24,7 @@ Lokacash is an investment research platform spanning both **crypto** and **stock
 - User asks **"should I buy/sell X?"** for any asset → `/research/consensus`
 - User asks **"what's happening with X?"** (broad topic) → `/research/deep`
 - User asks about crypto token specifics (price, funding, sentiment) → `/crypto/*`
+- User wants a **portfolio of tickers** scored by multiple analysts (BUY/SELL/HOLD per ticker, with quantity + confidence) → `/crypto/portfolio-analysis`
 - User asks about a stock (AAPL, TSLA, 700.HK) → `/stock/analysis`
 - User wants market overview (trending coins, upcoming listings) → `/crypto/trending` / `/crypto/events`
 
@@ -118,6 +119,44 @@ Request body:
 Response: same shape as /research/deep but with additional
 `derivatives` and `sentiment` arrays for resolved tokens.
 ```
+
+### `POST /crypto/portfolio-analysis`
+
+Multi-analyst portfolio decision pipeline (AI Hedge Fund). Each analyst persona issues an independent BUY / SELL / HOLD signal per ticker; the framework fuses them into a final trading decision with quantity + confidence. Use this when the user wants **decision support over a basket of tickers**, not a single asset.
+
+```
+Request body:
+{
+  "tickers": ["AAPL", "TSLA", "BTC-USD"],   // 1..3 tickers (US stocks or crypto pairs)
+  "analysts": ["fundamentals", "technicals"], // optional: subset of analyst personas
+  "showReasoning": true                       // optional: include full per-analyst reasoning, default true
+}
+
+Response (200):
+{
+  "ok": true,
+  "data": {
+    "tickers": ["AAPL", "TSLA"],
+    "period": { "start": "2025-10-27", "end": "2026-04-27" },
+    "model": "deepseek-chat",
+    "analysts": ["fundamentals", "technicals", "sentiment", "valuation"],
+    "decisions": {
+      "AAPL": { "action": "BUY", "quantity": 100, "confidence": 75, "reasoning": "..." },
+      "TSLA": { "action": "HOLD", "quantity": 0,  "confidence": 60, "reasoning": "..." }
+    },
+    "analystSignals": {
+      "fundamentals": {
+        "AAPL": { "signal": "BULLISH", "confidence": 80, "reasoning": "..." }
+      },
+      "technicals": { ... }
+    },
+    "report": "...full markdown report including decision table + per-analyst signals...",
+    "asOf": 1745000000000
+  }
+}
+```
+
+Typical latency: 30-300 seconds (scales with ticker count × analyst count). Hard cap is 3 tickers per request to keep p95 under 5 minutes.
 
 ### `GET /crypto/sentiment/:symbol`
 
@@ -273,11 +312,12 @@ All endpoints return a consistent error shape:
 ```
 
 Common error codes:
-- `missing_question` / `missing_topic` / `missing_query` — required body field absent
-- `invalid_symbol` / `invalid_ticker` — path param malformed
+- `missing_question` / `missing_topic` / `missing_query` / `missing_tickers` — required body field absent
+- `invalid_symbol` / `invalid_ticker` — path or body param malformed
+- `too_many_tickers` — `/crypto/portfolio-analysis` got more than 3 tickers
 - `not_found` — symbol/ticker valid but no data available
 - `upstream_failed` / `upstream_empty` — upstream source returned nothing
-- `consensus_failed` / `research_failed` / `stock_analysis_failed` — internal pipeline failure
+- `consensus_failed` / `research_failed` / `portfolio_analysis_failed` / `stock_analysis_failed` — internal pipeline failure
 
 ## Usage Patterns
 
@@ -314,6 +354,14 @@ Agent: reports funding rate (flags if very +/-) and OI level
 User: "What's the vibe on SOL this week?"
 Agent: GET /crypto/sentiment/SOL
 Agent: reports bull/bear/neutral ratios + top 2 catalyst news
+```
+
+### Multi-ticker portfolio decision
+```
+User: "I'm considering AAPL, TSLA, NVDA — what should I do?"
+Agent: POST /crypto/portfolio-analysis { tickers: ["AAPL","TSLA","NVDA"] }
+Agent: reads `decisions` for action+quantity+confidence per ticker,
+       optionally reads `analystSignals` for per-analyst reasoning
 ```
 
 ### Stock deep analysis
