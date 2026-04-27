@@ -5,7 +5,7 @@
       "destination": "/redirect.html"
     },
     {
-      "source": "/((?!assets|logo|favicon|.well-known).*)",
+      "source": "/((?!assets|logo|favicon|fonts|.well-known).*)",
       "destination": "/index.html"
     }
   ],
@@ -15,6 +15,13 @@
       "headers": [
         { "key": "Content-Type", "value": "application/json" },
         { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
+    },
+    {
+      "source": "/fonts/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
       ]
     }
   ]

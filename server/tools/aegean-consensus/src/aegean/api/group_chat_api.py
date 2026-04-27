@@ -8,10 +8,14 @@ Provides REST API for:
 - Consensus execution
 """
 
+import asyncio
+import json
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from aegean.core import AgentRegistry
 from aegean.core.models import (
     Group,
     GroupMember,
@@ -19,7 +23,6 @@ from aegean.core.models import (
     GroupConsensusResult,
     CollaborationMode,
 )
-from aegean.core.agent import AgentRegistry
 from aegean.services.group_chat_service import GroupChatService
 
 
@@ -461,6 +464,70 @@ async def execute_consensus(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{group_id}/consensus/stream")
+async def execute_consensus_stream(
+    group_id: str,
+    request: ExecuteConsensusRequest,
+    service: GroupChatService = Depends(get_service),
+):
+    """
+    Execute consensus and stream per-agent / per-round events as SSE.
+
+    Each event is a JSON line:
+        data: {"type":"agent_completed","agent_id":"buffett_style",...}\\n\\n
+
+    Final event is ``{"type":"final_result", ...}`` containing the full
+    GroupConsensusResult so the caller can persist it.
+    """
+    _assert_group_not_reserved(group_id)
+    risk_context_dict = None
+    if request.risk_context:
+        risk_context_dict = request.risk_context.dict(exclude_none=True)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    SENTINEL = object()
+
+    async def event_sink(event_type: str, payload: Dict[str, Any]) -> None:
+        await queue.put({"type": event_type, **payload})
+
+    async def runner() -> None:
+        try:
+            result = await service.execute_consensus(
+                group_id=group_id,
+                task=request.task,
+                message_id=request.message_id,
+                quorum_threshold=request.quorum_threshold,
+                stability_horizon=request.stability_horizon,
+                max_rounds=request.max_rounds,
+                risk_context=risk_context_dict,
+                event_sink=event_sink,
+            )
+            await queue.put(
+                {
+                    "type": "final_result",
+                    "result": result.model_dump(mode="json"),
+                }
+            )
+        except Exception as exc:
+            await queue.put({"type": "error", "message": str(exc)})
+        finally:
+            await queue.put(SENTINEL)
+
+    async def sse() -> Any:
+        task = asyncio.create_task(runner())
+        try:
+            while True:
+                evt = await queue.get()
+                if evt is SENTINEL:
+                    break
+                yield f"data: {json.dumps(evt, ensure_ascii=False, default=str)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(sse(), media_type="text/event-stream")
 
 
 @router.get(

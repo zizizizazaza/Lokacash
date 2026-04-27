@@ -80,6 +80,10 @@ dist-ssr
 .agents/skills/user-stories/
 .agents/skills/value-proposition/
 .agents/skills/wwas/
+.agents/skills/lokacash/
+
+# Skills CLI lockfile (local install artifact)
+skills-lock.json
 
 # Private docs
 docs/NEED_FROM_YOU.md
@@ -87,9 +91,15 @@ docs/NEED_FROM_YOU.md
 LamportID.pem
 **/.venv/
 **/venv/
+# Aegean runtime state (SETU task DB, etc.)
+server/tools/aegean-consensus/.aegean/
 BUG_TRACKING.md
 .claude/
 
 OKX_AGENT_TRADE_KIT.md
 WEB3_DUAL_ROUTE_PLAN.md
 SKILL_MODULE_PLAN.md
+analyst-roundtable-plan.md
+aegean-deep-analysis-migration.md
+teammate-merge-playbook.md
+surf.md

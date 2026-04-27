@@ -1,4 +1,4 @@
-import { Server as HttpServer } from 'http';
+﻿import { Server as HttpServer } from 'http';
 import { Server } from 'socket.io';
 import { config } from '../config.js';
 import { verifyToken } from '../middleware/auth.js';
@@ -7,6 +7,7 @@ import { researchService, type XProfileSnapshot } from '../services/research.ser
 import { type Web3ResearchResult } from '../services/web3Research.service.js';
 import { web3RouterService } from '../services/web3Router.service.js';
 import { stockAnalysisService } from '../services/stockanalysis.service.js';
+import { runHtmlGeneration as runHtmlGenerationService } from '../services/reportHtml.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
 import { isCryptoSymbol, isAmbiguousSymbol, filterOutCryptoTickers } from '../constants/cryptoAssets.js';
@@ -15,6 +16,17 @@ import {
   runConsensusEngine,
   sortConsensusAgentEntries,
 } from '../services/consensus.service.js';
+import {
+  getAnalystById,
+  SYSTEM_ANALYST_IDS,
+  validateAnalystSelection,
+  type PublicAnalystPersona,
+} from '../catalogs/analysts.js';
+import { extractAsset } from '../services/assetExtractor.js';
+import { runAegeanDeepAnalysis } from '../services/aegeanDeepAnalysis.service.js';
+import { transformAegeanDeepAnalysis } from '../services/aegeanDeepAnalysisTransform.js';
+import { consumeQuota } from '../services/subscription.service.js';
+import { consumeGuestAuto, GUEST_CONFIG } from '../services/guest.service.js';
 import * as crypto from 'crypto';
 import {
   createModuleEmitter,
@@ -44,6 +56,10 @@ const activeChatSessions = new Map<string, string>();
 const chatAbortControllers = new Map<string, AbortController>();
 /** Dedup map keyed by sessionId::content — prevents duplicate messages from queue flush + direct emit race */
 const chatDedupMap = new Map<string, number>();
+/** Per-socket rate limiter: tracks agent:chat timestamps to enforce max 3 messages per 10 seconds */
+const socketRateLimiter = new Map<string, number[]>();
+/** Session start timestamps — used by the orphan sweep to identify stale sessions */
+const chatSessionStartTimes = new Map<string, number>();
 
 interface AgentChatImage {
   url: string;
@@ -78,6 +94,80 @@ const SOCIAL_HANDLE_STOPWORDS = new Set([
 
 function toSafeNumber(n: unknown): number {
   return typeof n === 'number' && Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Decide which execution tier a user's Auto-mode query should use.
+ *
+ * Returns one of:
+ *   'simple'     — plain LLM answer, no tools (free, or both buckets exhausted)
+ *   'fast'       — standard Super Agent: search + Web3 + synthesis (default complex path)
+ *   'roundtable' — multi-agent debate + deep research report (expensive)
+ *
+ * Design principle: Roundtable is OPT-IN. A single-agent Fast response
+ * already gives users a well-reasoned directional call. We only escalate
+ * to the 5x-more-expensive Roundtable when the user **explicitly** signals
+ * they want multi-perspective depth. Three scenarios:
+ *
+ *   1. Multi-entity comparison  — "A vs B", "对比 A 和 B" — inherently
+ *      needs multiple specialists weighing in.
+ *   2. Explicit deep-analysis ask — "deep dive", "full analysis",
+ *      "多视角", "深度分析" — user is literally requesting depth.
+ *   3. Explicit bull-vs-bear / debate framing — "bull case AND bear case",
+ *      "多空博弈", "正反观点", "辩论" — the query is shaped as a debate.
+ *
+ * Single-asset directional asks ("能不能追多 SOL", "该不该抄底 BTC",
+ * "是否开多", "should I buy Tesla") stay on Fast. Directional calls are
+ * Fast's sweet spot; Roundtable adds minutes of latency for an answer
+ * Fast already gives well.
+ */
+type AutoPlanLike = {
+  isSimpleChat?: boolean;
+  queryType?: string;
+};
+
+export function decideAutoMode(plan: AutoPlanLike, userContent: string): 'simple' | 'fast' | 'roundtable' {
+  if (plan.isSimpleChat) return 'simple';
+
+  // Guru Council is LITERALLY a debate panel — user explicitly chose it.
+  if (plan.queryType === 'guru-council') return 'roundtable';
+
+  const msg = userContent || '';
+
+  // ── Trigger 1: Multi-entity comparison structure ──────────────────
+  // "X vs Y", "X versus Y", "compare X and Y", "which is better between X and Y"
+  // "对比 X 和 Y", "X 与 Y 哪个更好", "X 和 Y 谁更强"
+  const enMultiEntity =
+    /\b(vs\.?|versus)\b/i.test(msg) ||
+    /\bcompare\s+[\w$]+\s+(and|with|to|vs)\s+[\w$]+\b/i.test(msg) ||
+    /\bwhich\s+(is|one is|would be)\s+(better|stronger|safer|preferable|the\s+better)\b/i.test(msg);
+  const zhMultiEntity =
+    /(对比|比较).{1,30}(和|与)/.test(msg) ||                               // "对比 A 和 B"
+    /(和|与).{1,15}(对比|比较|相比)/.test(msg) ||                           // "A 和 B 对比"
+    /(和|与).{1,15}(哪个|谁)\s?(更|比较)\s?(好|强|合适)/.test(msg) ||          // "A 和 B 哪个更好"
+    /(哪个|谁)\s?(更|比较)\s?(好|强|稳|合适|值得|靠谱|适合投资)/.test(msg);   // "谁更值得投资"
+
+  // ── Trigger 2: Explicit deep-analysis request ─────────────────────
+  const enDeep =
+    /\b(deep[- ]?dive|thorough\s+(analysis|review)|comprehensive\s+(analysis|review|breakdown)|full\s+analysis|in[- ]?depth|multi[- ]?perspective|multi[- ]?angle|all\s+angles|roundtable|panel\s+analysis)\b/i.test(msg);
+  const zhDeep =
+    /(深入分析|深度分析|全面分析|完整分析|详细分析|多视角|多方(?:观点|视角|意见)|多角度|全方位分析|专家(?:团|组|小组|会诊)|圆桌|roundtable)/i.test(msg);
+
+  // ── Trigger 3: Explicit bull-vs-bear / debate / consensus framing ──
+  const enDebate =
+    /\b(pros and cons|bull\s+case\s+(and|vs\.?|versus)\s+bear\s+case|bear\s+case\s+(and|vs\.?|versus)\s+bull\s+case|bull\s+vs\.?\s+bear|bear\s+vs\.?\s+bull|debate|divergent\s+views)\b/i.test(msg);
+  const zhDebate =
+    /(多空(?:博弈|分歧|对决|争议)|正反(?:观点|分析|论据|面)|多方博弈|辩论|(?:多|空)头(?:观点|视角|论据|立场)(?:和|与|vs)(?:多|空)头(?:观点|视角|论据|立场)|多空(?:观点|视角))/i.test(msg);
+
+  if (
+    enMultiEntity || zhMultiEntity ||
+    enDeep || zhDeep ||
+    enDebate || zhDebate
+  ) {
+    return 'roundtable';
+  }
+
+  return 'fast';
 }
 
 function candidateTokensFromQuery(userContent: string): string[] {
@@ -187,12 +277,11 @@ function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): S
     const bases = okxSnapshots.map((s) => s.baseCcy).filter(Boolean).slice(0, 4).join(', ');
     out.push({
       favicon: 'web',
-      title: 'OKX Market Data',
-      domain: 'okx.com',
-      url: 'https://www.okx.com/docs-v5/',
+      title: 'Exchange Market Data',
+      domain: 'market-data',
       snippet: bases
-        ? `OKX public spot / perps snapshot (funding, open interest, orderbook depth) for ${bases}.`
-        : 'OKX public spot / perps snapshot used by the Web3 pipeline.',
+        ? `Spot and perpetual snapshot (funding, open interest, orderbook depth) for ${bases}.`
+        : 'Spot and perpetual market snapshot used by the Web3 pipeline.',
     });
   }
   const okxNewsBundles = Array.isArray(raw.okxNews) ? raw.okxNews : [];
@@ -200,12 +289,11 @@ function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): S
     const bases = okxNewsBundles.map((b) => b.baseCcy).filter(Boolean).slice(0, 4).join(', ');
     out.push({
       favicon: 'web',
-      title: 'OKX News & Sentiment',
-      domain: 'okx.com',
-      url: 'https://www.okx.com/feed',
+      title: 'News & Sentiment',
+      domain: 'news-sentiment',
       snippet: bases
-        ? `OKX orbit aggregated crypto news + sentiment snapshot for ${bases}.`
-        : 'OKX orbit crypto news + sentiment feed.',
+        ? `Aggregated crypto news + sentiment snapshot for ${bases}.`
+        : 'Aggregated crypto news + sentiment feed.',
     });
   }
   return out;
@@ -523,41 +611,109 @@ export function setupSocket(server: HttpServer) {
     path: '/api/socket.io',
   });
 
-  // JWT authentication middleware for WebSocket
+  // Safety-net: sweep orphaned session state every 5 minutes.
+  // Only removes sessions that have been "active" for more than 30 minutes —
+  // those are definitively orphaned (longest Roundtable run is ~5 min).
+  const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+  setInterval(() => {
+    const now = Date.now();
+    let swept = 0;
+
+    for (const [sid, startedAt] of chatSessionStartTimes) {
+      if (now - startedAt > SESSION_MAX_AGE_MS) {
+        const ctrl = chatAbortControllers.get(sid);
+        if (ctrl) { ctrl.abort(); chatAbortControllers.delete(sid); }
+        activeChatSessions.delete(sid);
+        chatSessionStartTimes.delete(sid);
+        swept++;
+      }
+    }
+
+    // Prune dedup map entries older than 30s regardless of size
+    for (const [k, v] of chatDedupMap) {
+      if (now - v > 30_000) chatDedupMap.delete(k);
+    }
+
+    if (swept > 0) {
+      console.warn(`[sweep] Cleaned ${swept} orphaned chat session(s)`);
+    }
+  }, 5 * 60 * 1000);
+
+  // JWT authentication middleware for WebSocket.
+  // Tokenless connections are accepted as guests when ENABLE_GUEST_MODE is on;
+  // guests are limited to Auto mode in the agent:chat handler below.
   io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-    if (!token) {
+    const guestIdRaw = socket.handshake.auth?.guestId || socket.handshake.query?.guestId;
+
+    if (token) {
+      try {
+        const payload = await verifyToken(token as string);
+        (socket as any).userId = payload.userId || payload.sub?.replace('did:privy:', '');
+        (socket as any).isGuest = false;
+        return next();
+      } catch {
+        return next(new Error('Invalid or expired token'));
+      }
+    }
+
+    if (!GUEST_CONFIG.enabled) {
       return next(new Error('Authentication required'));
     }
-    try {
-      const payload = await verifyToken(token as string);
-      (socket as any).userId = payload.userId || payload.sub?.replace('did:privy:', '');
-      next();
-    } catch {
-      next(new Error('Invalid or expired token'));
+
+    const guestId = typeof guestIdRaw === 'string' && guestIdRaw.trim() ? guestIdRaw.trim() : null;
+    if (!guestId) {
+      return next(new Error('Missing guestId for unauthenticated connection'));
     }
+    // Length sanity — client uses crypto.randomUUID() (36 chars).
+    if (guestId.length < 8 || guestId.length > 128) {
+      return next(new Error('Invalid guestId'));
+    }
+
+    // Synthetic userId so downstream socket.join/emitToUser/emitters work
+    // without per-call branching. Any DB write that uses this as a FK must
+    // be guarded by `if (!isGuest)` — see agent:chat handler.
+    (socket as any).userId = `guest:${guestId}`;
+    (socket as any).isGuest = true;
+    (socket as any).guestId = guestId;
+    // Best-effort IP from handshake; proxies may require X-Forwarded-For handling upstream.
+    (socket as any).guestIp =
+      (socket.handshake.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
+      socket.handshake.address ||
+      null;
+    next();
   });
 
   io.on('connection', (socket) => {
     const userId = (socket as any).userId as string;
-    console.log(`🔌 Client connected: ${socket.id} (user: ${userId})`);
+    const isGuest = Boolean((socket as any).isGuest);
+    const guestId = (socket as any).guestId as string | undefined;
+    const guestIp = (socket as any).guestIp as string | undefined;
 
-    // Auto-join the user's personal room
+    if (process.env.SOCKET_VERBOSE_LOG === '1') {
+      if (isGuest) {
+        console.log(`🔌 Guest connected: ${socket.id} (guestId=${guestId} synth=${userId})`);
+      } else {
+        console.log(`🔌 Client connected: ${socket.id} (user: ${userId})`);
+      }
+    }
+
+    // Every socket joins its own room so emitToUser routes correctly.
+    // For guests this is `user:guest:<uuid>` — isolated from real users.
     socket.join(`user:${userId}`);
 
-    // ── Online status ──
-    onlineUsers.add(userId);
-    // Broadcast to all connected clients (friends will filter client-side)
-    socket.broadcast.emit('user:online', { userId });
+    if (!isGuest) {
+      // ── Online status (authenticated users only) ──
+      onlineUsers.add(userId);
+      socket.broadcast.emit('user:online', { userId });
 
-    // ── Auto-join group rooms from DB ──
-    // This is vastly superior to relying on frontend `join-group` emits, as it intrinsically survives 
-    // WebSocket disconnects/reconnects without dropping frames or losing synchrony.
-    prisma.groupMember.findMany({ where: { userId } })
-      .then(members => {
-        members.forEach(m => socket.join(`group:${m.groupId}`));
-      })
-      .catch(err => console.error('Failed to auto-join DB groups:', err));
+      // ── Auto-join group rooms from DB ──
+      prisma.groupMember.findMany({ where: { userId } })
+        .then(members => {
+          members.forEach(m => socket.join(`group:${m.groupId}`));
+        })
+        .catch(err => console.error('Failed to auto-join DB groups:', err));
+    }
 
     // Join group chat room (validated - userId is already authenticated)
     socket.on('join-group', (groupId: string) => {
@@ -900,14 +1056,37 @@ Text: "${query}"`;
       }
     });
 
-    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[] }) => {
+    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[] }) => {
       const userContent = typeof data?.content === 'string' ? data.content : '';
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
       if (!userContent.trim() && !hasImages) return;
 
+      // Preserve the user's original mode choice — `data.mode` may be mutated
+      // downstream by the Auto-routing block so we can't rely on it later.
+      const requestedMode: 'auto' | 'fast' | 'roundtable' =
+        data.mode === 'fast' || data.mode === 'roundtable' ? data.mode : 'auto';
+
       const sessionId = data.sessionId || crypto.randomUUID();
       const dedupImageKey = images.map((img) => img.url).join('|');
+
+      // ── Rate limit: max 3 agent:chat events per 10 seconds per socket ──
+      {
+        const now = Date.now();
+        const recent = (socketRateLimiter.get(socket.id) || []).filter(t => now - t < 10_000);
+        if (recent.length >= 3) {
+          const retryAfter = Math.ceil((recent[0] + 10_000 - now) / 1000);
+          socket.emit('agent:chat:error', {
+            sessionId,
+            error: 'rate_limited',
+            retryAfter,
+            hint: `Sending too fast. Please wait ${retryAfter}s.`,
+          });
+          return;
+        }
+        recent.push(now);
+        socketRateLimiter.set(socket.id, recent);
+      }
 
       // ── Dedup guard: skip identical content for the same session within 3s ──
       const dedupKey = `${sessionId}::${userContent}::${dedupImageKey}`;
@@ -922,6 +1101,62 @@ Text: "${query}"`;
       if (chatDedupMap.size > 100) {
         for (const [k, v] of chatDedupMap) {
           if (now - v > 10000) chatDedupMap.delete(k);
+        }
+      }
+
+      // ── Guest gate: only Auto is available without login ──
+      if (isGuest) {
+        if (data.mode !== 'auto') {
+          socket.emit('agent:chat:error', {
+            sessionId,
+            error: 'login_required',
+            mode: data.mode,
+            hint: 'Sign in to unlock Fast and Roundtable modes.',
+          });
+          return;
+        }
+        try {
+          const guestResult = await consumeGuestAuto(guestId as string, guestIp || null);
+          if (!guestResult.allowed) {
+            socket.emit('agent:chat:error', {
+              sessionId,
+              error: guestResult.error,
+              mode: 'auto',
+              resetAt: guestResult.resetAt.toISOString(),
+              hint: 'Sign in for a free account — you\'ll get more Auto turns plus Fast and Roundtable.',
+            });
+            console.log(`[agent:chat] Guest quota exhausted: guestId=${guestId} err=${guestResult.error} resetAt=${guestResult.resetAt.toISOString()}`);
+            return;
+          }
+          console.log(`[agent:chat] Guest auto consumed: guestId=${guestId} remaining=${guestResult.remaining}`);
+        } catch (err) {
+          console.error('[agent:chat] Guest quota check failed, allowing through:', (err as Error).message);
+          // Fail-open so a DB blip doesn't block the free tier.
+        }
+      }
+
+      // ── Quota guard: Fast and Roundtable modes are metered; Auto is free. ──
+      // User-facing PRD rule: selecting Fast or Roundtable consumes exactly one
+      // quota credit up-front, regardless of downstream routing decisions. If
+      // the user is out of quota, abort before any work starts.
+      if (!isGuest && (data.mode === 'fast' || data.mode === 'roundtable')) {
+        try {
+          const quotaResult = await consumeQuota(userId, data.mode);
+          if (!quotaResult.allowed) {
+            socket.emit('agent:chat:error', {
+              sessionId,
+              error: 'quota_exhausted',
+              mode: quotaResult.mode,
+              resetAt: quotaResult.resetAt.toISOString(),
+              hint: 'Upgrade your plan or switch to Auto mode.',
+            });
+            console.log(`[agent:chat] Quota exhausted: user=${userId} mode=${data.mode} resetAt=${quotaResult.resetAt.toISOString()}`);
+            return;
+          }
+          console.log(`[agent:chat] Quota consumed: user=${userId} mode=${data.mode} remaining=${quotaResult.remaining}`);
+        } catch (err) {
+          console.error('[agent:chat] Quota check failed, allowing through:', (err as Error).message);
+          // Fail-open on quota-service errors so a DB blip doesn't block users.
         }
       }
 
@@ -944,7 +1179,9 @@ Text: "${query}"`;
       const emitter = createModuleEmitter(userId, sessionId);
 
       let latestUserMessageId: string | null = null;
-      if (!data.hidden) {
+      // Guests have no DB presence (no User row, no ChatMessage history).
+      // Their conversation lives entirely in localStorage on the client.
+      if (!data.hidden && !isGuest) {
         try {
           const userMeta = hasImages ? JSON.stringify({ images }) : null;
           const createdUser = await prisma.chatMessage.create({
@@ -994,12 +1231,118 @@ Text: "${query}"`;
       };
 
       activeChatSessions.set(sessionId, 'running');
+      chatSessionStartTimes.set(sessionId, Date.now());
       startChatReplayBuffer(sessionId, data.mode);
       emitter.emitStarted('auto', 'Super Agent', data.hidden);
       socket.emit('agent:chat:routing', { sessionId });
       const requestStartedAt = Date.now();
       const sinceRequestStart = () => Date.now() - requestStartedAt;
       const asSeconds = (ms: number) => (ms / 1000).toFixed(3);
+
+      // ══════════════════════════════════════════════════════════════════
+      //   Aegean Deep-Dive early gate (feature-flag gated; OFF by default)
+      //   See: docs/aegean-deep-analysis-migration.md
+      //
+      //   When ENABLE_AEGEAN_DEEP_ANALYSIS=true and user picks Roundtable
+      //   with a single-asset question → route to aegean /investment/analyze.
+      //   Non-single-asset → silent fallback to Fast mode.
+      //   Flag OFF (default) or asset extraction failure → flow through to
+      //   legacy Roundtable path (zero behavioral change).
+      // ══════════════════════════════════════════════════════════════════
+      if (
+        process.env.ENABLE_AEGEAN_DEEP_ANALYSIS === 'true' &&
+        data.mode === 'roundtable' &&
+        !hasImages
+      ) {
+        try {
+          const asset = await extractAsset(userContent);
+          if (asset) {
+            // ── Single-asset → route to aegean deep-dive ──
+            console.log(
+              `[deep-dive] routing to aegean: symbol=${asset.symbol} market=${asset.market} type=${asset.asset_type}`,
+            );
+
+            // Minimal stepper progression so the Workbench UI animates.
+            // Phase 2 will emit fine-grained events from aegean's event_sink;
+            // for v1 we just bookend the stepper around the single HTTP call.
+            emitter.emitModule('route', 'done', { mode: 'roundtable', route: 'aegean-deep-dive' });
+            emitter.emitModule('summon', 'done', { roster: asset.symbol });
+            emitter.emitModule('research', 'active', { provider: 'aegean' });
+
+            const aegeanRaw = await runAegeanDeepAnalysis(userId, asset, userContent);
+
+            emitter.emitModule('research', 'done', { provider: 'aegean' });
+            emitter.emitModule('debate', 'done', {
+              roundsUsed: aegeanRaw.consensus?.rounds_used ?? 1,
+            });
+            emitter.emitModule('consensus', 'done', {
+              action: aegeanRaw.recommendation?.action,
+              confidence: aegeanRaw.recommendation?.confidence,
+            });
+
+            const transformed = transformAegeanDeepAnalysis(aegeanRaw, userContent);
+            const finalMarkdown = transformed.consensus.finalAnswer;
+
+            // Persist assistant message with the transformed result so history
+            // replay shows the same content.
+            if (!isGuest) {
+              try {
+                await prisma.chatMessage.create({
+                  data: {
+                    userId,
+                    sessionId,
+                    role: 'assistant',
+                    content: finalMarkdown,
+                    metadata: stringifyChatMeta({
+                      consensusResult: transformed,
+                      deepDive: transformed.deepDive,
+                      mode: 'roundtable',
+                      provider: 'aegean-investment-analyze',
+                      assetSymbol: asset.symbol,
+                      assetMarket: asset.market,
+                      assetType: asset.asset_type,
+                    }),
+                  },
+                });
+              } catch (dbErr) {
+                console.warn('[deep-dive] DB persist failed:', (dbErr as Error).message);
+              }
+            }
+
+            const dur = Math.round(sinceRequestStart() / 1000);
+            emitter.emitModule('report', 'done', { duration: dur });
+            emitter.emitModule('done', 'completed', { duration: dur });
+            emitter.emitStreamDone(finalMarkdown, { sources: [] });
+
+            // Session cleanup — mirror legacy paths so sweep doesn't flag as stale.
+            activeChatSessions.delete(sessionId);
+            chatSessionStartTimes.delete(sessionId);
+            finishChatReplayBuffer(sessionId);
+            chatAbortControllers.delete(sessionId);
+
+            console.log(
+              `[deep-dive] ✅ completed: symbol=${asset.symbol} elapsed_s=${asSeconds(sinceRequestStart())}`,
+            );
+            return;
+          }
+
+          // ── No single asset → silent fallback to Fast mode ──
+          console.log(`[deep-dive] no asset detected, falling back to Fast mode`);
+          data.mode = 'fast';
+          socket.emit('agent:chat:info', {
+            sessionId,
+            hint: '未识别到具体资产，已切换到 Fast 模式',
+          });
+          // Flow through to legacy handler (now in Fast branch)
+        } catch (err) {
+          // Aegean call failure → flow through to legacy Roundtable. User
+          // still gets an answer; we just lose the deep-dive enhancement.
+          console.warn(
+            '[deep-dive] failed, falling through to legacy Roundtable:',
+            (err as Error).message,
+          );
+        }
+      }
 
       let routeImageDigest = '';
       if (hasImages) {
@@ -1061,6 +1404,80 @@ Text: "${query}"`;
         plan.isSimpleChat = false;
       }
 
+      // Guests are capped at the simple-chat path regardless of what the
+      // orchestrator decided. The 5/day guest quota pays for a plain LLM
+      // answer, not search + Web3 + synthesis.
+      if (isGuest) {
+        plan.isSimpleChat = true;
+      }
+
+      // ═════════════════════════════════════════════════════════════════
+      // Auto mode: semantic routing + dual-bucket quota cascade.
+      //
+      // Per product spec: Auto analyzes the query semantically and picks
+      // Fast or Roundtable. It charges the corresponding bucket. If the
+      // preferred bucket is empty, it tries the other. If BOTH are empty,
+      // it gracefully degrades to a simple no-agent LLM answer so the
+      // user is never blocked — just gets a lighter response.
+      //
+      // Guests and explicit Fast/Roundtable picks skip this block entirely.
+      // ═════════════════════════════════════════════════════════════════
+      let autoResolvedTier: 'simple' | 'fast' | 'roundtable' | null = null;
+      let autoDegraded = false;
+      if (!isGuest && requestedMode === 'auto') {
+        const preferredTier = decideAutoMode(plan, userContent);
+
+        if (preferredTier === 'simple') {
+          console.log(`[agent:chat] Auto routed → simple (no quota charged) sessionId=${sessionId} queryType=${plan.queryType}`);
+          autoResolvedTier = 'simple';
+          // plan.isSimpleChat already true; nothing to change.
+        } else {
+          // Try preferred bucket, then the other, then degrade to simple.
+          let consumedTier: 'fast' | 'roundtable' | null = null;
+
+          try {
+            const primary = await consumeQuota(userId, preferredTier);
+            if (primary.allowed) {
+              consumedTier = preferredTier;
+              console.log(`[agent:chat] Auto→${preferredTier} (preferred) user=${userId} remaining=${primary.remaining} queryType=${plan.queryType}`);
+            } else {
+              const fallbackTier = preferredTier === 'fast' ? 'roundtable' : 'fast';
+              const secondary = await consumeQuota(userId, fallbackTier);
+              if (secondary.allowed) {
+                consumedTier = fallbackTier;
+                console.log(`[agent:chat] Auto→${fallbackTier} (fallback, ${preferredTier} exhausted) user=${userId} remaining=${secondary.remaining}`);
+              } else {
+                console.log(`[agent:chat] Auto→simple (both buckets exhausted) user=${userId} primary_reset=${primary.resetAt.toISOString()} fallback_reset=${secondary.resetAt.toISOString()}`);
+              }
+            }
+          } catch (err) {
+            console.error('[agent:chat] Auto quota cascade failed, allowing through as simple:', (err as Error).message);
+            consumedTier = null; // fail-open degrades to simple
+          }
+
+          if (consumedTier === 'roundtable') {
+            data.mode = 'roundtable'; // flip downstream checks into deep-research path
+            plan.isSimpleChat = false;
+            autoResolvedTier = 'roundtable';
+          } else if (consumedTier === 'fast') {
+            data.mode = 'fast';
+            plan.isSimpleChat = false;
+            autoResolvedTier = 'fast';
+          } else {
+            // Both exhausted — degrade to simple chat (no agent, no tools).
+            plan.isSimpleChat = true;
+            autoResolvedTier = 'simple';
+            autoDegraded = true;
+            // Tell the client so UI can show a subtle "running in lite mode" hint.
+            socket.emit('agent:chat:quota_degraded', {
+              sessionId,
+              reason: 'both_buckets_exhausted',
+              hint: "You're out of Fast and Roundtable quota — running in lite mode (no agents). Upgrade to restore full analysis.",
+            });
+          }
+        }
+      }
+
       // Guardrail: image-heavy stock questions can be misrouted as general when digest is terse.
       // If user explicitly asks about stocks and routing says simple chat, force analysis/search.
       if (hasImages && routeImageDigest && plan.isSimpleChat) {
@@ -1118,33 +1535,102 @@ Text: "${query}"`;
             ? plan.capabilities.analysis.tickers
             : ['SPY', 'QQQ'];
         }
-        // Detect if user mentioned specific named gurus
-        const GURU_NAME_MAP: Record<string, string> = {
-          'damodaran': 'aswath_damodaran', 'aswath damodaran': 'aswath_damodaran',
-          'ben graham': 'ben_graham', 'graham': 'ben_graham', 'benjamin graham': 'ben_graham',
-          'bill ackman': 'bill_ackman', 'ackman': 'bill_ackman',
-          'cathie wood': 'cathie_wood', 'cathie': 'cathie_wood',
-          'charlie munger': 'charlie_munger', 'munger': 'charlie_munger',
-          'michael burry': 'michael_burry', 'burry': 'michael_burry', 'dr. burry': 'michael_burry',
-          'mohnish pabrai': 'mohnish_pabrai', 'pabrai': 'mohnish_pabrai',
-          'nassim taleb': 'nassim_taleb', 'taleb': 'nassim_taleb',
-          'peter lynch': 'peter_lynch', 'lynch': 'peter_lynch',
-          'phil fisher': 'phil_fisher', 'fisher': 'phil_fisher', 'philip fisher': 'phil_fisher',
-          'rakesh jhunjhunwala': 'rakesh_jhunjhunwala', 'rakesh': 'rakesh_jhunjhunwala', 'jhunjhunwala': 'rakesh_jhunjhunwala',
-          'stanley druckenmiller': 'stanley_druckenmiller', 'druckenmiller': 'stanley_druckenmiller',
-          'warren buffett': 'warren_buffett', 'buffett': 'warren_buffett', 'warren': 'warren_buffett',
-        };
-        const queryLower = userContent.toLowerCase();
-        const mentionedSet = new Set<string>();
-        // Sort by length descending to match longer phrases first
-        const sortedKeys = Object.keys(GURU_NAME_MAP).sort((a, b) => b.length - a.length);
-        for (const phrase of sortedKeys) {
-          if (queryLower.includes(phrase)) {
-            mentionedSet.add(GURU_NAME_MAP[phrase]);
-          }
+      }
+
+      // Detect if user mentioned specific named gurus (works in ALL modes, not just guru-council agent)
+      const GURU_NAME_MAP: Record<string, string> = {
+        // English
+        'damodaran': 'aswath_damodaran', 'aswath damodaran': 'aswath_damodaran',
+        'ben graham': 'ben_graham', 'graham': 'ben_graham', 'benjamin graham': 'ben_graham',
+        'bill ackman': 'bill_ackman', 'ackman': 'bill_ackman',
+        'cathie wood': 'cathie_wood', 'cathie': 'cathie_wood',
+        'charlie munger': 'charlie_munger', 'munger': 'charlie_munger',
+        'michael burry': 'michael_burry', 'burry': 'michael_burry', 'dr. burry': 'michael_burry',
+        'mohnish pabrai': 'mohnish_pabrai', 'pabrai': 'mohnish_pabrai',
+        'nassim taleb': 'nassim_taleb', 'taleb': 'nassim_taleb',
+        'peter lynch': 'peter_lynch', 'lynch': 'peter_lynch',
+        'phil fisher': 'phil_fisher', 'fisher': 'phil_fisher', 'philip fisher': 'phil_fisher',
+        'rakesh jhunjhunwala': 'rakesh_jhunjhunwala', 'rakesh': 'rakesh_jhunjhunwala', 'jhunjhunwala': 'rakesh_jhunjhunwala',
+        'stanley druckenmiller': 'stanley_druckenmiller', 'druckenmiller': 'stanley_druckenmiller',
+        'warren buffett': 'warren_buffett', 'buffett': 'warren_buffett', 'warren': 'warren_buffett',
+        // Chinese
+        '达摩达兰': 'aswath_damodaran', '阿斯沃思': 'aswath_damodaran',
+        '格雷厄姆': 'ben_graham', '本·格雷厄姆': 'ben_graham', '本杰明·格雷厄姆': 'ben_graham',
+        '阿克曼': 'bill_ackman', '比尔·阿克曼': 'bill_ackman',
+        '凯茜·伍德': 'cathie_wood', '木头姐': 'cathie_wood', '凯西·伍德': 'cathie_wood',
+        '芒格': 'charlie_munger', '查理·芒格': 'charlie_munger', '查理芒格': 'charlie_munger',
+        '伯里': 'michael_burry', '迈克尔·伯里': 'michael_burry', '大空头': 'michael_burry',
+        '帕布莱': 'mohnish_pabrai', '莫尼什·帕布莱': 'mohnish_pabrai',
+        '塔勒布': 'nassim_taleb', '纳西姆·塔勒布': 'nassim_taleb', '黑天鹅': 'nassim_taleb',
+        '彼得·林奇': 'peter_lynch', '林奇': 'peter_lynch', '彼得林奇': 'peter_lynch',
+        '费雪': 'phil_fisher', '菲利普·费雪': 'phil_fisher', '菲利普费雪': 'phil_fisher',
+        '德鲁肯米勒': 'stanley_druckenmiller', '斯坦利·德鲁肯米勒': 'stanley_druckenmiller',
+        '巴菲特': 'warren_buffett', '沃伦·巴菲特': 'warren_buffett', '沃伦巴菲特': 'warren_buffett', '股神': 'warren_buffett',
+      };
+
+      const queryLowerForGuru = userContent.toLowerCase();
+      const mentionedGuruSet = new Set<string>();
+      const sortedGuruKeys = Object.keys(GURU_NAME_MAP).sort((a, b) => b.length - a.length);
+      for (const phrase of sortedGuruKeys) {
+        if (queryLowerForGuru.includes(phrase.toLowerCase())) {
+          mentionedGuruSet.add(GURU_NAME_MAP[phrase]);
         }
-        if (mentionedSet.size > 0) {
-          plan.specificGurus = Array.from(mentionedSet);
+      }
+
+      // Check if user asked about an investor but none in our roster matched
+      // Heuristic patterns: "X怎么看" / "X的观点" / "X 说" / "what does X think" / "X's view" etc.
+      const investorIntentPattern = /(怎么看|的观点|的看法|会怎么|如何看待|的建议|的策略|what does .+ (think|say)|.+'s (view|take|opinion|thought))/i;
+      const hasInvestorIntent = investorIntentPattern.test(userContent);
+      if (hasInvestorIntent && mentionedGuruSet.size === 0 && data.agentId !== 'guru-council') {
+        // Try to detect a person-like name that's NOT in our list
+        // Simple check: capital-case English name OR Chinese person-like name (2-4 chars around investor terms)
+        const hasNonRosterInvestorName =
+          /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?/.test(userContent) ||
+          /[\u4e00-\u9fff]{2,4}(?=(怎么看|的观点|的看法|会怎么|如何看待))/.test(userContent);
+        if (hasNonRosterInvestorName) {
+          const availableList = [
+            'Warren Buffett (巴菲特)', 'Charlie Munger (芒格)', 'Peter Lynch (彼得·林奇)',
+            'Ben Graham (格雷厄姆)', 'Phil Fisher (费雪)', 'Bill Ackman (阿克曼)',
+            'Cathie Wood (木头姐)', 'Michael Burry (大空头)', 'Stanley Druckenmiller',
+            'Mohnish Pabrai', 'Nassim Taleb (黑天鹅)', 'Aswath Damodaran', 'Rakesh Jhunjhunwala',
+          ];
+          const isZh = /[\u4e00-\u9fff]/.test(userContent);
+          const msg = isZh
+            ? `你提到的这位投资人暂不在 Loka 的大师名单里。目前可用的大师有：\n\n${availableList.map(n => '- ' + n).join('\n')}\n\n你可以换一位再问，或者切换到 Roundtable 模式听一轮集体观点。`
+            : `The investor you mentioned isn't in Loka's guru roster yet. Available gurus:\n\n${availableList.map(n => '- ' + n).join('\n')}\n\nTry asking about one of them, or switch to Roundtable mode for a collective view.`;
+          emitter.emitModule('search', 'active', { variant: 'data_providers', providers: [] });
+          emitter.emitProgress(msg);
+          emitter.emitModule('done', 'completed', { duration: 0 });
+          emitter.emitStreamDone(msg);
+          try {
+            await prisma.chatMessage.create({
+              data: { userId, sessionId, role: 'assistant', content: msg, agentId: 'superagent' }
+            });
+          } catch (_) {}
+          activeChatSessions.delete(sessionId);
+          finishChatReplayBuffer(sessionId);
+          chatAbortControllers.delete(sessionId);
+          return;
+        }
+      }
+
+      if (mentionedGuruSet.size > 0) {
+        plan.specificGurus = Array.from(mentionedGuruSet);
+        // In non-roundtable modes, auto-promote to guru-council flow so the single-guru prompt kicks in
+        if (data.agentId !== 'guru-council' && data.mode !== 'roundtable') {
+          plan.isSimpleChat = false;
+          plan.queryType = 'guru-council';
+          plan.capabilities.simulate.needed = true;
+          if (!plan.capabilities.search.needed) {
+            plan.capabilities.search.needed = true;
+            plan.capabilities.search.query = plan.capabilities.search.query || data.content;
+          }
+          if (!plan.capabilities.simulate.tickers?.length) {
+            plan.capabilities.simulate.tickers = plan.capabilities.analysis?.tickers?.length
+              ? plan.capabilities.analysis.tickers
+              : ['SPY'];
+          }
+          console.log(`[agent:chat:guru] auto-promoted to guru-council for mentioned gurus: ${plan.specificGurus.join(',')}`);
         }
       }
 
@@ -1190,20 +1676,42 @@ Text: "${query}"`;
         emitter.emitProgress(clarification);
         emitter.emitModule('done', 'completed', { duration: 0 });
         emitter.emitStreamDone(clarification);
-        try {
-          await prisma.chatMessage.create({
-            data: { userId, sessionId, role: 'assistant', content: clarification, agentId: 'superagent' }
-          });
-        } catch (_) {}
+        if (!isGuest) {
+          try {
+            await prisma.chatMessage.create({
+              data: { userId, sessionId, role: 'assistant', content: clarification, agentId: 'superagent' }
+            });
+          } catch (_) {}
+        }
         activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
       }
 
-      socket.emit('agent:chat:routed', { 
-        sessionId, 
-        mode: (!hasImages && data.mode === 'roundtable') ? 'roundtable' : (plan.isSimpleChat ? 'fast' : 'auto') 
+      // Emit the mode that actually ran. `mode` is the ChatMode the UI
+      // can render (must stay compatible: 'roundtable' | 'fast' | 'auto').
+      // `actualTier` + `requested` + `autoResolved` + `degraded` are the
+      // new source-of-truth fields for accurate badges / telemetry.
+      const actualTier: 'simple' | 'fast' | 'roundtable' =
+        (!hasImages && data.mode === 'roundtable') ? 'roundtable' :
+        plan.isSimpleChat ? 'simple' :
+        'fast';
+      // Legacy-compatible mode label for existing UI paths. Simple collapses
+      // to 'auto' here because the UI has no separate 'simple' chip and
+      // 'auto' matches how users perceive a model-only reply.
+      const legacyMode: 'roundtable' | 'fast' | 'auto' =
+        actualTier === 'roundtable' ? 'roundtable' :
+        actualTier === 'simple' ? 'auto' :
+        'fast';
+      socket.emit('agent:chat:routed', {
+        sessionId,
+        mode: legacyMode,
+        actualTier,
+        requested: requestedMode,
+        autoResolved: requestedMode === 'auto' ? autoResolvedTier : null,
+        degraded: autoDegraded,
       });
 
       const streamToChat = (chunk: string) => {
@@ -1267,15 +1775,18 @@ Text: "${query}"`;
           const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
           if (isAborted()) {
             activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
             chatAbortControllers.delete(sessionId);
             return;
           }
-          try {
-            await prisma.chatMessage.create({
-              data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
-            });
-          } catch (e) { }
+          if (!isGuest) {
+            try {
+              await prisma.chatMessage.create({
+                data: { userId, sessionId, role: 'assistant', content: fullContent, agentId: 'superagent', metadata: JSON.stringify({ thinkingFlow: simpleFlow }) }
+              });
+            } catch (e) { }
+          }
           emitter.emitModule('done', 'completed', { duration: simpleDur });
           emitter.emitStreamDone(fullContent);
         } catch (streamErr: any) {
@@ -1286,6 +1797,7 @@ Text: "${query}"`;
           emitter.emitStreamDone('');
         }
         activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
@@ -1765,6 +2277,7 @@ Text: "${query}"`;
       if (isAborted()) {
         console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
         activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
         chatAbortControllers.delete(sessionId);
         return;
@@ -2240,7 +2753,78 @@ ${contextString}
 `;
 
       // ─── Guru Council Prompt ───
-      const guruCouncilPrompt = `You are moderating a roundtable of legendary investors analyzing a specific asset or market question.
+      // Named-guru mode: user explicitly mentioned 1+ gurus outside of Roundtable. Answer only those gurus, no council framing.
+      const isNamedGurusOnly =
+        plan.queryType === 'guru-council'
+        && plan.specificGurus?.length > 0
+        && data.mode !== 'roundtable';
+      const namedGuruList: string[] = isNamedGurusOnly
+        ? plan.specificGurus.map((k: string) => k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()))
+        : [];
+      const namedGurusPrompt = `You are channeling the voice of specific investors the user explicitly asked about. Answer as each named investor in their own style, optimized for SCANNABLE reading.
+
+The user named these investors: ${namedGuruList.join(', ')}. Do NOT include any other investors. Do NOT frame this as a "roundtable" or "council". Do NOT produce consensus/disagreement/synthesis sections. Only the named investor${namedGuruList.length > 1 ? 's speak' : ' speaks'}.
+
+=== INPUT ===
+Question: ${userContent}
+Context (may include simulation signals, fundamental metrics, and search results):
+${contextString}
+
+=== OUTPUT STRUCTURE ===
+
+# ${namedGuruList.length === 1 ? `${namedGuruList[0]}'s Take on [Asset/Topic]` : `${namedGuruList.join(' vs ')}: on [Asset/Topic]`}
+
+${namedGuruList.length > 1
+  ? 'For EACH named investor, produce ONE self-contained section below using the scaffolding. Each investor is fully independent — no cross-references, no "they agree/disagree" text anywhere.\n\n---\n'
+  : ''}${namedGuruList.map((name) => `## ${name}
+
+**🟢 Bullish / 🔴 Bearish / 🟡 Neutral · Conviction XX%** *(one line, pick one signal and the conviction % from simulation data)*
+
+> **Bottom line (${name})** — ONE punchy sentence in ${name}'s voice that captures the verdict. No fluff.
+
+### The Framework
+2-3 tight sentences on ${name}'s specific methodology. Name the mental models (e.g. "margin of safety", "circle of competence", "tail risk", "PEG < 1"). This is NOT generic investing — speak to what makes ${name} distinctive.
+
+### Key Numbers at a Glance
+A compact markdown table with 4-6 rows of the most important metrics from the context. Format:
+
+| Metric | Value | ${name}'s Read |
+|---|---|---|
+| (metric) | (value) | (one-phrase read: ✅ good / ⚠️ watch / 🚫 red flag) |
+
+Pick metrics that MATTER to ${name} specifically — not a generic dump. Buffett cares about ROIC + moat; Burry cares about debt + insider activity; Lynch cares about PEG + growth category; Taleb cares about tail exposure + antifragility.
+
+### The Analysis
+3-5 labeled mini-paragraphs, each starting with a **bolded lead-in** for scannability. Each is 2-4 sentences max. Example structure:
+
+**Valuation tension** — ${name}'s take on the price vs. fundamentals story, with specific numbers. [Source](url)
+
+**Growth signals** — Is the top-line thesis still intact? What do the numbers say? [Source](url)
+
+**The [distinctive factor]** — The ${name}-specific angle (moat, key-man risk, tail exposure, etc.). [Source](url)
+
+Keep each block focused on ONE idea. No walls of prose.
+
+### Risks on the Radar
+3-5 concise bullets, each **bolded** lead phrase + explanation. Frame them the way ${name} actually thinks about risk — not generic "macro uncertainty" boilerplate.
+
+### What Would Change ${name}'s Mind
+2-3 CONCRETE, measurable triggers. Each bullet starts with a condition ("If revenue growth returns to double digits…" / "If the stock trades below \$X…"). Quantify wherever possible.
+`).join('\n\n---\n\n')}
+
+═══ RULES ═══
+1. ONLY the named investor${namedGuruList.length > 1 ? 's' : ''}: ${namedGuruList.join(', ')}. No other guru names. No roundtable/council/consensus framing.
+2. STRUCTURE IS NON-NEGOTIABLE: every named investor gets the six sub-sections in this exact order: verdict line → bottom line quote → Framework → Key Numbers table → Analysis (with bolded lead-ins) → Risks on the Radar → What Would Change Their Mind.
+3. TABLE is REQUIRED. Use real numbers from the context. If a specific metric is missing, write "data pending" — do not fabricate.
+4. SCANNABILITY > COMPLETENESS: short paragraphs, bold lead-ins, bullets. No wall-of-text analysis blocks.
+5. VOICE: Use each investor's actual published frameworks and characteristic phrases. "I do not short stories, but I do not pay full price for them either" (Damodaran). "Price is what you pay, value is what you get" (Buffett). Etc.
+6. LANGUAGE: Match the user's language entirely. Chinese query = all Chinese (including table headers and signal labels). English query = all English.
+7. CITATIONS: At the END of a paragraph or table cell, format [Source](url). Never mid-sentence. Never wrap in parentheses. Never list URLs separately.
+8. LENGTH: 500-900 words per investor. Total: ${namedGuruList.length * 600}-${namedGuruList.length * 900} words.
+9. HEADINGS: # for title only. ## for each investor name. ### for sub-sections within. **bold** for metric leads, numbers, and emphasis. NEVER prefix headings with numbers like "1.", "2.".
+`;
+
+      const guruCouncilPrompt = isNamedGurusOnly ? namedGurusPrompt : `You are moderating a roundtable of legendary investors analyzing a specific asset or market question.
 
 Your job is to present each guru's perspective through their known investment framework, then synthesize a consensus recommendation. This is NOT a generic summary — each guru must speak in character with their known methodology.
 
@@ -2298,333 +2882,6 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
 `;
 
-      // ─── Guru Council HTML Template ───
-      const buildGuruCouncilHtmlPrompt = (inputContext: string) => `You are a world-class frontend designer creating a visual report for a Guru Council (multi-investor roundtable) analysis.
-
-Your task is to produce a SELF-CONTAINED HTML document that presents each guru's analysis in a visually compelling way. Think: investor presentation deck meets Apple design.
-
-=== INPUT ===
-Topic: ${userContent}
-${inputContext}
-
-=== OUTPUT FORMAT ===
-Output a COMPLETE, self-contained HTML document. Do NOT use markdown. Output raw HTML only — no \`\`\`html fences, no explanatory text.
-
-The HTML must:
-1. Be a single <div class="report-wrap"> with embedded <style> and optional <script> tags
-2. Use CSS custom properties for theming (inherit from parent: --color-text-primary, --color-text-secondary, --color-text-tertiary, --color-background-secondary, --color-border-tertiary, --border-radius-md, --border-radius-lg, --font-sans)
-3. Be mobile-responsive
-
-=== DESIGN SYSTEM ===
-<style>
-  .report-wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 1rem; font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
-  
-  .report-header { border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); padding-bottom: 1.5rem; margin-bottom: 2rem; }
-  .report-label { font-size: 11px; letter-spacing: 0.12em; color: var(--color-text-tertiary, #999); text-transform: uppercase; margin-bottom: 0.5rem; }
-  .report-title { font-size: 22px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); line-height: 1.4; margin-bottom: 1rem; }
-  .report-verdict { display: inline-flex; align-items: center; gap: 8px; background: var(--color-background-secondary, #f5f5f5); border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
-  .verdict-dot { width: 8px; height: 8px; border-radius: 50%; }
-
-  .section { margin-bottom: 2rem; }
-  .section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary, #666); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1rem; padding-bottom: 6px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-
-  /* Guru cards */
-  .guru-grid { display: flex; flex-direction: column; gap: 16px; margin-bottom: 2rem; }
-  .guru-card { position: relative; border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 20px; }
-  .guru-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding-right: 80px; }
-  .guru-avatar { width: 48px; height: 48px; border-radius: 50%; background: #1a1a1a; border: 2px solid #1a1a1a; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: #fff; letter-spacing: -0.02em; flex-shrink: 0; overflow: hidden; }
-  .guru-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .guru-name { font-size: 15px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); }
-  .guru-framework { font-size: 12px; color: var(--color-text-tertiary, #999); }
-  .guru-signal { position: absolute; top: 16px; right: 16px; display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-  .signal-bullish { background: #DCFCE7; color: #166534; }
-  .signal-bearish { background: #FEE2E2; color: #991B1B; }
-  .signal-neutral { background: #FEF3C7; color: #92400E; }
-  .guru-analysis { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 12px; }
-  .guru-footer { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--color-text-tertiary, #999); }
-  .conf-bar { width: 100px; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
-  .conf-fill { height: 100%; border-radius: 3px; }
-
-  /* Consensus panel */
-  .consensus-panel { background: var(--color-background-secondary, #f5f5f5); border-radius: 12px; padding: 20px; margin-bottom: 2rem; }
-  .consensus-verdict { font-size: 18px; font-weight: 500; margin-bottom: 8px; }
-  .consensus-detail { font-size: 13px; line-height: 1.7; color: var(--color-text-secondary, #666); }
-
-  /* Comparison matrix */
-  .cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 2rem; }
-  .cmp-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: center; padding: 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-  .cmp-table th:first-child { text-align: left; }
-  .cmp-table td { padding: 10px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); text-align: center; }
-  .cmp-table td:first-child { text-align: left; font-weight: 500; }
-
-  /* Debate section */
-  .debate-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-  .debate-item:last-child { border-bottom: none; }
-  .debate-label { font-size: 11px; font-weight: 500; color: #185FA5; background: #E6F1FB; padding: 2px 8px; border-radius: 8px; white-space: nowrap; height: fit-content; }
-  .debate-text { font-size: 13px; line-height: 1.6; color: var(--color-text-primary, #1a1a1a); }
-
-  /* Summary stats hero */
-  .stats-hero { display: flex; gap: 24px; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 1px solid rgba(0,0,0,0.06); border-radius: 16px; padding: 28px; margin-bottom: 2rem; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
-  .stats-gauge { flex: 0 0 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  .gauge-ring { position: relative; width: 110px; height: 110px; }
-  .gauge-ring svg { width: 110px; height: 110px; transform: rotate(-90deg); }
-  .gauge-ring circle { fill: none; stroke-width: 7; stroke-linecap: round; }
-  .gauge-track { stroke: #e2e8f0; }
-  .gauge-value { transition: stroke-dashoffset .6s ease; filter: drop-shadow(0 0 4px rgba(0,0,0,0.08)); }
-  .gauge-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  .gauge-pct { font-size: 22px; font-weight: 700; color: var(--color-text-primary, #0f172a); line-height: 1; letter-spacing: -0.02em; }
-  .gauge-label { font-size: 10px; color: #94a3b8; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
-  .stats-breakdown { flex: 1; display: flex; flex-direction: column; gap: 12px; }
-  .stat-row { display: flex; align-items: center; gap: 10px; }
-  .stat-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  .stat-dot-bullish { background: #10b981; }
-  .stat-dot-bearish { background: #f43f5e; }
-  .stat-dot-neutral { background: #f59e0b; }
-  .stat-name { font-size: 13px; font-weight: 600; color: var(--color-text-primary, #1e293b); min-width: 60px; }
-  .stat-bar-wrap { flex: 1; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
-  .stat-bar { height: 100%; border-radius: 3px; transition: width .5s ease; }
-  .stat-bar-bullish { background: linear-gradient(90deg, #10b981, #34d399); }
-  .stat-bar-bearish { background: linear-gradient(90deg, #f43f5e, #fb7185); }
-  .stat-bar-neutral { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
-  .stat-count { font-size: 13px; font-weight: 600; color: #64748b; min-width: 28px; text-align: right; }
-
-  /* Risk items */
-  .risk-list { display: flex; flex-direction: column; gap: 8px; }
-  .risk-item { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
-  .risk-dot { min-width: 6px; height: 6px; border-radius: 50%; background: #E24B4A; margin-top: 7px; }
-
-  .report-wrap ul, .report-wrap ol { padding-left: 1.2em; margin: 0.5rem 0; }
-  .report-wrap li { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 4px; text-align: left; }
-
-  @media (max-width: 600px) {
-    .stats-hero { flex-direction: column; align-items: stretch; }
-    .stats-gauge { flex: 0 0 auto; }
-    .guru-head { flex-wrap: wrap; }
-    .cmp-table { font-size: 12px; }
-  }
-</style>
-
-=== REPORT STRUCTURE ===
-1. Report Header: label "GURU COUNCIL REPORT", title, consensus verdict badge
-2. Summary Stats Hero (.stats-hero) — COPY THIS EXACT HTML STRUCTURE (fill in real values):
-
-<div class="stats-hero">
-  <div class="stats-gauge">
-    <div class="gauge-ring">
-      <svg viewBox="0 0 120 120">
-        <circle class="gauge-track" cx="60" cy="60" r="46" stroke-dasharray="289" stroke-dashoffset="0"></circle>
-        <circle class="gauge-value" cx="60" cy="60" r="46" stroke="#22C55E" stroke-dasharray="289" stroke-dashoffset="CALC_OFFSET"></circle>
-      </svg>
-      <div class="gauge-center">
-        <span class="gauge-pct">XX%</span>
-        <span class="gauge-label">Conviction</span>
-      </div>
-    </div>
-  </div>
-  <div class="stats-breakdown">
-    <div class="stat-row"><span class="stat-dot stat-dot-bullish"></span><span class="stat-name">Bullish</span><div class="stat-bar-wrap"><div class="stat-bar stat-bar-bullish" style="width:XX%"></div></div><span class="stat-count">N</span></div>
-    <div class="stat-row"><span class="stat-dot stat-dot-neutral"></span><span class="stat-name">Neutral</span><div class="stat-bar-wrap"><div class="stat-bar stat-bar-neutral" style="width:XX%"></div></div><span class="stat-count">N</span></div>
-    <div class="stat-row"><span class="stat-dot stat-dot-bearish"></span><span class="stat-name">Bearish</span><div class="stat-bar-wrap"><div class="stat-bar stat-bar-bearish" style="width:XX%"></div></div><span class="stat-count">N</span></div>
-  </div>
-</div>
-
-   CALC_OFFSET formula: offset = 289 * (1 - conviction_pct / 100). Example: 70% conviction → offset = 289 * 0.3 = 86.7. Choose stroke color by majority signal: #10b981 (bullish), #f43f5e (bearish), #f59e0b (neutral).
-3. Guru Cards: one card per guru (.guru-card) with photo avatar, name, framework, analysis paragraph, conviction bar. The signal badge (.guru-signal) is positioned at the TOP-RIGHT corner of the card via CSS absolute positioning — just add it as a direct child of .guru-card. For the avatar, use: <div class="guru-avatar"><img src="/avatars/GURU_KEY.jpg" alt="Name"></div> where GURU_KEY is one of: warren_buffett, ben_graham, peter_lynch, charlie_munger, aswath_damodaran, cathie_wood, michael_burry, stanley_druckenmiller, nassim_taleb, bill_ackman, phil_fisher, mohnish_pabrai, rakesh_jhunjhunwala. If the guru is not in the list, use <div class="guru-avatar">XX</div> with initials instead.
-4. Comparison Matrix: table showing all gurus × key dimensions (Signal, Conviction, Key Argument) — use .cmp-table
-5. Debate Points: key disagreements between gurus (.debate-item)
-6. Consensus Panel: weighted consensus, recommended action (.consensus-panel)
-7. Risks: collective risk factors (.risk-list)
-8. The report ENDS here after Risks. Do NOT add a Related Questions section — the frontend renders that separately.
-
-=== CRITICAL RULES ===
-1. Output ONLY the HTML starting with <style> and <div class="report-wrap">. NO preamble text, NO code fences (\`\`\`), NO explanatory sentences before or after the HTML.
-2. Use REAL data from the input. Never fabricate.
-3. LANGUAGE: Match the user's language.
-4. Colors: green (#166534/#10b981) for bullish, red (#991B1B/#f43f5e) for bearish, amber (#92400E/#f59e0b) for neutral, blue (#378ADD/#185FA5) for info.
-5. Each guru card must show their actual signal and reasoning — NOT generic placeholders.
-6. Keep the design minimal, data-dense, professional.
-7. The HTML must work standalone. No external JS libraries needed — use pure CSS + inline SVG for the gauge.
-8. The Summary Stats Hero is MANDATORY — always render it as section 2 right after the header.
-9. Do NOT use markdown syntax (**bold**, *italic*, -- dashes) anywhere inside the HTML content. All text must be plain HTML. Use <strong> instead of **, <em> instead of *, <ul>/<li> instead of dashes.
-10. For the SVG gauge: both circles MUST have r="46", cx="60", cy="60". The circumference is 289. Calculate stroke-dashoffset exactly.
-11. The report ends after the Risks section. No "Data Sources" footnote, no Related Questions, no horizontal rules, no extra text after the last </div>.
-12. Section titles and headings must be plain text inside HTML tags. Never wrap titles in ** asterisks.
-`;
-
-      const buildWebReportPrompt = (inputContext: string) => `You are a senior research director at a top-tier investment research firm AND a world-class frontend designer.
-
-Your task is to produce a professional-grade DEEP RESEARCH REPORT rendered as a SELF-CONTAINED HTML document. Think: Bloomberg Terminal meets Apple design aesthetics.
-
-=== INPUT ===
-Topic: ${userContent}
-${inputContext}
-
-=== OUTPUT FORMAT ===
-Output a COMPLETE, self-contained HTML document. Do NOT use markdown. Output raw HTML only — no \`\`\`html fences, no explanatory text before or after.
-
-The HTML must:
-1. Be a single <div class="report-wrap"> with embedded <style> and optional <script> tags
-2. Use CSS custom properties for theming (inherit from parent: --color-text-primary, --color-text-secondary, --color-text-tertiary, --color-background-secondary, --color-border-tertiary, --border-radius-md, --border-radius-lg, --font-sans)
-3. Fallback colors for standalone viewing
-4. Be mobile-responsive
-5. Use Chart.js from CDN for any charts (bar, line, etc)
-
-=== DESIGN SYSTEM ===
-<style>
-  .report-wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 1rem; font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
-  
-  /* Header */
-  .report-header { border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); padding-bottom: 1.5rem; margin-bottom: 2rem; }
-  .report-label { font-size: 11px; letter-spacing: 0.12em; color: var(--color-text-tertiary, #999); text-transform: uppercase; margin-bottom: 0.5rem; }
-  .report-title { font-size: 22px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); line-height: 1.4; margin-bottom: 1rem; }
-  .report-verdict { display: inline-flex; align-items: center; gap: 8px; background: var(--color-background-secondary, #f5f5f5); border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
-  .verdict-dot { width: 8px; height: 8px; border-radius: 50%; }
-  
-  /* KPI Cards */
-  .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 2rem; }
-  .kpi-card { background: var(--color-background-secondary, #f5f5f5); border-radius: 8px; padding: 14px 16px; }
-  .kpi-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 6px; }
-  .kpi-value { font-size: 20px; font-weight: 500; color: var(--color-text-primary, #1a1a1a); }
-  .kpi-sub { font-size: 11px; color: var(--color-text-tertiary, #999); margin-top: 2px; }
-  .kpi-up { color: #3B6D11; } .kpi-dn { color: #A32D2D; }
-  
-  /* Sections */
-  .section { margin-bottom: 2rem; }
-  .section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary, #666); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1rem; padding-bottom: 6px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-  
-  /* Thesis box */
-  .thesis-box { background: var(--color-background-secondary, #f5f5f5); border-left: 2px solid #378ADD; padding: 14px 16px; font-size: 14px; line-height: 1.7; margin-bottom: 1rem; }
-  
-  /* Catalysts */
-  .catalyst-list { display: flex; flex-direction: column; gap: 8px; }
-  .catalyst-item { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
-  .catalyst-num { min-width: 20px; height: 20px; border-radius: 50%; background: #E6F1FB; color: #185FA5; font-size: 11px; font-weight: 500; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
-  
-  /* Layout */
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
-  
-  /* Tables */
-  .seg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .seg-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: right; padding: 6px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-  .seg-table th:first-child { text-align: left; }
-  .seg-table td { padding: 8px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); text-align: right; }
-  .seg-table td:first-child { text-align: left; color: var(--color-text-secondary, #666); }
-  
-  /* Bar charts (CSS) */
-  .bar-mini { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
-  .bar-mini-label { min-width: 80px; color: var(--color-text-secondary, #666); }
-  .bar-mini-track { flex: 1; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
-  .bar-mini-fill { height: 100%; border-radius: 3px; }
-  .bar-mini-val { min-width: 30px; text-align: right; font-weight: 500; }
-  
-  /* Scenario cards */
-  .scenario-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 2rem; }
-  .scenario-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 14px; }
-  .sc-label { font-size: 11px; font-weight: 500; margin-bottom: 6px; }
-  .sc-price { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
-  .sc-prob { font-size: 12px; color: var(--color-text-tertiary, #999); margin-bottom: 8px; }
-  .sc-tag { font-size: 11px; color: var(--color-text-secondary, #666); line-height: 1.5; }
-  .sc-bull { border-top: 2px solid #639922; } .sc-base { border-top: 2px solid #378ADD; }
-  .sc-flat { border-top: 2px solid #888780; } .sc-bear { border-top: 2px solid #E24B4A; }
-  
-  /* Risk table */
-  .risk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .risk-table th { font-size: 11px; font-weight: 500; color: var(--color-text-tertiary, #999); text-align: left; padding: 6px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-  .risk-table td { padding: 9px 8px; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); vertical-align: top; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
-  .pill-low { background: #EAF3DE; color: #3B6D11; } .pill-mid { background: #FAEEDA; color: #854F0B; } .pill-high { background: #FAECE7; color: #993C1D; }
-  
-  /* Expert rows */
-  .expert-row { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); font-size: 13px; }
-  .expert-row:last-child { border-bottom: none; }
-  .expert-name { min-width: 90px; color: var(--color-text-secondary, #666); }
-  .expert-view { flex: 1; }
-  .conf-bar { width: 80px; height: 6px; background: var(--color-background-secondary, #f5f5f5); border-radius: 3px; overflow: hidden; }
-  .conf-fill { height: 100%; border-radius: 3px; background: #378ADD; }
-  
-  /* Expert debate cards */
-  .expert-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 12px; padding: 16px; margin-bottom: 10px; }
-  .expert-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .expert-avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--color-background-secondary, #f5f5f5); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: var(--color-text-secondary, #666); }
-  .expert-meta { flex: 1; }
-  .expert-label { font-size: 13px; font-weight: 600; color: var(--color-text-primary, #1a1a1a); }
-  .expert-signal { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .expert-signal-bullish { background: #DCFCE7; color: #166534; }
-  .expert-signal-bearish { background: #FEE2E2; color: #991B1B; }
-  .expert-signal-neutral { background: #FEF3C7; color: #92400E; }
-  .expert-body { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); }
-  .expert-conf { margin-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--color-text-tertiary, #999); }
-  
-  /* Debate section */
-  .debate-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5e5); }
-  .debate-item:last-child { border-bottom: none; }
-  .debate-label { font-size: 11px; font-weight: 500; color: #185FA5; background: #E6F1FB; padding: 2px 8px; border-radius: 8px; white-space: nowrap; height: fit-content; }
-  .debate-text { font-size: 13px; line-height: 1.6; color: var(--color-text-primary, #1a1a1a); }
-  
-  /* Consensus panel */
-  .consensus-panel { background: var(--color-background-secondary, #f5f5f5); border-radius: 12px; padding: 20px; margin-bottom: 2rem; }
-  .consensus-verdict { font-size: 18px; font-weight: 500; margin-bottom: 8px; }
-  .consensus-detail { font-size: 13px; line-height: 1.7; color: var(--color-text-secondary, #666); }
-  
-  /* Monitor & Trade */
-  .monitor-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .monitor-item { background: var(--color-background-secondary, #f5f5f5); border-radius: 8px; padding: 12px 14px; }
-  .m-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 4px; }
-  .m-current { font-size: 15px; font-weight: 500; }
-  .m-trigger { font-size: 11px; color: #185FA5; margin-top: 2px; }
-  .trade-box { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .trade-card { border: 0.5px solid var(--color-border-tertiary, #e5e5e5); border-radius: 8px; padding: 12px 14px; }
-  .t-label { font-size: 11px; color: var(--color-text-tertiary, #999); margin-bottom: 4px; }
-  .t-value { font-size: 14px; font-weight: 500; }
-  
-  /* Lists */
-  .report-wrap ul, .report-wrap ol { padding-left: 1.2em; margin: 0.5rem 0; }
-  .report-wrap li { font-size: 13px; line-height: 1.7; color: var(--color-text-primary, #1a1a1a); margin-bottom: 4px; text-align: left; }
-  .report-wrap ul { list-style: disc; }
-  .report-wrap ol { list-style: decimal; }
-
-  /* Responsive */
-  @media (max-width: 600px) {
-    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
-    .two-col { grid-template-columns: 1fr; }
-    .scenario-grid { grid-template-columns: repeat(2, 1fr); }
-    .monitor-list { grid-template-columns: 1fr; }
-    .trade-box { grid-template-columns: 1fr 1fr; }
-  }
-</style>
-
-=== REPORT STRUCTURE (adapt sections to topic) ===
-1. Report Header: label, title, verdict badge with colored dot
-2. KPI Grid: 3-4 key metrics with sub-labels (use .kpi-grid)
-3. Core Thesis: thesis-box with catalysts list
-4. Data Visualization: two-col layout with bar charts (.bar-mini) and tables (.seg-table)
-5. Scenario Analysis: 3-4 scenario cards (.scenario-grid with .sc-bull/.sc-base/.sc-flat/.sc-bear)
-6. Risk Matrix: table with probability/impact pills (.pill-low/.pill-mid/.pill-high)
-7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert’s core view, confidence, and key argument using expert-row components. Include:
-   - Expert cards: each expert with name, signal (bullish/bearish/neutral), confidence bar, and 1-2 sentence core argument
-   - Points of Agreement: where experts converged
-   - Points of Contention: where experts disagreed and what data would resolve it
-   - Synthesis: how the debate shaped the final thesis
-8. Key Monitoring: monitor-list with current values and triggers
-9. Action Strategy: trade-box with entry/stop/target cards
-10. The report ENDS here after Action Strategy. Do NOT add a Related Questions section — the frontend renders that separately.
-
-=== CRITICAL RULES ===
-1. Output ONLY the HTML starting with <style> and <div class="report-wrap">. No markdown, no code fences, no explanation text.
-2. All text content must be data-driven and analytical — use the actual research data provided.
-3. Use REAL numbers from the input data. Never fabricate financial figures.
-4. LANGUAGE: Match the user's language. Chinese query = all Chinese content. English = all English.
-5. Use Chart.js (CDN: https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js) for complex charts. Put <script> tags at the end.
-6. Canvas elements MUST have unique IDs.
-7. All colors should use semantic meaning: green (#3B6D11/#639922) for positive, red (#A32D2D/#E24B4A) for negative, blue (#378ADD/#185FA5) for neutral/info.
-8. For non-stock topics, adapt the template — skip stock-specific widgets, add relevant ones.
-9. Keep the design minimal, data-dense, and professional. No decorative elements.
-10. The HTML must work standalone — include all styles inline.
-11. Do NOT use markdown syntax anywhere: no **bold**, no *italic*, no -- dashes for lists. All text must be plain HTML (<strong>, <em>, <ul>/<li>).
-12. Section titles and headings must be plain text inside HTML tags. Never wrap titles in ** asterisks.
-13. The report ends after Action Strategy / Key Monitoring. Do NOT add a Related Questions section, "Data Sources" footnote, or any extra text — the frontend renders those separately.
-`;
-
       // Route synthesis prompt by queryType
       const queryType = plan.queryType || 'investment-analysis';
       let synthesizePrompt: string;
@@ -2647,56 +2904,11 @@ The HTML must:
       const synthesisModelOverride = config.lokaAi.synthesisModel || undefined;
 
       // ── Helper: run HTML generation stream and return the result ──
-      const runHtmlGeneration = async (htmlInput: string): Promise<string> => {
-        const htmlPrompt = queryType === 'guru-council'
-          ? buildGuruCouncilHtmlPrompt(htmlInput)
-          : buildWebReportPrompt(htmlInput);
-        const htmlStream = await aiService.chatStream([{ role: 'user', content: htmlPrompt }], 'superagent', undefined, 8192);
-        const htmlReader = htmlStream.getReader();
-        const htmlDecoder = new TextDecoder();
-        let htmlContent = '';
-        let htmlBuf = '';
-        let chunkCount = 0;
-        while (true) {
-          const { done, value } = await htmlReader.read();
-          if (done) {
-            if (htmlBuf.trim()) {
-              for (const line of htmlBuf.split('\n')) {
-                const t = line.trim();
-                if (t.startsWith('data: ')) {
-                  const d = t.slice(6).trim();
-                  if (d === '[DONE]') continue;
-                  try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
-                }
-              }
-            }
-            break;
-          }
-          chunkCount++;
-          htmlBuf += htmlDecoder.decode(value, { stream: true });
-          const htmlLines = htmlBuf.split('\n');
-          htmlBuf = htmlLines.pop() || '';
-          for (const line of htmlLines) {
-            const t = line.trim();
-            if (t.startsWith('data: ')) {
-              const d = t.slice(6).trim();
-              if (d === '[DONE]') continue;
-              try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
-            }
-          }
-        }
-        console.log(`[agent:chat:html] Stream finished. chunks=${chunkCount}, htmlLength=${htmlContent.length}`);
-        // Sanitize: strip LLM preamble/postamble and markdown fences
-        let s = htmlContent.trim();
-        s = s.replace(/^```html\s*/i, '').replace(/^```\s*/, '');
-        const firstTag = Math.min(
-          s.indexOf('<style') >= 0 ? s.indexOf('<style') : Infinity,
-          s.indexOf('<div')   >= 0 ? s.indexOf('<div')   : Infinity,
-        );
-        if (firstTag > 0 && firstTag < Infinity) s = s.slice(firstTag);
-        s = s.replace(/\n?```\s*$/, '').trim();
-        return s;
-      };
+      // Full implementation (prompts, CSS, stream parsing, sanitization) now
+      // lives in services/reportHtml.service.ts. This wrapper keeps the two
+      // existing call sites untouched.
+      const runHtmlGeneration = (htmlInput: string) =>
+        runHtmlGenerationService({ userContent, contextString: htmlInput, queryType });
 
       // ── Emit HTML result to frontend + persist to DB ──
       const emitHtmlResult = async (htmlContent: string) => {
@@ -2745,32 +2957,47 @@ The HTML must:
       }
 
       const buildLocalSynthesisFallback = (cause: string): string => {
-        const compact = contextString
-          .replace(/\r/g, '')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
-        const preview = compact.length > 1400 ? `${compact.slice(0, 1400)}\n...(truncated)` : compact;
         const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+        // Count useful data fetched so the user knows their quota wasn't wasted,
+        // WITHOUT leaking the raw prompt / conversation history / raw post bodies.
+        const sourceCount = finalSocialSources?.length || 0;
+        // Short, human-readable upstream hint — avoid dumping HTML or stack traces.
+        const shortCause = (() => {
+          const raw = String(cause || '').trim();
+          if (/502\b|Bad Gateway/i.test(raw)) return isZh ? '上游网关暂时不可用 (502)' : 'upstream gateway unavailable (502)';
+          if (/504\b|Gateway Time-?out/i.test(raw)) return isZh ? '上游响应超时 (504)' : 'upstream timeout (504)';
+          if (/429\b|rate limit/i.test(raw)) return isZh ? '模型限流 (429)' : 'rate limited (429)';
+          if (/terminated|ECONNRESET|socket hang up/i.test(raw)) return isZh ? '连接中断' : 'connection dropped';
+          // Strip HTML tags and collapse whitespace so "terminated …<html>…502 Bad Gateway…" becomes readable.
+          return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120) || (isZh ? '未知错误' : 'unknown error');
+        })();
+
         if (isZh) {
           return [
-            '## 临时降级说明',
-            `最终合成阶段遇到上游模型错误（${cause}）。当前先返回降级摘要，避免你白等。`,
+            '## 合成失败',
+            '',
+            `刚才生成最终总结时模型返回错误（${shortCause}），已重试 2 次仍未成功。`,
+            sourceCount > 0
+              ? `本次搜索/抓取已成功获取 **${sourceCount}** 条数据（保留在上下文中）。`
+              : '',
             '',
             '### 建议',
-            '- 你可以直接回复“继续深度总结”，我会基于当前已抓取数据再次合成。',
-            '- 如果连续失败，建议稍后重试或切换模型。',
-            preview ? `\n### 已抓取数据摘要（截断）\n${preview}` : '',
-          ].join('\n');
+            '- 直接回复「**继续**」或「**重试总结**」即可基于已抓取数据再次合成，不需要重新搜索。',
+            '- 如连续失败，稍后重试或在输入栏左下切换模型。',
+          ].filter(Boolean).join('\n');
         }
         return [
-          '## Temporary Fallback',
-          `Final synthesis failed due to upstream model error (${cause}). Returning a degraded summary so the run does not fail silently.`,
+          '## Synthesis Failed',
+          '',
+          `The final summarizer returned an error (${shortCause}) after 2 retry attempts.`,
+          sourceCount > 0
+            ? `Search/fetch succeeded — **${sourceCount}** sources are preserved in context.`
+            : '',
           '',
           '### Next Step',
-          '- Reply with "continue synthesis" to retry based on fetched data.',
-          '- If this keeps failing, retry later or switch model/provider.',
-          preview ? `\n### Retrieved Context (truncated)\n${preview}` : '',
-        ].join('\n');
+          '- Reply **"continue"** or **"retry synthesis"** to re-run on the fetched data (no re-fetching needed).',
+          '- If this keeps failing, retry later or switch model from the input bar.',
+        ].filter(Boolean).join('\n');
       };
 
       const synthesizeFallbackContent = async (cause: string): Promise<string> => {
@@ -2827,61 +3054,80 @@ The HTML must:
         );
       };
       try {
-        console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
-        const synthesisStream = await aiService.chatStream(
-          [{ role: 'user', content: synthesizePrompt }],
-          'superagent',
-          undefined,
-          synthesisMaxTokens,
-          synthesisModelOverride,
-        );
-        console.log('[agent:chat] Synthesis stream obtained, reading...');
-        const synReader = synthesisStream.getReader();
-        const synDecoder = new TextDecoder();
+        // ──────────────────────────────────────────────────────────────────
+        // Phase 1 synthesis: turn raw tool output (contextString) into a
+        // polished markdown draft streamed to the user (Fast mode) or used
+        // as input to the consensus debate (legacy Roundtable).
+        //
+        // ⚡ Optimization (2026-04-23): in Roundtable mode we skip this LLM
+        // call entirely. The consensus debate + final Deep Research pass
+        // already consume the raw contextString — running a pre-synthesis
+        // burns 10-20s with no material quality gain. synFullContent stays
+        // as an empty string; downstream blocks treat that as "no draft".
+        // ──────────────────────────────────────────────────────────────────
         let synFullContent = '';
-        let synBuffer = '';
         let synthesisFirstTokenAt: number | null = null;
+        if (!isDeepResearch) {
+          console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
+          const synthesisStream = await aiService.chatStream(
+            [{ role: 'user', content: synthesizePrompt }],
+            'superagent',
+            undefined,
+            synthesisMaxTokens,
+            synthesisModelOverride,
+          );
+          console.log('[agent:chat] Synthesis stream obtained, reading...');
+          const synReader = synthesisStream.getReader();
+          const synDecoder = new TextDecoder();
+          let synBuffer = '';
 
-        while (true) {
-          const { done, value } = await synReader.read();
-          if (done || isAborted()) {
-            if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
-              try {
-                const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) {
-                  if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
-                  synFullContent += delta;
-                  if (!isDeepResearch) streamToChat(delta);
-                }
-              } catch (e) { }
+          while (true) {
+            const { done, value } = await synReader.read();
+            if (done || isAborted()) {
+              if (!isAborted() && synBuffer.trim().startsWith('data: ') && synBuffer.trim() !== 'data: [DONE]') {
+                try {
+                  const parsed = JSON.parse(synBuffer.trim().slice(6).trim());
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                    synFullContent += delta;
+                    streamToChat(delta);
+                  }
+                } catch (e) { }
+              }
+              break;
             }
-            break;
-          }
-          synBuffer += synDecoder.decode(value, { stream: true });
-          const lines = synBuffer.split('\n');
-          synBuffer = lines.pop() || '';
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('data: ')) {
-              const sseData = trimmed.slice(6).trim();
-              if (sseData === '[DONE]') continue;
-              try {
-                const parsed = JSON.parse(sseData);
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) {
-                  if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
-                  synFullContent += delta;
-                  if (!isDeepResearch) streamToChat(delta);
-                }
-              } catch (e) { }
+            synBuffer += synDecoder.decode(value, { stream: true });
+            const lines = synBuffer.split('\n');
+            synBuffer = lines.pop() || '';
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                const sseData = trimmed.slice(6).trim();
+                if (sseData === '[DONE]') continue;
+                try {
+                  const parsed = JSON.parse(sseData);
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                    synFullContent += delta;
+                    streamToChat(delta);
+                  }
+                } catch (e) { }
+              }
             }
           }
+        } else {
+          console.log(
+            `[agent:chat] Roundtable mode: skipping Phase 1 LLM synthesis (saves ~10-20s); ` +
+              `consensus + deep-research will consume raw contextString directly (${contextString.length} chars)`,
+          );
         }
 
         if (isAborted()) {
           console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
@@ -2928,19 +3174,136 @@ The HTML must:
             emitter.emitModule('consensus', 'active', { status: 'discussing', round: 1, maxRounds: 3 });
             // Detect language so experts respond consistently
             const isZhTask = /[\u4e00-\u9fff]/.test(userContent);
-            const langInstruction = isZhTask
-              ? '\n\n重要：你的所有分析和结论必须全部使用中文。不要评价报告本身的质量，而是对分析主题给出你自己的独立分析和判断。'
-              : '\n\nIMPORTANT: Provide your own independent analysis of the topic, NOT a review of the report quality. Respond entirely in English.';
-            const consensusTask = `You are a senior investment analyst. Based on the following research, provide your independent analysis and investment verdict on the topic: "${userContent}"
+            // Force ALL persona answers to English regardless of the user's
+            // question language. Mixed-language output (some personas Chinese,
+            // others English) was confusing in earlier tests, and personas'
+            // own system prompts are English-native (Buffett "owner-earnings",
+            // Burry "EV vs liquidation", etc.) so English is their natural
+            // mode. The final report synthesis (Claude Deep Research pass)
+            // will translate to the user's language if needed.
+            void isZhTask;  // detection still useful for downstream report
+            const langHeader =
+              '[LANGUAGE LOCK] Your entire answer MUST be in English. ' +
+              'This applies to every field: SIGNAL / CONFIDENCE / KEY_EVIDENCE / ' +
+              'RATIONALE / WOULD_CHANGE_MY_MIND. Keep tickers as-is. ' +
+              'Do not switch to Chinese or any other language at any point.\n\n';
+            const langFooter =
+              '\n\nReminder: respond entirely in English. Follow the system ' +
+              'prompt schema strictly.';
+            const consensusTask = `${langHeader}Question: "${userContent}"
 
-Focus on:
-1. Your directional view (bullish/bearish/neutral) with conviction level
-2. Key factors supporting your view
-3. Main risks to your thesis
-4. Specific price levels or targets if applicable
+Raw research context (from upstream tools — search / stock data / web3):
+${synFullContent || contextString}${langFooter}`;
+            // Pull analyst roster from frontend (Roundtable UI ≥5 selection).
+            const analystIdsRaw = Array.isArray(data.analystIds) && data.analystIds.length > 0
+              ? data.analystIds
+              : undefined;
+            // Stage 6 validation: strict reject if analystIds is present but
+            // invalid (<5, >max, missing system, unknown IDs). If analystIds
+            // is entirely absent → legacy fallback to 4 system (covers Auto
+            // mode routed to Roundtable where UI didn't build a roster).
+            let analystIds = analystIdsRaw;
+            if (analystIdsRaw) {
+              const v = validateAnalystSelection(analystIdsRaw);
+              if (!v.ok) {
+                console.warn(
+                  `[agent:chat] REJECT invalid analystIds (${v.error}) sessionId=${sessionId}`,
+                );
+                socket.emit('agent:chat:error', {
+                  sessionId,
+                  error: v.error ?? 'Invalid analyst selection',
+                  code: 'invalid_analyst_selection',
+                });
+                // Cleanup & short-circuit
+                activeChatSessions.delete(sessionId);
+                chatSessionStartTimes.delete(sessionId);
+                finishChatReplayBuffer(sessionId);
+                chatAbortControllers.delete(sessionId);
+                return;
+              }
+              analystIds = v.normalizedIds;
+            }
+            const effectiveRosterIds: string[] = analystIds ?? [...SYSTEM_ANALYST_IDS];
+            console.log(
+              `[agent:chat] roundtable consensus: analystIds=${effectiveRosterIds.join(',')} ` +
+                `task_len=${consensusTask.length}`,
+            );
 
-Research context:\n${synFullContent}${langInstruction}`;
-            const consensusResult = await runConsensusEngine(userId, 'roundtable', consensusTask);
+            // ▶ NEW EVENT: tell the frontend which analysts are in this run,
+            // with enough metadata to render the AgentRoom column without
+            // needing another round-trip to /api/analysts.
+            const rosterPayload: PublicAnalystPersona[] = effectiveRosterIds
+              .map((id) => {
+                const p = getAnalystById(id);
+                return p
+                  ? {
+                      id: p.id,
+                      displayName: p.displayName,
+                      role: p.role,
+                      initials: p.initials,
+                      color: p.color,
+                      category: p.category,
+                    }
+                  : null;
+              })
+              .filter((x): x is PublicAnalystPersona => x !== null);
+            socket.emit('agent:chat:analysts_selected', {
+              sessionId,
+              analysts: rosterPayload,
+            });
+
+            // Real-time live events: each persona's LLM completion is
+            // forwarded to the frontend Debate Tab the moment it arrives,
+            // not after the whole consensus finishes. Powered by aegean's
+            // /groups/:id/consensus/stream SSE endpoint added 2026-04-24.
+            // Track which (round, agentId) pairs we've already emitted so
+            // duplicate refinement events don't fan out twice.
+            const seenAgentRound = new Set<string>();
+            const consensusResult = await runConsensusEngine(
+              userId,
+              'roundtable',
+              consensusTask,
+              {
+                analystIds,
+                onLiveEvent: (evt) => {
+                  if (isAborted()) return;
+                  // Round transitions
+                  if (evt.type === 'round_started') {
+                    socket.emit('agent:chat:round_started', {
+                      sessionId,
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
+                    return;
+                  }
+                  if (evt.type === 'round_completed') {
+                    socket.emit('agent:chat:round_completed', {
+                      sessionId,
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
+                    return;
+                  }
+                  if (evt.type === 'agent_completed') {
+                    const key = `${evt.round_number}:${evt.agent_id}`;
+                    if (seenAgentRound.has(key)) return;
+                    seenAgentRound.add(key);
+                    const answer = evt.answer || '';
+                    socket.emit('agent:chat:agent_responded', {
+                      sessionId,
+                      analystId: evt.agent_id,
+                      round: evt.round_number,
+                      confidence: evt.confidence ?? 0,
+                      summary: answer.slice(0, 400),
+                      answer,
+                    });
+                    return;
+                  }
+                  // (We ignore consensus_started / leader_elected / agent_failed
+                  //  for now — frontend doesn't render them yet.)
+                },
+              },
+            );
             savedConsensusResult = consensusResult;
             
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
@@ -2948,11 +3311,26 @@ Research context:\n${synFullContent}${langInstruction}`;
             // Collect individual expert perspectives with structured debate context
             let expertDebateContext = '';
             const agentResponses = consensusResult.consensus?.agentResponses || [];
-            const nameMap: Record<string, string> = {
-              agent_0: 'Fundamental Analyst',
-              agent_1: 'Macro Strategist',
-              agent_2: 'Sentiment Engine',
-              agent_3: 'Quant Tracker',
+            // Resolve agent IDs to their real catalog names so the synthesis
+            // LLM cites "Warren Buffett / Fundamental Analyst" etc. instead of
+            // falling back to "Expert 1 / 专家1" generic placeholders. The prior
+            // nameMap only covered the 4 legacy IDs (agent_0..agent_3); every
+            // modern persona like fundamental_specialist / buffett_style /
+            // munger_style dropped through to the numeric fallback.
+            const isZhQuery = /[一-鿿]/.test(userContent || '');
+            const resolveAgentName = (agentId: string, idx: number): string => {
+              const persona = getAnalystById(agentId);
+              if (persona) {
+                return isZhQuery ? persona.displayName.zh : persona.displayName.en;
+              }
+              // Legacy aegean IDs that predate the catalog
+              const legacy: Record<string, string> = {
+                agent_0: 'Fundamental Analyst',
+                agent_1: 'Macro Strategist',
+                agent_2: 'Sentiment Engine',
+                agent_3: 'Quant Tracker',
+              };
+              return legacy[agentId] || `Expert ${idx + 1}`;
             };
             const roundsUsed = Number(consensusResult.consensus?.roundsUsed ?? 1) || 1;
             const consensusReached = consensusResult.consensus?.consensusReached !== false;
@@ -2962,15 +3340,30 @@ Research context:\n${synFullContent}${langInstruction}`;
               emitter.emitModule('consensus', 'active', { status: 'discussing', round: r, maxRounds: 3 });
             }
 
+            // (Per-agent reveals are now emitted live via onLiveEvent above —
+            // we no longer post-fan-out from the synchronous result, since
+            // that lost per-round identity and caused the "all rounds
+            // identical" bug. The streaming SSE fires one event per real
+            // LLM completion, so the Debate Tab updates as agents finish.)
+
             if (agentResponses.length > 0) {
               expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
               expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
               expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
               expertDebateContext += `Consensus confidence: ${Math.round(Number(consensusResult.consensus?.confidence ?? 0) * 100)}%\n\n`;
               expertDebateContext += `Final Consensus Verdict:\n${finalAnswerText}\n\n`;
+              // IMPORTANT naming rule — each position below is labelled with a
+              // specific analyst name (e.g. "Warren Buffett", "Fundamental
+              // Analyst"). The report MUST cite these exact names when
+              // referencing a position. Do NOT replace them with generic
+              // placeholders like "Expert 1 / 专家1 / Analyst A" — the reader
+              // picked these personas and needs to see them by name.
+              expertDebateContext += isZhQuery
+                ? `【命名规则】下方每一位专家的名字都必须在正文中原样引用(如"沃伦·巴菲特视角认为…"),禁止替换成"专家1/专家2"等匿名编号。\n\n`
+                : `[NAMING RULE] Each position below is labelled with a specific analyst name. Your report MUST reference them by these exact names when attributing views (e.g. "Warren Buffett's lens argues…"). Do NOT substitute with "Expert 1 / Analyst A / 专家1" or any numeric placeholder.\n\n`;
               expertDebateContext += `Individual Expert Positions:\n`;
               agentResponses.forEach((resp: any, idx: number) => {
-                const name = nameMap[resp.agentId] || `Expert ${idx + 1}`;
+                const name = resolveAgentName(resp.agentId, idx);
                 const conf = Math.round((resp.confidence || 0) * 100);
                 expertDebateContext += `--- ${name} (${conf}% confidence) ---\n${resp.answer}\n\n`;
               });
@@ -2999,9 +3392,17 @@ Research context:\n${synFullContent}${langInstruction}`;
               result: consensusResult
             });
 
-            // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate
-            emitter.emitModule('consensus', 'active', { status: 'synthesizing', round: roundsUsed + 1, maxRounds: 3 });
-            const deepResearchInput = `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`;
+            // Phase 3: Deep Research synthesis — integrate raw data + initial draft + expert debate.
+            // IMPORTANT: do NOT emit 'consensus active' here — that would overwrite the just-emitted
+            // 'consensus completed' state with status='synthesizing', causing the right-side Process
+            // panel's ConsensusModule to revert to "Building consensus group" (step 0) for the entire
+            // 100s+ Claude streaming phase. Consensus IS done; the next phase is report-writing.
+            emitter.emitModule('report', 'active', { phase: 'deep_research_synthesis' });
+            // In Roundtable mode synFullContent is empty (Phase 1 skipped),
+            // so fold the "Initial Analysis Draft" section only when it exists.
+            const deepResearchInput = synFullContent
+              ? `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`
+              : `Raw Research Data:\n${contextString}${expertDebateContext}`;
             const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
 
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
@@ -3086,27 +3487,35 @@ Research context:\n${synFullContent}${langInstruction}`;
         const dur = Math.max(0, Math.round((Date.now() - startTime) / 1000));
         flowModules.push({ type: 'done', status: 'completed', data: { duration: dur } });
 
-        await prisma.chatMessage.create({
-          data: {
-            userId,
-            sessionId,
-            role: 'assistant',
-            content: finalDbContent,
-            agentId: 'superagent',
-            metadata: JSON.stringify({
-              thinkingFlow: {
-                modules: flowModules,
-                isActive: false,
-                route: 'Super Agent Orchestrator',
-                ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
-              },
-              consensusResult: savedConsensusResult ?? undefined,
-              quoteCard: savedQuoteCard ?? undefined,
-              xProfileCard: savedXProfileCard ?? undefined,
-              sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
-            })
-          }
-        });
+        if (!isGuest) {
+          await prisma.chatMessage.create({
+            data: {
+              userId,
+              sessionId,
+              role: 'assistant',
+              content: finalDbContent,
+              agentId: 'superagent',
+              metadata: JSON.stringify({
+                thinkingFlow: {
+                  modules: flowModules,
+                  isActive: false,
+                  route: 'Super Agent Orchestrator',
+                  ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
+                },
+                consensusResult: savedConsensusResult ?? undefined,
+                // Persist the roster separately from consensusResult so the
+                // session history page can replay AgentRoom / Debate Tab
+                // without re-parsing consensusResult.agentResponses.
+                ...(isDeepResearch && data.analystIds?.length
+                  ? { analystIds: data.analystIds }
+                  : {}),
+                quoteCard: savedQuoteCard ?? undefined,
+                xProfileCard: savedXProfileCard ?? undefined,
+                sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
+              })
+            }
+          });
+        }
         logSynthesisFinalText('primary', finalDbContent);
 
         emitter.emitModule('done', 'completed', { duration: dur });
@@ -3170,6 +3579,7 @@ Research context:\n${synFullContent}${langInstruction}`;
         if (isAborted()) {
           console.log(`[agent:chat] Aborted during synthesis error handling for session ${sessionId}`);
           activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
           chatAbortControllers.delete(sessionId);
           return;
@@ -3189,26 +3599,28 @@ Research context:\n${synFullContent}${langInstruction}`;
           data: { duration: dur, degraded: true, cause: 'synthesis_error' },
         });
 
-        await prisma.chatMessage.create({
-          data: {
-            userId,
-            sessionId,
-            role: 'assistant',
-            content: fallbackContent,
-            agentId: 'superagent',
-            metadata: JSON.stringify({
-              thinkingFlow: {
-                modules: fallbackModules,
-                isActive: false,
-                route: 'Super Agent Orchestrator',
-              },
-              quoteCard: savedQuoteCard ?? undefined,
-              xProfileCard: savedXProfileCard ?? undefined,
-              degraded: true,
-              degradedReason: errMsg,
-            }),
-          },
-        });
+        if (!isGuest) {
+          await prisma.chatMessage.create({
+            data: {
+              userId,
+              sessionId,
+              role: 'assistant',
+              content: fallbackContent,
+              agentId: 'superagent',
+              metadata: JSON.stringify({
+                thinkingFlow: {
+                  modules: fallbackModules,
+                  isActive: false,
+                  route: 'Super Agent Orchestrator',
+                },
+                quoteCard: savedQuoteCard ?? undefined,
+                xProfileCard: savedXProfileCard ?? undefined,
+                degraded: true,
+                degradedReason: errMsg,
+              }),
+            },
+          });
+        }
         logSynthesisFinalText('fallback', fallbackContent);
 
         streamToChat(fallbackContent);
@@ -3227,11 +3639,15 @@ Research context:\n${synFullContent}${langInstruction}`;
         );
       }
       activeChatSessions.delete(sessionId);
+        chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
       chatAbortControllers.delete(sessionId);
     });
     socket.on('disconnect', () => {
-      console.log(`🔌 Client disconnected: ${socket.id}`);
+      if (process.env.SOCKET_VERBOSE_LOG === '1') {
+        console.log(`🔌 Client disconnected: ${socket.id}`);
+      }
+      socketRateLimiter.delete(socket.id);
 
       // Check if user has other active sockets before marking offline
       const rooms = io.sockets.adapter.rooms.get(`user:${userId}`);

@@ -95,9 +95,8 @@ const AnimStyles = () => (
 
     /* ── Quick action pills ── */
     .qa-pill {
-      transition: transform 0.15s var(--ease-out-quart), border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+      transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
     }
-    .qa-pill:hover { transform: translateY(-1px); }
     .qa-pill:active { transform: scale(0.96); transition-duration: 0.08s; }
 
     /* ── Scenario pills ── */
@@ -130,7 +129,7 @@ const AnimStyles = () => (
     /* ── Hero zone with dot grid ── */
     .hero-zone {
       position: relative;
-      background-color: #fff;
+      background-color: transparent;
       background-image: radial-gradient(circle, rgba(26,111,255,0.09) 1px, transparent 1px);
       background-size: 32px 32px;
     }
@@ -183,12 +182,35 @@ const AnimStyles = () => (
       z-index: 1;
     }
 
-    /* ── Thinking ticker ── */
-    @keyframes ticker-in {
-      from { opacity: 0; transform: translateY(5px); }
+    /* ── Thinking ticker: slide-up + fade-in each time a new item appears ── */
+    @keyframes ticker-slide-in {
+      from { opacity: 0; transform: translateY(7px); }
       to   { opacity: 1; transform: translateY(0); }
     }
-    .ticker-in { animation: ticker-in 0.22s ease-out both; }
+    .ticker-in {
+      animation: ticker-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    /* ── Stepper: connector flow (prev done → current active) ── */
+    @keyframes stepper-connector-flow {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(200%); }
+    }
+    /* ── Stepper: check mark draw-in ── */
+    @keyframes stepper-check-draw {
+      0%   { stroke-dashoffset: 24; }
+      100% { stroke-dashoffset: 0; }
+    }
+    /* ── Stepper: active ring pulse ── */
+    @keyframes stepper-active-ring {
+      0%   { transform: scale(0.6); opacity: 0.8; }
+      70%  { transform: scale(1.25); opacity: 0; }
+      100% { transform: scale(1.25); opacity: 0; }
+    }
+    /* ── Stepper: spinner rotation ── */
+    @keyframes stepper-spin {
+      to { transform: rotate(360deg); }
+    }
 
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {

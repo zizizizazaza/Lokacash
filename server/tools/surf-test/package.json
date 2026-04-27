@@ -1,0 +1,15 @@
+{
+  "name": "surf-test-rig",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local test bed for evaluating asksurf.ai Data API endpoints before integrating into lokacash.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.0.0",
+    "express": "^5.0.0"
+  }
+}

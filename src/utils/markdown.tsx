@@ -235,9 +235,6 @@ export function OkxQuoteDerivatives({ okx, lang = 'zh' }: { okx: QuoteOkxSnapsho
     <>
       <div className="mx-5 h-px bg-gradient-to-r from-transparent via-amber-200/60 to-transparent" />
       <div className="px-5 py-3.5 space-y-2.5">
-        {okx.swapInstId && (
-          <div className="text-[9px] text-gray-400 font-mono">{okx.swapInstId}</div>
-        )}
         {derivStats.length > 0 && (
           <div className="grid grid-cols-3 gap-x-4 gap-y-3">
             {derivStats.map((s, si) => (
@@ -289,6 +286,11 @@ interface QuoteData {
   pb?: string;
   turnover?: string;
   asOf?: string;
+  // Crypto-specific fields populated from the LLM's structured asset block.
+  ath?: string;               // All-time high
+  supplyCirculating?: string; // Circulating supply
+  supplyTotal?: string;       // Total / max supply
+  fundingRate?: string;       // Perp funding rate string (fallback when live derivatives data absent)
 }
 
 /**
@@ -318,13 +320,74 @@ export function extractQuoteSnapshot(content: string): { quote: QuoteData | null
   const symbol = data['symbol'] || data['证券代码'] || data['代码'] || '';
   if (!symbol) return { quote: null, body: content };
 
+  // "24h H/L" style combined value, e.g. "$1.75 / $1.21" — split into high/low.
+  const rangeCombined = data['24小时最高/最低'] || data['24h high/low'] || data['24h h/l'] || '';
+  let rangeHigh: string | undefined;
+  let rangeLow: string | undefined;
+  if (rangeCombined) {
+    const parts = rangeCombined.split(/\s*\/\s*/);
+    if (parts.length === 2) {
+      rangeHigh = parts[0].trim();
+      rangeLow = parts[1].trim();
+    }
+  }
+
+  // "Circulating / Total supply" combined value, e.g. "2.48亿 / 总供应量10亿 RAVE"
+  const supplyCombined = data['流通供应量'] || data['circulating supply'] || data['circ supply'] || '';
+  let supplyCirc: string | undefined;
+  let supplyTot: string | undefined = data['总供应量'] || data['total supply'] || data['max supply'] || undefined;
+  if (supplyCombined) {
+    const m = supplyCombined.match(/^(.+?)\s*\/\s*(?:总供应量|total supply|max supply)[:：]?\s*(.+?)$/i);
+    if (m) {
+      supplyCirc = m[1].trim();
+      supplyTot = supplyTot || m[2].trim();
+    } else {
+      supplyCirc = supplyCombined;
+    }
+  }
+
+  // Guard against LLM hallucinating a descriptive sentence in place of a
+  // numeric price (e.g. "68亿-290亿总市值区间(3月26日报214元…)"). A real
+  // price string is at most ~15 chars — anything longer than 20 or packed
+  // with Chinese connector words is definitely not a price. Rejecting it
+  // here prevents the QuoteCard's shrink-0 price column from blowing out
+  // the header and squashing the company name into a vertical strip.
+  const looksLikePrice = (v?: string) => {
+    if (!v) return false;
+    const t = v.trim();
+    if (t.length > 20) return false;
+    // Must contain at least one digit
+    if (!/\d/.test(t)) return false;
+    // Reject if it contains obvious descriptive markers
+    if (/[区间到至报价涨停跌停日月]/.test(t)) return false;
+    return true;
+  };
+
+  const rawPrice = data['last price'] || data['last'] || data['最新价'] || data['现价'] || undefined;
+
   const quote: QuoteData = {
     symbol,
-    name: data['name'] || data['股票名称'] || data['名称'] || undefined,
+    name: data['name'] || data['股票名称'] || data['项目名称'] || data['名称'] || undefined,
     market: data['market'] || data['所属市场'] || data['市场'] || data['交易所'] || undefined,
-    price: data['last price'] || data['last'] || data['最新价'] || data['现价'] || undefined,
-    change: data['change (%)'] || data['change'] || data['chg%'] || data['涨跌幅'] || data['涨跌'] || undefined,
-    volume: data['volume'] || data['成交量'] || data['成交额'] || undefined,
+    price: looksLikePrice(rawPrice) ? rawPrice : undefined,
+    change:
+      data['change (%)'] || data['change'] || data['chg%'] ||
+      data['24小时涨跌幅'] || data['24h change (%)'] || data['24h change'] ||
+      data['涨跌幅'] || data['涨跌'] || undefined,
+    volume:
+      data['volume'] || data['成交量'] || data['成交额'] ||
+      data['24小时交易量'] || data['24h volume'] || data['24h vol'] || undefined,
+    high: data['high'] || data['最高'] || data['24h high'] || data['24小时最高'] || rangeHigh,
+    low: data['low'] || data['最低'] || data['24h low'] || data['24小时最低'] || rangeLow,
+    marketCap: data['market cap'] || data['mkt cap'] || data['市值'] || undefined,
+    ath:
+      data['ath'] || data['all-time high'] || data['历史最高价(ath)'] ||
+      data['历史最高价'] || data['历史最高'] || data['历史最高价(ath)'] || undefined,
+    supplyCirculating: supplyCirc,
+    supplyTotal: supplyTot,
+    fundingRate:
+      data['永续合约资金费率'] || data['资金费率'] ||
+      data['funding rate'] || data['funding'] || undefined,
     asOf: data['as of'] || data['数据时点'] || data['报价时间'] || data['交易日'] || undefined,
   };
 
@@ -345,8 +408,18 @@ export function extractQuoteSnapshot(content: string): { quote: QuoteData | null
 
 /** Bilingual label map keyed by lang */
 const LABELS: Record<string, Record<string, string>> = {
-  zh: { open: '开盘', prevClose: '昨收', high: '最高', low: '最低', volume: '成交量', amount: '成交额', marketCap: '市值', pe: 'PE', pb: 'PB', turnover: '换手率' },
-  en: { open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low', volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap', pe: 'PE', pb: 'PB', turnover: 'Turnover' },
+  zh: {
+    open: '开盘', prevClose: '昨收', high: '最高', low: '最低',
+    volume: '成交量', amount: '成交额', marketCap: '市值',
+    pe: 'PE', pb: 'PB', turnover: '换手率',
+    ath: '历史高点', supplyCirculating: '流通量', supplyTotal: '总供应', fundingRate: '资金费率',
+  },
+  en: {
+    open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low',
+    volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap',
+    pe: 'PE', pb: 'PB', turnover: 'Turnover',
+    ath: 'ATH', supplyCirculating: 'Circ Supply', supplyTotal: 'Total Supply', fundingRate: 'Funding',
+  },
 };
 
 /** Market badge style map (supports both zh & en market labels) */
@@ -389,37 +462,43 @@ export function QuoteCard({
   // Helper: check if a value is meaningful (not N/A, empty, zero-ish)
   const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
 
-  // Build stats array with localized labels, skipping empty/N/A
+  // Build stats array with localized labels, skipping empty/N/A.
+  // Order: 24h price band → supply/market cap → stock-style metrics → crypto funding.
   const stats: { label: string; value: string }[] = [];
-  if (ok(quote.open)) stats.push({ label: L.open, value: quote.open! });
-  if (ok(quote.prevClose)) stats.push({ label: L.prevClose, value: quote.prevClose! });
   if (ok(quote.high)) stats.push({ label: L.high, value: quote.high! });
   if (ok(quote.low)) stats.push({ label: L.low, value: quote.low! });
-  if (ok(quote.volume)) stats.push({ label: L.volume, value: quote.volume! });
-  if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
+  if (ok(quote.ath)) stats.push({ label: L.ath, value: quote.ath! });
   if (ok(quote.marketCap)) stats.push({ label: L.marketCap, value: quote.marketCap! });
+  if (ok(quote.volume)) stats.push({ label: L.volume, value: quote.volume! });
+  if (ok(quote.supplyCirculating)) stats.push({ label: L.supplyCirculating, value: quote.supplyCirculating! });
+  if (ok(quote.supplyTotal)) stats.push({ label: L.supplyTotal, value: quote.supplyTotal! });
+  if (ok(quote.open)) stats.push({ label: L.open, value: quote.open! });
+  if (ok(quote.prevClose)) stats.push({ label: L.prevClose, value: quote.prevClose! });
+  if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
   if (ok(quote.pe)) stats.push({ label: L.pe, value: quote.pe! });
   if (ok(quote.pb)) stats.push({ label: L.pb, value: quote.pb! });
   if (ok(quote.turnover)) stats.push({ label: L.turnover, value: quote.turnover! });
+  // Funding rate only when no live derivatives snapshot is available (avoid duplication).
+  if (!okxSnap && ok(quote.fundingRate)) stats.push({ label: L.fundingRate, value: quote.fundingRate! });
 
   return (
     <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
       {/* Header */}
       <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2.5">
-            <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{quote.symbol}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none truncate">{quote.symbol}</span>
             {quote.market && (
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase`}>{quote.market}</span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase shrink-0`}>{quote.market}</span>
             )}
           </div>
-          {quote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide">{quote.name}</p>}
+          {quote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide truncate">{quote.name}</p>}
         </div>
         {ok(quote.price) && (
-          <div className="text-right shrink-0 flex flex-col items-end">
-            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{quote.price}</p>
+          <div className="text-right flex flex-col items-end min-w-0 max-w-[45%]">
+            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight truncate max-w-full">{quote.price}</p>
             {ok(quote.change) && (
-              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${changeBg} ${changeColor} tabular-nums`}>
+              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${changeBg} ${changeColor} tabular-nums truncate max-w-full`}>
                 {isPositive && <span className="mr-0.5">▲</span>}
                 {isNegative && <span className="mr-0.5">▼</span>}
                 {quote.change}
@@ -579,7 +658,6 @@ function InlineCitation({
       <span className="truncate max-w-[8rem]">{show}</span>
       {/* Rich hover tooltip — right-aligned so it never clips at right edge */}
       <span className="pointer-events-none absolute bottom-full right-0 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
-        {/* Row 1: favicon + domain */}
         <span className="flex items-center gap-1.5">
           <img
             src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
@@ -589,11 +667,9 @@ function InlineCitation({
           />
           <span className="text-[10px] text-gray-400 truncate">{domain}</span>
         </span>
-        {/* Row 2: title */}
         <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
           {titleText}
         </span>
-        {/* Row 3: snippet */}
         {snippetText && (
           <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
             {snippetText}
@@ -606,8 +682,8 @@ function InlineCitation({
 }
 
 /**
- * Strips [label](url) citation links from text, keeping the label as plain text.
- * Returns cleaned text + ordered list of citations for rendering as trailing badges.
+ * Strips [label](url) citation links from text, keeping just the trailing citations list.
+ * Returns cleaned text (with in-place citations removed) + ordered list for trailing badges.
  */
 function extractTrailingCitations(text: string): { cleanText: string; citations: Array<{ label: string; url: string }> } {
   const citations: Array<{ label: string; url: string }> = [];
@@ -616,11 +692,11 @@ function extractTrailingCitations(text: string): { cleanText: string; citations:
       const url = rawUrl.trim();
       if (safeHttpUrl(url)) {
         citations.push({ label: label.trim() || urlChipLabel(url), url });
-        return ''; // remove entirely — badge appears at end, no inline duplication
+        return '';
       }
       return match;
     })
-    .replace(/\s{2,}/g, ' ') // collapse double spaces left by removal
+    .replace(/\s{2,}/g, ' ')
     .trim();
   return { cleanText, citations };
 }
@@ -637,6 +713,11 @@ function parseLineWithEndCitations(text: string): React.ReactNode {
       ))}
     </>
   );
+}
+
+/** Strip inline citation links `[label](http…)` from heading text for slug/TOC use. */
+function stripCitationsFromHeading(text: string): string {
+  return text.replace(/\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g, (_match, label) => label).replace(/\s{2,}/g, ' ').trim();
 }
 
 /**
@@ -768,17 +849,12 @@ function headingSlug(text: string): string {
   return text.replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'h';
 }
 
-/** Strip inline citation links `[label](http…)` from heading text, keeping just the label. */
-function stripCitationsFromHeading(text: string): string {
-  return text.replace(/\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g, (_match, label) => label).replace(/\s{2,}/g, ' ').trim();
-}
-
 export function extractHeadings(text: string, msgIdx?: number): { level: number; text: string; id: string }[] {
   if (!text) return [];
   const prefix = msgIdx != null ? `m${msgIdx}-` : '';
   const headings: { level: number; text: string; id: string }[] = [];
+  const cleanH = (s: string) => stripCitationsFromHeading(s.replace(/\*\*/g, ''));
   for (const line of text.split('\n')) {
-    const cleanH = (s: string) => stripCitationsFromHeading(s.replace(/\*\*/g, ''));
     const m3 = line.match(/^###\s+(.+)/);
     if (m3) { const t = cleanH(m3[1]); headings.push({ level: 3, text: t, id: prefix + headingSlug(t) }); continue; }
     const m2 = line.match(/^##\s+(.+)/);
@@ -817,6 +893,25 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
   const elements: React.ReactNode[] = [];
   let i = 0;
 
+  // Look ahead from `idx` and return all consecutive citation-only lines (joined
+  // by spaces) plus the new cursor position. Blank lines between citation lines
+  // are skipped so that paragraph/heading + citation chip stays inline.
+  const consumeTrailingCitations = (startIdx: number): { text: string; newIdx: number } => {
+    let text = '';
+    let j = startIdx;
+    while (j < lines.length) {
+      let k = j;
+      while (k < lines.length && lines[k].trim() === '') k++;
+      if (k < lines.length && CITATION_ONLY_LINE.test(lines[k])) {
+        text += (text ? ' ' : '') + lines[k].trim();
+        j = k + 1;
+      } else {
+        break;
+      }
+    }
+    return { text, newIdx: j };
+  };
+
   while (i < lines.length) {
     const line = lines[i];
     if (/^---+$/.test(line.trim())) {
@@ -826,35 +921,41 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
     }
     if (/^#{3}\s/.test(line)) {
       const hText = line.replace(/^#{3}\s/, '');
-      const slug = headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
+      const slugId = prefix + headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
+      const cit = consumeTrailingCitations(i + 1);
+      const display = cit.text ? hText + ' ' + cit.text : hText;
       elements.push(
-        <h3 key={i} id={prefix + slug} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
-          {parseLineWithEndCitations(hText)}
+        <h3 key={i} id={slugId} className="text-[15.5px] font-bold text-gray-900 mt-6 mb-2 tracking-tight">
+          {parseLineWithEndCitations(display)}
         </h3>,
       );
-      i++;
+      i = cit.newIdx;
       continue;
     }
     if (/^#{2}\s/.test(line)) {
       const hText = line.replace(/^#{2}\s/, '');
-      const slug = headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
+      const slugId = prefix + headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
+      const cit = consumeTrailingCitations(i + 1);
+      const display = cit.text ? hText + ' ' + cit.text : hText;
       elements.push(
-        <h2 key={i} id={prefix + slug} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
-          {parseLineWithEndCitations(hText)}
+        <h2 key={i} id={slugId} className="text-[17px] font-bold text-gray-900 mt-7 mb-2.5 tracking-tight">
+          {parseLineWithEndCitations(display)}
         </h2>,
       );
-      i++;
+      i = cit.newIdx;
       continue;
     }
     if (/^#\s/.test(line) && !line.startsWith('##')) {
       const hText = line.replace(/^#\s/, '');
-      const slug = headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
+      const slugId = prefix + headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));
+      const cit = consumeTrailingCitations(i + 1);
+      const display = cit.text ? hText + ' ' + cit.text : hText;
       elements.push(
-        <h1 key={i} id={prefix + slug} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
-          {parseLineWithEndCitations(hText)}
+        <h1 key={i} id={slugId} className="text-[19px] font-bold text-gray-900 mt-8 mb-3 tracking-tight">
+          {parseLineWithEndCitations(display)}
         </h1>,
       );
-      i++;
+      i = cit.newIdx;
       continue;
     }
 
@@ -888,6 +989,10 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
         items.push(lines[i].replace(/^\s*\d+\.\s/, ''));
         i++;
       }
+      const cit = consumeTrailingCitations(i);
+      if (cit.text && items.length > 0) {
+        items[items.length - 1] = items[items.length - 1] + ' ' + cit.text;
+      }
       elements.push(
         <ol
           key={`ol-${i}`}
@@ -901,6 +1006,7 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
           ))}
         </ol>,
       );
+      i = cit.newIdx;
       continue;
     }
 
@@ -909,6 +1015,10 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       while (i < lines.length && /^\s*[-*]\s/.test(lines[i])) {
         items.push(lines[i].replace(/^\s*[-*]\s/, ''));
         i++;
+      }
+      const cit = consumeTrailingCitations(i);
+      if (cit.text && items.length > 0) {
+        items[items.length - 1] = items[items.length - 1] + ' ' + cit.text;
       }
       elements.push(
         <ul key={`ul-${i}`} className="list-disc list-outside ml-5 my-3.5 space-y-2.5 marker:text-indigo-300">
@@ -919,6 +1029,7 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
           ))}
         </ul>,
       );
+      i = cit.newIdx;
       continue;
     }
 
@@ -947,43 +1058,60 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       }
       const bodyRows = tableRows.slice(bodyStart).map(parseRow);
 
+      const cit = consumeTrailingCitations(i);
+      const colCount = Math.max(headerCells.length, ...bodyRows.map(r => r.length));
+
       elements.push(
-        <div key={`tbl-${i}`} className="my-4 overflow-visible">
-          <div className="overflow-x-auto [overflow-y:clip] rounded-lg border border-gray-200">
-            <table className="w-full text-[13.5px] text-left">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  {headerCells.map((cell, ci) => (
-                    <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+        <div key={`tbl-${i}`} className="my-4 overflow-x-auto rounded-lg border border-gray-200">
+          <table className="w-full text-[13.5px] text-left">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {headerCells.map((cell, ci) => (
+                  <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+                    {parseLine(cell)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {bodyRows.map((cells, ri) => (
+                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                  {cells.map((cell, ci) => (
+                    <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
                       {parseLine(cell)}
-                    </th>
+                    </td>
                   ))}
                 </tr>
-              </thead>
-              <tbody>
-                {bodyRows.map((cells, ri) => (
-                  <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                    {cells.map((cell, ci) => (
-                      <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
-                        {parseLine(cell)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              ))}
+              {cit.text && (
+                <tr className="bg-gray-50/70">
+                  <td colSpan={colCount} className="px-3 py-1.5 text-right border-t border-gray-100">
+                    {parseLine(cit.text)}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>,
       );
+      i = cit.newIdx;
       continue;
     }
 
+    // Merge any following citation-only lines (e.g. "[A](url) [B](url)") into
+    // this paragraph so source chips stay inline at the sentence end instead of
+    // wrapping onto their own line; `parseLineWithEndCitations` then also moves
+    // any in-line `[label](url)` to the end as trailing badges (no dup label).
+    const cit = consumeTrailingCitations(i + 1);
+    const paragraphText = cit.text ? line + ' ' + cit.text : line;
     elements.push(
       <p key={i} className="text-[14.5px] text-gray-700 leading-[1.75] break-words [&_strong]:font-semibold [&_strong]:text-gray-900">
-        {parseLineWithEndCitations(line)}
+        {parseLineWithEndCitations(paragraphText)}
       </p>,
     );
-    i++;
+    i = cit.newIdx;
   }
   return elements;
 }
+
+const CITATION_ONLY_LINE = /^\s*(?:\[[^\]]*\]\(https?:\/\/[^)]+\)|\(https?:\/\/[^)]+\)|https?:\/\/\S+)(?:\s+(?:\[[^\]]*\]\(https?:\/\/[^)]+\)|\(https?:\/\/[^)]+\)|https?:\/\/\S+))*\s*$/;

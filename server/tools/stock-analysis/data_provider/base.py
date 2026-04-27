@@ -15,9 +15,16 @@
 """
 
 import logging
+import os
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+    wait as futures_wait,
+    FIRST_COMPLETED,
+    TimeoutError as FuturesTimeout,
+)
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -814,6 +821,7 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        from .fmp_fetcher import FmpFetcher
         config = get_config()
         enable_tushare_fetcher = bool(getattr(config, "enable_tushare_fetcher", True))
         enable_pytdx_fetcher = bool(getattr(config, "enable_pytdx_fetcher", True))
@@ -825,6 +833,7 @@ class DataFetcherManager:
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
         longbridge = LongbridgeFetcher()  # 长桥（美股/港股兜底，懒加载）
+        fmp = FmpFetcher()  # FMP（美股日线/实时报价主源，需要 FMP_API_KEY；未配置时路由层会自动回退）
 
         # 初始化数据源列表
         self._ensure_concurrency_guards()
@@ -836,6 +845,10 @@ class DataFetcherManager:
                 yfinance,
                 longbridge,
             ]
+            if fmp.is_configured():
+                self._fetchers.append(fmp)
+            else:
+                logger.info("FmpFetcher disabled (FMP_API_KEY not set)")
             if tushare is not None:
                 self._fetchers.append(tushare)
             else:
@@ -851,6 +864,24 @@ class DataFetcherManager:
         # 构建优先级说明
         priority_info = ", ".join([f"{f.name}(P{f.priority})" for f in self._get_fetchers_snapshot()])
         logger.info(f"已初始化 {len(self._fetchers)} 个数据源（按优先级）: {priority_info}")
+
+        # 额外打一条"数据源能力清单"，标注每个源的 key/凭据状态
+        # 让启动时就能看清哪些源理论上可用 —— 比如 FMP 没 key、Longbridge 没凭据
+        status_parts = []
+        for f in self._get_fetchers_snapshot():
+            n = f.name
+            if n == "FmpFetcher":
+                ok = bool(getattr(f, "is_configured", lambda: False)())
+                status_parts.append(f"{n}={'配置' if ok else '缺API_KEY'}")
+            elif n == "TushareFetcher":
+                has_token = bool((os.getenv("TUSHARE_TOKEN") or "").strip())
+                status_parts.append(f"{n}={'配置' if has_token else '缺TOKEN'}")
+            elif n == "LongbridgeFetcher":
+                available, reason = self._longbridge_status()
+                status_parts.append(f"{n}={'可用' if available else f'不可用({reason})'}")
+            else:
+                status_parts.append(f"{n}=免费")
+        logger.info(f"[数据源能力] {' | '.join(status_parts)}")
     
     def add_fetcher(self, fetcher: BaseFetcher) -> None:
         """添加数据源并重新排序"""
@@ -910,10 +941,12 @@ class DataFetcherManager:
         # - 港股：Longbridge/AkShare（Longbridge 固定优先）
         # - 其他：并行全部候选源
         if is_us:
+            # 美股个股：FMP（若配置）为首选，YFinance 次选，Longbridge 兜底
+            # 美股指数：FMP Starter 档不支持指数，保持 YFinance 首选
             source_order = (
                 ["YfinanceFetcher", "LongbridgeFetcher"]
                 if is_us_index
-                else ["LongbridgeFetcher", "YfinanceFetcher"]
+                else ["FmpFetcher", "YfinanceFetcher", "LongbridgeFetcher"]
             )
             market_label = "美股指数" if is_us_index else "美股"
             candidate_fetchers: List[BaseFetcher] = []
@@ -1140,8 +1173,12 @@ class DataFetcherManager:
             return None
 
         def _fetch_quote_by_source(source_name: str):
-            """Fetch one realtime source result (best-effort, no raise)."""
+            """Fetch one realtime source result (best-effort, no raise).
+
+            Returns (quote, error, elapsed_seconds).
+            """
             source = (source_name or "").strip().lower()
+            _probe_t0 = time.time()
             try:
                 quote = None
                 if source == "efinance":
@@ -1175,11 +1212,12 @@ class DataFetcherManager:
                                 quote = self._call_fetcher_method(fetcher, "get_realtime_quote", raw_stock_code or stock_code)
                             break
 
+                elapsed = time.time() - _probe_t0
                 if quote is not None and quote.has_basic_data():
-                    return quote, None
-                return None, None
+                    return quote, None, elapsed
+                return None, None, elapsed
             except Exception as e:
-                return None, f"[{source}] 失败: {str(e)}"
+                return None, f"[{source}] 失败: {str(e)}", time.time() - _probe_t0
 
         # ----------------------------------------------------------
         # 美股 (指数 + 个股) / 港股 — 专用双源路由
@@ -1193,8 +1231,22 @@ class DataFetcherManager:
 
         if is_us or is_hk:
             if is_us:
-                primary_src = "YfinanceFetcher" if is_us_index else "LongbridgeFetcher"
-                secondary_src = "LongbridgeFetcher" if is_us_index else "YfinanceFetcher"
+                # 美股个股：FMP（若配置并可用）优先，否则回退到 YFinance/Longbridge。
+                # 美股指数：FMP Starter 档不支持，保持 YFinance 首选。
+                if is_us_index:
+                    primary_src = "YfinanceFetcher"
+                    secondary_src = "LongbridgeFetcher"
+                else:
+                    fmp_ok = any(
+                        f.name == "FmpFetcher" and getattr(f, "is_configured", lambda: False)()
+                        for f in self._get_fetchers_snapshot()
+                    )
+                    if fmp_ok:
+                        primary_src = "FmpFetcher"
+                        secondary_src = "YfinanceFetcher"
+                    else:
+                        primary_src = "LongbridgeFetcher"
+                        secondary_src = "YfinanceFetcher"
                 market_label = "美股指数" if is_us_index else "美股"
                 primary_kw: dict = {}
                 secondary_kw: dict = {}
@@ -1209,90 +1261,216 @@ class DataFetcherManager:
                 f"lb_available={lb_available} lb_reason={lb_reason} primary={primary_src} secondary={secondary_src}"
             )
 
-            # 双源并发获取，再按 primary/secondary 语义组合结果
-            def _fetch_named(name: str, kwargs: dict):
-                try:
-                    return name, self._try_fetcher_quote(stock_code, name, **kwargs), None
-                except Exception as e:
-                    return name, None, str(e)
+            # 双源并发获取 —— 但 primary 一拿到完整数据就立刻返回，不再傻等 secondary。
+            # 历史问题：AkShare 的港股实时接口 ak.stock_hk_spot_em() 会下载全市场快照
+            # （46 页分页），走代理时经常 40+ 秒才失败，拖垮整条请求。
+            #
+            # 超时策略（可通过环境变量覆盖）：
+            # - QUOTE_PRIMARY_TIMEOUT_S    (默认 10s): primary 最长等多久
+            # - QUOTE_SUPPLEMENT_TIMEOUT_S (默认 5s):  primary 成功但缺字段时，给 secondary 多少时间补
+            # - QUOTE_FALLBACK_TIMEOUT_S   (默认 8s):  primary 失败时，给 secondary 多少时间兜底
+            primary_timeout_s = float(os.getenv("QUOTE_PRIMARY_TIMEOUT_S", "10"))
+            supplement_timeout_s = float(os.getenv("QUOTE_SUPPLEMENT_TIMEOUT_S", "5"))
+            fallback_timeout_s = float(os.getenv("QUOTE_FALLBACK_TIMEOUT_S", "8"))
 
-            named_specs = [(primary_src, primary_kw), (secondary_src, secondary_kw)]
+            def _fetch_named(name: str, kwargs: dict):
+                t0 = time.time()
+                try:
+                    q = self._try_fetcher_quote(stock_code, name, **kwargs)
+                    return name, q, None, time.time() - t0
+                except Exception as e:
+                    return name, None, str(e), time.time() - t0
+
             named_results: Dict[str, Any] = {}
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                future_map = {
-                    pool.submit(_fetch_named, src, kw): src
-                    for src, kw in named_specs
+            attempt_matrix: Dict[str, Dict[str, Any]] = {}
+
+            def _record(src: str, quote, err, elapsed):
+                named_results[src] = {"quote": quote, "error": err}
+                attempt_matrix[src] = {
+                    "ok": quote is not None,
+                    "elapsed": elapsed,
+                    "error": err,
                 }
-                for future in as_completed(future_map):
-                    src = future_map[future]
+
+            def _record_timeout(src: str, timeout_s: float, note: str):
+                named_results[src] = {"quote": None, "error": note}
+                attempt_matrix[src] = {"ok": False, "elapsed": timeout_s, "error": note}
+
+            # 手动管理 pool 生命周期（不用 with），以便主源成功时立刻 shutdown
+            # 不等待 secondary 的后台线程跑完
+            pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="quote")
+            try:
+                primary_future = pool.submit(_fetch_named, primary_src, primary_kw)
+                secondary_future = pool.submit(_fetch_named, secondary_src, secondary_kw)
+
+                # Step 1: 先等 primary
+                try:
+                    _, primary_quote, p_err, p_elapsed = primary_future.result(timeout=primary_timeout_s)
+                    _record(primary_src, primary_quote, p_err, p_elapsed)
+                except FuturesTimeout:
+                    primary_quote = None
+                    primary_future.cancel()
+                    _record_timeout(primary_src, primary_timeout_s, f"超时 >{primary_timeout_s}s")
+                except Exception as e:
+                    primary_quote = None
+                    _record(primary_src, None, str(e), None)
+
+                # Step 2: 决定是否等 secondary
+                if primary_quote is not None and not self._quote_needs_supplement(primary_quote):
+                    # 主源完整，直接放弃 secondary（后台线程会继续跑但我们不等）
+                    secondary_quote = None
+                    secondary_future.cancel()
+                    attempt_matrix[secondary_src] = {
+                        "ok": None,
+                        "elapsed": None,
+                        "error": "skipped:主源已完整",
+                    }
+                    named_results[secondary_src] = {"quote": None, "error": None}
+                else:
+                    # 主源缺字段 or 主源失败，bounded 等 secondary
+                    timeout_s = supplement_timeout_s if primary_quote is not None else fallback_timeout_s
+                    note_prefix = "补充" if primary_quote is not None else "兜底"
                     try:
-                        _, quote, err = future.result()
-                        named_results[src] = {"quote": quote, "error": err}
+                        _, secondary_quote, s_err, s_elapsed = secondary_future.result(timeout=timeout_s)
+                        _record(secondary_src, secondary_quote, s_err, s_elapsed)
+                    except FuturesTimeout:
+                        secondary_quote = None
+                        secondary_future.cancel()
+                        _record_timeout(secondary_src, timeout_s, f"{note_prefix}超时 >{timeout_s}s")
                     except Exception as e:
-                        named_results[src] = {"quote": None, "error": str(e)}
+                        secondary_quote = None
+                        _record(secondary_src, None, str(e), None)
+            finally:
+                # wait=False: 不等未完成的后台线程（例如 AkShare 的 46s 请求让它自生自灭）
+                # cancel_futures=True: 还没开始跑的任务直接取消
+                pool.shutdown(wait=False, cancel_futures=True)
 
             primary_quote = (named_results.get(primary_src) or {}).get("quote")
             secondary_quote = (named_results.get(secondary_src) or {}).get("quote")
 
             if primary_quote is None and secondary_quote is not None:
                 primary_quote = secondary_quote
-                logger.info(f"[实时行情] {market_label} {stock_code} 主源缺失，回退使用 {secondary_src}")
+                chosen = secondary_src
             elif primary_quote is not None:
-                logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
+                chosen = primary_src
+            else:
+                chosen = None
+
+            logger.info(self._format_source_attempts(market_label, stock_code, attempt_matrix, chosen))
 
             if primary_quote is not None and secondary_quote is not None and self._quote_needs_supplement(primary_quote):
                 filled = self._merge_quote_fields(primary_quote, secondary_quote)
                 if filled:
-                    logger.info(f"[实时行情] {stock_code} 从 {secondary_src} 补充了: {filled}")
+                    logger.info(f"[源探测|{market_label}] {stock_code} 从 {secondary_src} 补充字段: {filled}")
 
             if primary_quote is not None:
                 return primary_quote
             if log_final_failure:
-                logger.info(f"[实时行情] {market_label} {stock_code} 无可用数据源")
+                logger.warning(f"[源探测|{market_label}] {stock_code} 所有源均失败")
             return None
         
         # 获取配置的数据源优先级
         source_priority = config.realtime_source_priority.split(',')
-        
+
         priority_sources = [s.strip().lower() for s in source_priority if s.strip()]
         errors = []
         quote_results: Dict[str, Any] = {}
+        attempt_matrix: Dict[str, Dict[str, Any]] = {}
 
         if priority_sources:
-            with ThreadPoolExecutor(max_workers=min(len(priority_sources), 5)) as pool:
+            # A 股/港股 N 源并发策略（同 US/HK 的单源快返回思路，但适配多源字段合并）：
+            # - 所有源并发发起
+            # - 第一个成功 → 启动 grace 窗口（默认 3s），让其他源继续跑便于补字段
+            # - grace 到期 or 整体超时（默认 12s） → 还在跑的源全部放弃
+            # - 历史问题：AkShare 的 ak.stock_hk_spot_em / ak.stock_zh_a_spot_em 会拉全市场快照，
+            #   走代理时 45+ 秒才失败，会严重拖累整条请求。
+            cn_first_timeout_s = float(os.getenv("QUOTE_CN_FIRST_TIMEOUT_S", "10"))
+            cn_grace_s = float(os.getenv("QUOTE_CN_GRACE_S", "3"))
+            cn_total_timeout_s = float(os.getenv("QUOTE_CN_TOTAL_TIMEOUT_S", "12"))
+
+            pool = ThreadPoolExecutor(
+                max_workers=min(len(priority_sources), 5),
+                thread_name_prefix="quote-cn",
+            )
+            try:
                 future_map = {
                     pool.submit(_fetch_quote_by_source, src): src
                     for src in priority_sources
                 }
-                for future in as_completed(future_map):
-                    src = future_map[future]
-                    try:
-                        quote, err = future.result()
-                    except Exception as e:
-                        quote, err = None, f"[{src}] 失败: {str(e)}"
-                    quote_results[src] = quote
-                    if err:
-                        errors.append(err)
+                pending = set(future_map.keys())
+                first_success_at: Optional[float] = None
+                loop_start = time.time()
 
+                while pending:
+                    now = time.time()
+                    if first_success_at is None:
+                        remain = cn_first_timeout_s - (now - loop_start)
+                    else:
+                        remain = cn_grace_s - (now - first_success_at)
+                    remain = min(remain, cn_total_timeout_s - (now - loop_start))
+                    if remain <= 0:
+                        break
+
+                    done, pending = futures_wait(
+                        pending, timeout=remain, return_when=FIRST_COMPLETED
+                    )
+                    if not done:
+                        break  # 超时退出
+
+                    for fut in done:
+                        src = future_map[fut]
+                        try:
+                            quote, err, elapsed = fut.result()
+                        except Exception as e:
+                            quote, err, elapsed = None, f"[{src}] 失败: {str(e)}", None
+                        quote_results[src] = quote
+                        attempt_matrix[src] = {
+                            "ok": quote is not None,
+                            "elapsed": elapsed,
+                            "error": err,
+                        }
+                        if err:
+                            errors.append(err)
+                        if quote is not None and first_success_at is None:
+                            first_success_at = time.time()
+
+                # 记录被放弃的源
+                for fut in pending:
+                    src = future_map[fut]
+                    fut.cancel()
+                    note = "skipped:整体超时" if first_success_at is None else "skipped:主源已成功,超过grace"
+                    quote_results[src] = None
+                    attempt_matrix[src] = {
+                        "ok": None,
+                        "elapsed": None,
+                        "error": note,
+                    }
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+        # success_sources 按**优先级顺序**（不是返回顺序）挑首选 —— 保持和老逻辑一致
         success_sources = [src for src in priority_sources if quote_results.get(src) is not None]
         primary_quote = quote_results.get(success_sources[0]) if success_sources else None
+        chosen = success_sources[0] if success_sources else None
+
+        # 标记市场归属，便于日志区分 A 股/其他
+        market_tag = "HK" if _is_hk_market(stock_code) else "CN"
+        logger.info(self._format_source_attempts(market_tag, stock_code, attempt_matrix, chosen))
 
         if primary_quote is not None:
-            logger.info(f"[实时行情] {stock_code} 成功获取 (来源: {success_sources[0]})")
             if self._quote_needs_supplement(primary_quote) and len(success_sources) > 1:
                 secondary_quote = quote_results.get(success_sources[1])
                 if secondary_quote is not None:
                     merged = self._merge_quote_fields(primary_quote, secondary_quote)
                     if merged:
-                        logger.info(f"[实时行情] {stock_code} 从 {success_sources[1]} 补充了缺失字段: {merged}")
+                        logger.info(
+                            f"[源探测|{market_tag}] {stock_code} 从 {success_sources[1]} 补充字段: {merged}"
+                        )
             return primary_quote
 
         # 所有数据源都失败，返回 None（降级兜底）
         if log_final_failure:
-            if errors:
-                logger.info(f"[实时行情] {stock_code} 所有数据源均失败: {'; '.join(errors)}")
-            else:
-                logger.info(f"[实时行情] {stock_code} 无可用数据源")
+            logger.warning(f"[源探测|{market_tag}] {stock_code} 所有源均失败")
 
         return None
 
@@ -1366,6 +1544,37 @@ class DataFetcherManager:
                 logger.debug(f"[实时行情] {stock_code} {fetcher_name} 获取失败: {e}")
             return None
         return None
+
+    @staticmethod
+    def _format_source_attempts(
+        label: str,
+        stock_code: str,
+        attempts: Dict[str, Dict[str, Any]],
+        chosen: Optional[str],
+    ) -> str:
+        """
+        Build a one-line summary of per-source realtime probe results.
+
+        Format:
+          [源探测|label] 600519 efinance=OK(0.82s) akshare_em=OK(0.45s) tencent=FAIL(0.12s:HTTPError) → 选用=akshare_em
+        """
+        parts = []
+        for src, info in attempts.items():
+            ok_state = info.get("ok")
+            elapsed = info.get("elapsed")
+            elapsed_txt = f"{elapsed:.2f}s" if isinstance(elapsed, (int, float)) else "?"
+            if ok_state is True:
+                parts.append(f"{src}=OK({elapsed_txt})")
+            elif ok_state is None:
+                # 未等待（主源已完整，secondary 被主动跳过）
+                note = (info.get("error") or "skipped").strip()
+                parts.append(f"{src}=SKIP({note})")
+            else:
+                err = (info.get("error") or "no-data").strip().replace("\n", " ")
+                err_short = err[:80] + ("…" if len(err) > 80 else "")
+                parts.append(f"{src}=FAIL({elapsed_txt}:{err_short})")
+        chosen_txt = chosen if chosen else "无"
+        return f"[源探测|{label}] {stock_code} {' '.join(parts)} → 选用={chosen_txt}"
 
     def _supplement_quote(self, stock_code: str, primary_quote, fetcher_name: str, **kw):
         """Supplement *primary_quote* with data from *fetcher_name*.

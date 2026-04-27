@@ -49,9 +49,73 @@ model User {
   redemptionQueue      RedemptionQueue[]
   tradeOrders          TradeOrder[]
   transactions         Transaction[]
+  subscription         Subscription?
 
   @@index([email])
   @@index([walletAddress])
+}
+
+// ─── Subscription & Quota ─────────────────────────────────────────────
+// Tracks the user's subscription tier + rolling-window quota usage for
+// Fast and Roundtable modes (Auto is always free and not tracked here).
+// Reset window: Free = 7 days, Pro/Max = 30 days, rolling from activatedAt.
+model Subscription {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  plan               String   @default("free")           // 'free' | 'pro' | 'max'
+  billingCycle       String?                             // 'monthly' | 'yearly' | null for free
+
+  // Rolling quota window
+  fastUsed           Int      @default(0)
+  fastLimit          Int      @default(10)               // free default
+  roundtableUsed     Int      @default(0)
+  roundtableLimit    Int      @default(2)                // free default
+  resetAt            DateTime                            // next reset timestamp
+  activatedAt        DateTime @default(now())            // anchor for rolling resets
+
+  // Stripe integration
+  stripeCustomerId   String?
+  stripeSubId        String?
+  stripeStatus       String?                             // 'active' | 'canceled' | 'past_due' | ...
+  currentPeriodEnd   DateTime?                           // Stripe billing period end (for UI)
+  cancelAtPeriodEnd  Boolean  @default(false)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user               User     @relation(fields: [userId], references: [id])
+
+  @@index([stripeCustomerId])
+  @@index([stripeSubId])
+  @@index([resetAt])
+}
+
+// ─── Guest mode ───────────────────────────────────────────────────────
+// Tracks per-guest Auto-mode usage on a rolling window. guestId is a
+// client-generated UUID stored in localStorage. Guests have no userId
+// (they never hit the User table). Chat history for guests is NOT
+// persisted — it lives in the browser's localStorage.
+model GuestQuota {
+  id         String   @id @default(cuid())
+  guestId    String   @unique                // client-generated UUID
+  autoUsed   Int      @default(0)
+  resetAt    DateTime                         // next rolling-window reset
+  lastIp     String?                          // for post-hoc abuse analysis
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([resetAt])
+}
+
+// Second layer of rate limiting: caps per-IP Auto usage to prevent one
+// person from hopping guestIds (clearing localStorage) to farm quota.
+model GuestIpQuota {
+  ip         String   @id
+  autoUsed   Int      @default(0)
+  resetAt    DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@index([resetAt])
 }
 
 model InvitationCode {

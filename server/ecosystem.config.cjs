@@ -4,6 +4,8 @@ module.exports = {
       name: 'LokaCash',
       script: 'dist/index.js',
       cwd: __dirname,
+      node_args: '--max-old-space-size=3072',
+      max_memory_restart: '3500M',
       env: {
         NODE_ENV: 'production',
       },

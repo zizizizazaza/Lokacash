@@ -7,6 +7,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 class ApiClient {
   private token: string | null = null;
   private tokenGetter: (() => Promise<string | null>) | null = null;
+  private guestId: string | null = null;
 
   constructor() {
     this.token = sessionStorage.getItem('loka_token');
@@ -27,6 +28,11 @@ class ApiClient {
     sessionStorage.removeItem('loka_token');
   }
 
+  /** Attach a guest identifier to unauthenticated requests as `x-guest-id`. */
+  setGuestId(guestId: string) {
+    this.guestId = guestId;
+  }
+
   get isAuthenticated(): boolean {
     return Boolean(this.token || this.tokenGetter);
   }
@@ -41,6 +47,8 @@ class ApiClient {
 
     if (activeToken) {
       headers['Authorization'] = `Bearer ${activeToken}`;
+    } else if (this.guestId) {
+      headers['x-guest-id'] = this.guestId;
     }
 
     const response = await fetch(`${API_BASE}${path}`, {
@@ -319,6 +327,47 @@ class ApiClient {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
+  }
+
+  // ============ Subscription & Quota ============
+
+  async getQuota(): Promise<{ plan: string; roundtable: { used: number; limit: number; period: string }; fast?: { used: number; limit: number; period: string } }> {
+    return this.request('/subscription/quota');
+  }
+
+  async startCheckout(data: { plan: 'pro' | 'max'; billingCycle: 'monthly' | 'yearly' }): Promise<{ url: string }> {
+    return this.request('/subscription/checkout', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getGuestQuota(): Promise<{
+    autoUsed: number;
+    autoLimit: number;
+    autoRemaining: number;
+    resetAt: string;
+  }> {
+    return this.request('/guest/quota');
+  }
+
+  async getGuestConfig(): Promise<{ enabled: boolean; autoLimit: number; autoWindowHours: number }> {
+    return this.request('/guest/config');
+  }
+
+  async getPublicConfig(): Promise<{
+    plans: {
+      free: { fast: number; roundtable: number; windowDays: number; monthlyUsd: number; yearlyUsd: number };
+      pro: { fast: number; roundtable: number; windowDays: number; monthlyUsd: number; yearlyUsd: number };
+      max: { fast: number; roundtable: number; windowDays: number; monthlyUsd: number; yearlyUsd: number };
+    };
+    guest: { enabled: boolean; autoLimit: number; autoWindowHours: number };
+  }> {
+    return this.request('/config/public');
+  }
+
+  async openBillingPortal(): Promise<{ url: string }> {
+    return this.request('/subscription/portal', { method: 'POST' });
   }
 
   async uploadFile(file: File) {

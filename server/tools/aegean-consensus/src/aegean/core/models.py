@@ -216,6 +216,7 @@ class Group(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    shared_knowledge: "GroupSharedKnowledge" = Field(default_factory=lambda: GroupSharedKnowledge())
 
     class Config:
         json_schema_extra = {
@@ -325,31 +326,48 @@ class KnowledgeGraphRelation(BaseModel):
 
 class KnowledgeGraph(BaseModel):
     graph_id: str
-    consensus_id: Optional[str] = None
-    group_id: Optional[str] = None
-    source_type: Optional[str] = None
-    source_id: Optional[str] = None
+    consensus_id: str
+    group_id: str
     entities: List[KnowledgeGraphEntity] = Field(default_factory=list)
     relations: List[KnowledgeGraphRelation] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class GroupSkill(BaseModel):
+    skill_id: str = Field(..., description="Unique skill identifier")
+    name: str = Field(..., description="Human-readable skill name")
+    description: str = Field(default="", description="Skill description")
+    applicable_task_types: List[str] = Field(default_factory=list)
+    categories: List[str] = Field(default_factory=list)
+    required_data_sources: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.now)
 
 
-class AgentRelationship(BaseModel):
-    """Relationship between two agents based on discussion dynamics."""
-    source_agent_id: str = Field(..., description="Source agent ID")
-    target_agent_id: str = Field(..., description="Target agent ID")
-    influence_weight: float = Field(0.0, ge=0.0, le=1.0, description="How much source influenced target")
-    trust_score: float = Field(0.5, ge=0.0, le=1.0, description="Trust level between agents")
-    disagreement_count: int = Field(0, ge=0, description="Number of rounds they disagreed")
-    agreement_count: int = Field(0, ge=0, description="Number of rounds they agreed")
+class GroupKnowledgeDocument(BaseModel):
+    doc_id: str = Field(..., description="Document identifier")
+    category: str = Field(..., description="Knowledge category")
+    title: Optional[str] = Field(None, description="Optional document title")
+    summary: Optional[str] = Field(None, description="Optional short summary")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
-class GroupGraph(BaseModel):
-    """Graph representation of agent relationships within a group."""
-    group_id: str = Field(..., description="Group identifier")
-    nodes: List[str] = Field(default_factory=list, description="Agent IDs as graph nodes")
-    edges: List[AgentRelationship] = Field(default_factory=list, description="Relationships as edges")
-    created_at: datetime = Field(default_factory=datetime.now)
+
+class GroupSharedKnowledge(BaseModel):
+    static_documents: List[GroupKnowledgeDocument] = Field(default_factory=list)
+    historical_case_ids: List[str] = Field(default_factory=list)
+    skills: List[GroupSkill] = Field(default_factory=list)
+    knowledge_graph_ids: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GroupKnowledgeInjection(BaseModel):
+    group_id: str
+    memory_context: str = ""
+    skill_descriptions: List[str] = Field(default_factory=list)
+    document_summaries: List[str] = Field(default_factory=list)
+    historical_case_ids: List[str] = Field(default_factory=list)
+    graph_ids: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
 
 class GroupConsensusResult(BaseModel):
     """Extended result for group consensus/collaboration execution."""
@@ -373,5 +391,4 @@ class GroupConsensusResult(BaseModel):
     usage: TokenUsage = Field(default_factory=TokenUsage)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     knowledge_graph: Optional[KnowledgeGraph] = None
-    agent_graph: Optional[GroupGraph] = None
-
+    agent_graph: Optional[Dict[str, Any]] = None

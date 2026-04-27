@@ -12,7 +12,9 @@
  *  - Contain duplicated socket handlers
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { socket } from '../../services/socket';
+import { api } from '../../services/api';
 import { renderMarkdownContent } from '../../utils/markdown';
 import { stripInternalResearchCitations } from '../../utils/researchCitations';
 
@@ -21,6 +23,7 @@ import { MODES, AGENT_COUNCIL, buildKnowledgeGraph, AGENT_APPS } from '../../con
 import { getApp } from '../apps';
 
 import ModeSelector from './ModeSelector';
+import type { RoundtableQuota, FastQuota } from './ModeSelector';
 import ThinkingPanel from './ThinkingPanel';
 import KnowledgeGraph from './KnowledgeGraph';
 import AppProgressLogs from './AppProgressLogs';
@@ -76,6 +79,7 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
   const { sessionId } = useSessionManager({ restoreSessionId });
 
   // ─── State ────────────────────────────────────────────────
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -91,6 +95,27 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
   const [workflowPhase, setWorkflowPhase] = useState<'idle' | 'research' | 'app' | 'consensus'>('idle');
   const [researchLogs, setResearchLogs] = useState<string[]>([]);
   const [researchSummary, setResearchSummary] = useState<string | null>(null);
+
+  // Roundtable & Fast quota — skipped for guests since ModeSelector locks
+  // those modes behind login anyway.
+  const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
+  const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
+  useEffect(() => {
+    if (!api.isAuthenticated) {
+      setRoundtableQuota(null);
+      setFastQuota(null);
+      return;
+    }
+    api.getQuota()
+      .then(q => {
+        setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+        if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+      })
+      .catch(() => {
+        setRoundtableQuota({ used: 1, limit: 3 });
+        setFastQuota({ used: 4, limit: 20 });
+      });
+  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasSentInitial = useRef(false);
@@ -478,39 +503,47 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
   // RENDER
   // ═════════════════════════════════════════════════════════
   return (
-    <div className="flex flex-col h-full bg-white overflow-hidden">
-      {/* ══ Header ══ */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 shrink-0">
-        <button onClick={onBack} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-900 hover:bg-gray-100 transition-all">
-          <BackIcon />
-        </button>
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center text-white text-xs font-black">L</div>
-          <span className="text-sm font-semibold text-gray-900">{displayName}</span>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <span className="text-[10px] text-gray-400 font-medium">
-            {isAppMode ? 'Agent Online' : '2 Agents Online'}
-          </span>
-          {currentKgData && (
-            <div className="ml-2 pl-3 border-l border-gray-200 flex items-center gap-2 cursor-pointer" onClick={() => setShowGraphPanel(g => !g)}>
-              <svg className={`w-3.5 h-3.5 transition-colors ${showGraphPanel ? 'text-blue-500' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <circle cx="6" cy="6" r="3" strokeWidth="2"/><circle cx="18" cy="6" r="3" strokeWidth="2"/><circle cx="12" cy="18" r="3" strokeWidth="2"/>
-                <line x1="8.83" y1="7.83" x2="15.17" y2="7.83" strokeWidth="1.5"/><line x1="6.93" y1="8.5" x2="11.07" y2="15.5" strokeWidth="1.5"/><line x1="17.07" y1="8.5" x2="12.93" y2="15.5" strokeWidth="1.5"/>
-              </svg>
-              <span className="text-[11px] font-medium text-gray-500">Multi-Agent Graph</span>
-              <button type="button" className={`relative inline-flex h-4 w-7 ml-1 items-center rounded-full transition-colors ${showGraphPanel ? 'bg-blue-500' : 'bg-gray-200'}`} aria-pressed={showGraphPanel}>
-                <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform ${showGraphPanel ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+    <div className="flex h-full bg-white overflow-hidden">
+      {/* ══ Chat column (left) ══ */}
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        {/* Left header */}
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 shrink-0">
+          <button onClick={onBack} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-900 hover:bg-gray-100 transition-all">
+            <BackIcon />
+          </button>
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center text-white text-xs font-black">L</div>
+            <span className="text-sm font-semibold text-gray-900">{displayName}</span>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            <span className="text-[10px] text-gray-400 font-medium">
+              {isAppMode ? 'Agent Online' : '2 Agents Online'}
+            </span>
+            <button
+              onClick={() => navigate('/settings')}
+              className="ml-2 pl-3 border-l border-gray-200 flex items-center gap-1.5 text-[11px] font-semibold text-green-600 hover:text-green-700 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
+              Upgrade
+            </button>
+            {currentKgData && !showGraphPanel && (
+              <button
+                onClick={() => setShowGraphPanel(true)}
+                className="ml-2 pl-3 border-l border-gray-200 flex items-center gap-1.5 text-[11px] font-medium text-gray-500 hover:text-gray-900 transition-colors"
+                title="Show process panel"
+              >
+                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <circle cx="6" cy="6" r="3" strokeWidth="2"/><circle cx="18" cy="6" r="3" strokeWidth="2"/><circle cx="12" cy="18" r="3" strokeWidth="2"/>
+                  <line x1="8.83" y1="7.83" x2="15.17" y2="7.83" strokeWidth="1.5"/><line x1="6.93" y1="8.5" x2="11.07" y2="15.5" strokeWidth="1.5"/><line x1="17.07" y1="8.5" x2="12.93" y2="15.5" strokeWidth="1.5"/>
+                </svg>
+                <span>Process</span>
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* ══ Content Row ══ */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Chat column */}
+        {/* Chat body */}
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <div className="flex-1 overflow-y-auto px-4 md:px-10 py-8">
             <div className="max-w-2xl mx-auto space-y-8">
@@ -645,7 +678,15 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
             <div className="max-w-3xl mx-auto">
               <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-2xl shadow-sm pl-2 pr-4 py-2 focus-within:border-gray-300 focus-within:shadow-md transition-all">
                 {showModeSelector && (
-                  <ModeSelector mode={currentMode} onModeChange={setCurrentMode} compact />
+                  <ModeSelector
+                    mode={currentMode}
+                    onModeChange={setCurrentMode}
+                    roundtableQuota={roundtableQuota}
+                    fastQuota={fastQuota}
+                    compact
+                    isGuest={!api.isAuthenticated}
+                    onLockedClick={() => window.dispatchEvent(new Event('show-auth-modal'))}
+                  />
                 )}
                 <input
                   type="text"
@@ -672,17 +713,33 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
             </div>
           </div>
         </div>
+      </div>
 
-        {/* Knowledge Graph Panel */}
-        {showGraphPanel && currentKgData && (
-          <div className="w-[400px] shrink-0 border-l border-gray-100 overflow-hidden relative">
-            <button onClick={() => setShowGraphPanel(false)} className="absolute top-2 right-2 z-20 w-7 h-7 rounded-lg bg-white/80 backdrop-blur border border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all shadow-sm">
+      {/* ══ Process Panel (right) — full-height, independent column ══ */}
+      {showGraphPanel && currentKgData && (
+        <div className="w-[420px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
+          {/* Right header — mirrors left header height for top alignment */}
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 shrink-0">
+            <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="6" cy="6" r="3" strokeWidth="2"/><circle cx="18" cy="6" r="3" strokeWidth="2"/><circle cx="12" cy="18" r="3" strokeWidth="2"/>
+              <line x1="8.83" y1="7.83" x2="15.17" y2="7.83" strokeWidth="1.5"/><line x1="6.93" y1="8.5" x2="11.07" y2="15.5" strokeWidth="1.5"/><line x1="17.07" y1="8.5" x2="12.93" y2="15.5" strokeWidth="1.5"/>
+            </svg>
+            <span className="text-sm font-semibold text-gray-900">Process</span>
+            <span className="text-[10px] text-gray-400 font-medium ml-1">Multi-Agent Graph</span>
+            <button
+              onClick={() => setShowGraphPanel(false)}
+              className="ml-auto w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all"
+              title="Close"
+            >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
             </button>
+          </div>
+          {/* Body */}
+          <div className="flex-1 overflow-hidden relative">
             <KnowledgeGraph data={currentKgData} />
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

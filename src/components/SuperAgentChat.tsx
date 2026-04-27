@@ -1,15 +1,20 @@
-/**
+﻿/**
  * SuperAgentChat — Chat Detail Page
  * Clean chat interface similar to Surf style, with multi-agent thinking process
  */
-import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
 import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
-import { MAX_IMAGES_PER_MESSAGE, prepareImageForUpload } from '../utils/imageCompression';
+import { I } from './Icons';
+import PlanUpgradeEntry from './PlanUpgradeEntry';
+import ModeSelector from './chat/ModeSelector';
+import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
+import { RoundtableWorkbench, KnowledgeGraphView, buildKnowledgeGraph } from './chat/RoundtableWorkbench';
 
 function saLog(...args: unknown[]) {
     console.log('[SuperAgentChat]', ...args);
@@ -18,7 +23,7 @@ function saLog(...args: unknown[]) {
 /** Space above the bottom of the chat column reserved for the floating input bar (padding + field + controls). TOC must stay above this. */
 const TOC_BOTTOM_RESERVE_PX = 148;
 
-/** Minimum TOC panel height so the list isn’t collapsed to ~3 rows before layout stabilizes */
+/** Minimum TOC panel height so the list isn't collapsed to ~3 rows before layout stabilizes */
 const TOC_MIN_VIEWPORT_PX = 220;
 
 /** Standard sticky offset for the left TOC rail. */
@@ -45,24 +50,94 @@ const HtmlReportFrame: React.FC<{ html: string; isStreaming: boolean }> = ({ htm
         if (!iframe) return;
         // Strip any markdown code fences the LLM might have wrapped around
         const cleanHtml = html.replace(/^```html?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+        const fontOrigin = window.location.origin;
         const fullDoc = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root { --color-text-primary: #1a1a1a; --color-text-secondary: #666; --color-text-tertiary: #999; --color-background-secondary: #f5f5f5; --color-border-tertiary: #e5e5e5; --border-radius-md: 8px; --border-radius-lg: 12px; --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Semibold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Open Runde'; src: url('${fontOrigin}/fonts/open-runde/OpenRunde-Bold.woff2') format('woff2'); font-weight: 700; font-display: swap; }
+:root { --color-text-primary: #1a1a1a; --color-text-secondary: #666; --color-text-tertiary: #999; --color-background-secondary: #f5f5f5; --color-border-tertiary: #e5e5e5; --border-radius-md: 8px; --border-radius-lg: 12px; --font-sans: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.6; }
+html, body { overflow-x: hidden; max-width: 100%; width: 100%; touch-action: pan-y; }
+body { font-family: var(--font-sans); color: var(--color-text-primary); background: white; line-height: 1.75; font-size: 15px; word-wrap: break-word; overflow-wrap: anywhere; }
 ul, ol { padding-left: 1.2em; margin: 0.5rem 0; text-align: left; }
-li { margin-bottom: 4px; }
+li { margin-bottom: 4px; font-size: 15px; line-height: 1.75; }
+img, video, canvas, svg { max-width: 100%; height: auto; }
+table { width: 100%; max-width: 100%; table-layout: fixed; border-collapse: collapse; }
+th, td { word-wrap: break-word; overflow-wrap: anywhere; }
+pre { max-width: 100%; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+code { word-break: break-word; }
+a { word-break: break-all; }
 </style>
 </head><body>${cleanHtml}
+<style id="loka-report-override">
+  /* Force-upgrade typography for both new and historical reports */
+  .report-wrap, .report-wrap p, .report-wrap li, .report-wrap td, .report-wrap .guru-analysis, .report-wrap .debate-text, .report-wrap .consensus-detail, .report-wrap .risk-item { font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; }
+  /* Headings and titles use Inter (geometric) for report-like authority */
+  .report-wrap h1, .report-wrap h2, .report-wrap h3, .report-wrap h4, .report-wrap .report-title, .report-wrap .section-title, .report-wrap .consensus-verdict, .report-wrap .report-label, .report-wrap .guru-name, .report-wrap th { font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important; letter-spacing: -0.01em; }
+  .report-wrap { font-size: 15px !important; line-height: 1.75 !important; }
+  .report-wrap p, .report-wrap li, .report-wrap .guru-analysis, .report-wrap .debate-text, .report-wrap .consensus-detail, .report-wrap .risk-item { font-size: 15px !important; line-height: 1.75 !important; }
+  .report-wrap .report-title { font-size: 26px !important; font-weight: 700 !important; line-height: 1.35 !important; letter-spacing: -0.015em !important; }
+  .report-wrap .consensus-verdict { font-size: 20px !important; font-weight: 700 !important; letter-spacing: -0.01em !important; }
+  .report-wrap .guru-name { font-size: 16px !important; font-weight: 600 !important; }
+  .report-wrap .cmp-table { font-size: 14px !important; }
+</style>
 <script>
+  // Strip follow-up questions section — the frontend renders it separately as interactive buttons.
+  // The HTML generation prompt says not to include it, but the LLM sometimes adds it anyway.
+  (function() {
+    var kw = ['持续跟踪','关键问题','follow-up questions','follow up questions','questions to watch','延伸思考','延伸问题'];
+    function hasKw(t) { t = (t||'').toLowerCase(); return kw.some(function(k){ return t.indexOf(k.toLowerCase()) >= 0; }); }
+    document.querySelectorAll('.section-title').forEach(function(el) {
+      if (hasKw(el.textContent)) { var s = el.closest('.section') || el.parentElement; if (s) s.remove(); }
+    });
+    ['h1','h2','h3','h4','strong','b'].forEach(function(tag) {
+      document.querySelectorAll(tag).forEach(function(el) {
+        if (hasKw(el.textContent)) {
+          var block = el.closest('div') || el.parentElement;
+          if (block && block !== document.body) block.remove();
+        }
+      });
+    });
+  })();
+  function measure() {
+    // Use the larger of body and documentElement to handle browsers that
+    // measure scrollHeight differently. Round up to avoid sub-pixel underflow.
+    var h = Math.ceil(Math.max(
+      document.documentElement.scrollHeight,
+      document.documentElement.offsetHeight,
+      document.body ? document.body.scrollHeight : 0,
+      document.body ? document.body.offsetHeight : 0
+    ));
+    return h;
+  }
+  var lastSent = 0;
   function sendHeight() {
-    var h = document.documentElement.scrollHeight;
+    var h = measure();
+    if (h === lastSent) return;
+    lastSent = h;
     window.parent.postMessage({ type: 'loka-iframe-height', height: h }, '*');
   }
   sendHeight();
-  new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
-  window.addEventListener('load', function() { setTimeout(sendHeight, 300); });
+  // ResizeObserver fires on any size change — catches font swaps, image loads,
+  // CSS-only reflows, anything MutationObserver would miss.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(sendHeight).observe(document.documentElement);
+    if (document.body) new ResizeObserver(sendHeight).observe(document.body);
+  } else {
+    new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
+  }
+  // Re-measure after fonts and late images settle.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(sendHeight).catch(function(){});
+  }
+  window.addEventListener('load', function() {
+    sendHeight();
+    setTimeout(sendHeight, 200);
+    setTimeout(sendHeight, 800);
+  });
 </` + `script>
 </body></html>`;
         iframe.srcdoc = fullDoc;
@@ -70,8 +145,17 @@ li { margin-bottom: 4px; }
 
     useEffect(() => {
         const handler = (e: MessageEvent) => {
+            // CRITICAL: only accept messages from THIS iframe's contentWindow.
+            // Without this guard, every HtmlReportFrame instance on the page
+            // updates its height to whatever any other iframe just posted —
+            // causing all reports to jitter on every tap.
+            if (e.source !== iframeRef.current?.contentWindow) return;
             if (e.data?.type === 'loka-iframe-height' && typeof e.data.height === 'number') {
-                setIframeHeight(Math.min(e.data.height + 4, 5000));
+                // +16 buffer absorbs sub-pixel rounding and any final layout
+                // shift after measure() runs but before the iframe finishes
+                // painting. Cap at 8000 to handle long Roundtable reports.
+                const next = Math.min(e.data.height + 16, 8000);
+                setIframeHeight(prev => (prev === next ? prev : next));
             }
         };
         window.addEventListener('message', handler);
@@ -89,61 +173,28 @@ li { margin-bottom: 4px; }
             <iframe
                 ref={iframeRef}
                 sandbox="allow-scripts"
-                className="w-full border-0 rounded-xl overflow-hidden"
-                style={{ height: iframeHeight, transition: 'height 0.3s ease' }}
+                scrolling="no"
+                className="w-full border-0 rounded-xl block"
+                style={{ height: iframeHeight, display: 'block' }}
                 title="Research Report"
             />
         </div>
     );
 };
 
-const CHAT_MODES = [
-    { id: 'auto' as const, label: 'Auto', desc: 'Smart auto-routing to the optimal pipeline', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z" /></svg> },
-    { id: 'fast' as const, label: 'Fast', desc: 'Direct response, minimal orchestration', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg> },
-    { id: 'roundtable' as const, label: 'Roundtable', desc: 'Multi-agent debate with iterative consensus', icon: () => <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M14 5.5a7.5 7.5 0 014.5 12" /><path d="M17 19.5H7" /><path d="M5.5 17A7.5 7.5 0 0110 5.5" /></svg> },
-];
-
 interface Message {
     role: 'user' | 'assistant';
     content: string;
     timestamp: string;
     isStreaming?: boolean;
-    images?: ChatImagePayload[];
     /** From DB; used to restore Thinking Process when reopening a session */
     metadata?: string | null;
     /** Verified source URLs extracted from research data */
     sources?: SearchSource[];
-}
-
-interface ChatImagePayload {
-    url: string;
-    mime?: string;
-    name?: string;
-}
-
-interface PendingChatImage extends ChatImagePayload {
-    id: string;
-    previewUrl: string;
-    status: 'uploading' | 'uploaded' | 'error';
-}
-
-function parseUserImagesFromMetadata(metadata?: string | null): ChatImagePayload[] {
-    if (!metadata) return [];
-    try {
-        const parsed = JSON.parse(metadata) as { images?: ChatImagePayload[]; archivedImages?: ChatImagePayload[] };
-        const raw = Array.isArray(parsed?.images) && parsed.images.length > 0
-            ? parsed.images
-            : (Array.isArray(parsed?.archivedImages) ? parsed.archivedImages : []);
-        return raw
-            .map(img => ({
-                url: typeof img?.url === 'string' ? img.url.trim() : '',
-                mime: typeof img?.mime === 'string' ? img.mime : undefined,
-                name: typeof img?.name === 'string' ? img.name : undefined,
-            }))
-            .filter(img => img.url.length > 0);
-    } catch {
-        return [];
-    }
+    /** Set when the backend had to degrade this turn to lite-mode (no-agent)
+     * because the user ran out of Fast and Roundtable quota. Renders an
+     * inline upgrade hint above the response. */
+    liteMode?: { hint: string } | null;
 }
 
 interface SearchSource {
@@ -319,7 +370,7 @@ interface Web3ModuleData {
     duration?: number;
 }
 
-interface ThinkingModule {
+export interface ThinkingModule {
     type: 'search' | 'analysis' | 'simulation' | 'consensus' | 'web3' | 'done';
     status: 'pending' | 'active' | 'completed';
     data?: SearchModuleData | AnalysisModuleData | SimulationModuleData | ConsensusModuleData | Web3ModuleData | { duration?: number };
@@ -332,7 +383,7 @@ interface ToolTraceItem {
     durationSec?: number;
 }
 
-interface ThinkingFlow {
+export interface ThinkingFlow {
     modules: ThinkingModule[];
     isActive: boolean;
     route?: string;  // which agent route triggered this
@@ -367,7 +418,6 @@ function mergeSearchSources(primary?: SearchSource[], secondary?: SearchSource[]
             out.push({ ...s });
             continue;
         }
-        // Prefer richer record when duplicated key appears.
         const prev = out[idx];
         out[idx] = {
             ...prev,
@@ -475,7 +525,7 @@ const ROUNDTABLE_AGENTS = [
 
 /* ── Summon pool — analyst characters for roundtable selection ── */
 /* system=true → auto-selected by system, user cannot toggle */
-const SUMMON_POOL: { id: string; name: string; nameCN: string; initials: string; role: string; roleCN: string; color: string; group: 'system' | 'enhanced' | 'master'; }[] = [
+export const SUMMON_POOL: { id: string; name: string; nameCN: string; initials: string; role: string; roleCN: string; color: string; group: 'system' | 'enhanced' | 'master'; }[] = [
     // ── System base agents (auto-assigned, not user-toggleable) ──
     { id: 'fundamental_specialist',  name: 'Fundamental Analyst',      nameCN: '基本面分析师',   initials: 'FA', role: 'Financials & earnings',    roleCN: '财务与盈利分析',   color: '#3B82F6', group: 'system' },
     { id: 'valuation_specialist',    name: 'Valuation Analyst',        nameCN: '估值分析师',     initials: 'VA', role: 'Fair value & models',      roleCN: '公允价值与模型',   color: '#6366F1', group: 'system' },
@@ -501,12 +551,118 @@ const SUMMON_POOL: { id: string; name: string; nameCN: string; initials: string;
 const SYSTEM_AGENT_IDS = new Set(SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id));
 const DEFAULT_SUMMON_IDS = new Set<string>();
 
+// Lookup helpers for mapping backend analystId → frontend display name.
+const SUMMON_POOL_BY_ID = new Map(SUMMON_POOL.map(a => [a.id, a]));
+function getAnalystDisplayName(analystId: string, preferCN = false): string {
+    const p = SUMMON_POOL_BY_ID.get(analystId);
+    if (!p) return analystId;
+    return preferCN ? p.nameCN : p.name;
+}
+
+/**
+ * Parse a persona's raw answer into the shape the Debate Tab expects.
+ * Personas are instructed to emit `SIGNAL: bullish|bearish|neutral` — that's
+ * what we map to the "verdict" field. Falls back to 'Neutral' if the model
+ * didn't follow the schema.
+ */
+function parsePersonaVerdict(answer: string): 'Bullish' | 'Bearish' | 'Neutral' {
+    const m = answer?.match(/SIGNAL:\s*(bullish|bearish|neutral)/i);
+    const raw = m ? m[1].toLowerCase() : 'neutral';
+    if (raw === 'bullish') return 'Bullish';
+    if (raw === 'bearish') return 'Bearish';
+    return 'Neutral';
+}
+
+/**
+ * Extract a reasoning snippet from a persona's raw answer. Prefers the
+ * RATIONALE section if the persona followed the schema, else uses the body.
+ * Truncates at ~800 chars but NEVER mid-word / mid-sentence — prior 400-char
+ * hard slice was producing cut-offs like "to consider it mo" / "ETF flows ov".
+ */
+function parsePersonaReasoning(answer: string): string {
+    if (!answer) return '';
+    const m = answer.match(/RATIONALE:\s*([\s\S]+?)(?:\n[A-Z_]+:|\n\n|$)/i);
+    const raw = (m && m[1].trim()) ? m[1].trim() : answer;
+    const MAX = 800;
+    if (raw.length <= MAX) return raw;
+    const chunk = raw.slice(0, MAX);
+    // Prefer cutting at the last full sentence inside the window (latin + CJK).
+    const sentenceEnds = [...chunk.matchAll(/[.!?。！？]/g)];
+    if (sentenceEnds.length > 0) {
+        const lastEnd = sentenceEnds[sentenceEnds.length - 1].index! + 1;
+        if (lastEnd >= MAX * 0.55) return chunk.slice(0, lastEnd).trim() + ' …';
+    }
+    // Fallback: cut at last whitespace so we never chop a word in half.
+    const lastWs = chunk.search(/\s\S*$/);
+    if (lastWs >= MAX * 0.8) return chunk.slice(0, lastWs) + ' …';
+    return chunk.trimEnd() + '…';
+}
+
 const AGENT_COLORS: Record<string, string> = {
     FA: '#475569', MS: '#475569', SE: '#475569', QT: '#475569',
 };
 
+/* ── Demo RT fields — canonical 7-agent roundtable for history restoration ── */
+function buildDemoRtFields() {
+    const sys = SUMMON_POOL.filter(a => a.group === 'system');
+    const extra = SUMMON_POOL.filter(a => ['buffett_style', 'dalio_style', 'sentiment_focus'].includes(a.id));
+    const all = [...sys, ...extra];
+    const r1 = all.slice(0, 2);
+    const r2 = all.slice(0, 7);
+    const verdicts = ['Bullish', 'Neutral', 'Bearish', 'Bullish', 'Bearish', 'Neutral', 'Bullish'];
+    const confs = [78, 62, 45, 71, 82, 58, 75];
+    const reasonings = [
+        'Revenue grew 18% YoY to $4.2B, beating consensus by $120M. Operating margins expanded 240bps to 28.3% driven by cost optimization and scale efficiencies. Free cash flow conversion improved to 92%. Forward P/E of 22x sits below 5-year average of 26x, suggesting room for multiple expansion. RSI at 58 indicates neutral momentum with no overbought signals. Key risk: rising interest rates could compress multiples in the near term.',
+        'Current valuation appears fair at 1.8x PEG ratio. Technical indicators are mixed — MACD shows a pending bullish crossover but volume has been declining for 3 consecutive weeks. The 50-day moving average ($148) is approaching the 200-day ($152), and a golden cross could trigger momentum buying. However, broad macro headwinds including hawkish Fed commentary and rising 10Y yields create uncertainty. Recommend maintaining position but not adding until clearer directional signals emerge.',
+        'Sector-wide de-rating in progress as competition intensifies. Company lost 2.1% market share in the latest quarter per IDC data. Gross margins contracted 180bps sequentially. Social sentiment turned notably negative after the product recall announcement, with Twitter mention sentiment dropping from +0.42 to -0.18 in two weeks. Balance sheet remains strong with $8.2B cash and minimal debt, which provides a floor, but near-term catalysts are lacking.',
+        'Tail risk assessment: correlation breakdown probability sits at 12% based on our fractal model. The current volatility regime is transitioning from low to moderate — VIX term structure shifted to contango. Max drawdown scenario under a 2-sigma stress event would be -18%. However, the company maintains a strong Altman Z-score of 4.2, suggesting minimal bankruptcy risk. Hedging cost via put spreads is relatively cheap at 45bps.',
+        'This is a wonderful business at a fair price. 85% customer retention rate, $3.2B in recurring revenue, and a brand moat evidenced by 40% pricing premium vs. closest competitor. Management has demonstrated disciplined capital allocation with $2.1B returned via buybacks. The stock trades at a 21% discount to peer median. As I always say: it is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.',
+        'The debt cycle analysis shows we are in the late expansion phase. Central bank tightening is creating headwinds across risk assets. However, this particular company has low leverage (0.8x net debt/EBITDA) and strong cash generation, making it relatively defensive. In an all-weather framework, this position contributes positive risk-adjusted returns across 3 of 4 economic environments. Maintain position but size conservatively given macro uncertainty.',
+        'Social sentiment analysis reveals a notable divergence: retail sentiment is turning bullish (+340% mention volume) while institutional positioning shows cautious accumulation. NLP analysis of recent earnings call transcripts indicates management confidence has increased — forward-looking language ratio improved from 0.42 to 0.61. The contrarian signal here is moderately bullish: when retail and institutions align gradually, the trend tends to persist.',
+    ];
+    return {
+        selectedAgentIds: all.map(a => a.id),
+        rtPreparationStatus: 'done' as const,
+        rtDataSearch: [
+            { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done' as const, count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+            { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done' as const, count: 15, sources: [
+                { title: 'Q4 Earnings Beat Expectations — Revenue surges 18% YoY', domain: 'reuters.com', favicon: 'reuters', url: 'https://reuters.com' },
+                { title: 'Analyst Upgrades Rating to Overweight on Margin Expansion', domain: 'bloomberg.com', favicon: 'bloomberg', url: 'https://bloomberg.com' },
+                { title: 'Sector Outlook: Mixed Signals Amid Rising Rates', domain: 'wsj.com', favicon: 'wsj', url: 'https://wsj.com' },
+                { title: 'New Product Line Could Drive $2B in Incremental Revenue', domain: 'cnbc.com', favicon: 'cnbc', url: 'https://cnbc.com' },
+            ]},
+            { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done' as const, count: 23, sources: [
+                { title: 'Bullish sentiment trending — $TICKER mentions up 340% this week', domain: 'x.com', favicon: 'x', url: 'https://x.com' },
+                { title: 'Community DD: Deep value analysis with DCF model breakdown', domain: 'reddit.com', favicon: 'reddit', url: 'https://reddit.com' },
+                { title: 'Institutional flow data shows heavy accumulation at support', domain: 'stocktwits.com', favicon: 'stocktwits', url: 'https://stocktwits.com' },
+            ]},
+        ],
+        rtRounds: [
+            {
+                round: 1, status: 'done' as const,
+                agents: r1.map((a, i) => ({ agentId: a.id, agentName: a.name, status: 'done' as const, verdict: verdicts[i], confidence: confs[i], reasoning: reasonings[i] })),
+            },
+            {
+                round: 2, status: 'done' as const,
+                agents: r2.map((a, i) => ({
+                    agentId: a.id, agentName: a.name, status: 'done' as const,
+                    verdict: i === 2 ? 'Neutral' : verdicts[i], confidence: confs[i] + (i === 2 ? 10 : 0), reasoning: reasonings[i],
+                    changedMind: i === 2, previousVerdict: i === 2 ? 'Bearish' : undefined,
+                    crossReferences: [r2[(i + 1) % r2.length]?.name, r2[(i + 2) % r2.length]?.name].filter(Boolean),
+                })),
+            },
+        ],
+        rtConsensus: {
+            status: 'done' as const, hasConsensus: true, conflictRate: 20,
+            agentConclusions: r2.map((a, i) => ({ agentName: a.name, verdict: i === 2 ? 'Neutral' : verdicts[i], confidence: confs[i] + (i === 2 ? 10 : 0) })),
+            finalVerdict: 'Bullish', finalConfidence: 74,
+        },
+        rtReportStatus: 'done' as const,
+    };
+}
+
 /* ── Avatar mapping: name/id → JPG path ── */
-const AVATAR_MAP: Record<string, string> = {
+export const AVATAR_MAP: Record<string, string> = {
     // SUMMON_POOL system agents
     fundamental_specialist: '/avatars/fundamental_specialist.jpg',
     valuation_specialist: '/avatars/valuation_specialist.jpg',
@@ -593,7 +749,7 @@ const getAgentAvatar = (nameOrId: string) => AVATAR_MAP[nameOrId] || '/avatars/d
 const prettyAgentName = (raw: string) =>
     AVATAR_MAP[raw] ? raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : raw;
 
-const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: string }> = ({ nameOrId, size = 24, className = '' }) => {
+export const AgentAvatarImg: React.FC<{ nameOrId: string; size?: number; className?: string }> = ({ nameOrId, size = 24, className = '' }) => {
     const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 3) : 1;
     const renderSize = Math.round(size * dpr);
     return (
@@ -731,8 +887,28 @@ const reconstructRtFieldsFromConsensus = (
         agent_3: 'Quant Tracker',
     };
 
-    // --- Reconstruct rtDataSearch from modules (no hardcoded placeholders) ---
-    const rtDataSearch: RtDataCategory[] = deriveRtDataSearchFromModules(modules);
+    // --- Reconstruct rtDataSearch from modules ---
+    const searchMod = modules.find(m => m.type === 'search');
+    const searchData = searchMod?.data as SearchModuleData | undefined;
+    const searchSources = searchData?.sources || [];
+    const sectionSources = searchData?.sections?.find((s: any) => s.id === 'social')?.sources || [];
+
+    const newsSrc = searchSources.filter(s =>
+        !['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+    );
+    const socialSrc = [...sectionSources, ...searchSources.filter(s =>
+        ['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+    )];
+
+    const rtDataSearch: RtDataCategory[] = [
+        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'done', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'done', count: newsSrc.length || 8,
+            ...(newsSrc.length > 0 ? { sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
+        },
+        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'done', count: socialSrc.length || 6,
+            ...(socialSrc.length > 0 ? { sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })) } : {}),
+        },
+    ];
 
     // --- Reconstruct rtRounds from discussionRounds or agentResponses ---
     const discussionRounds: any[] = consensus.discussionRounds || [];
@@ -823,7 +999,7 @@ const reconstructRtFieldsFromConsensus = (
     const rtConsensus: RtConsensusResult = {
         status: 'done',
         hasConsensus: consensusReached,
-        conflictRate,
+        conflictRate: consensusReached ? 15 : 40,
         agentConclusions: allAgents.map(a => ({
             agentName: a.agentName,
             verdict: a.verdict || 'Neutral',
@@ -956,203 +1132,7 @@ const buildRoundtableFromConsensus = (result: any): RoundtableData => {
 };
 
 // ─── Knowledge Graph Types ──────────────────────────────────
-interface KGNode {
-    id: string;
-    type: 'agent' | 'task' | 'stance';
-    label: string;
-    x: number;
-    y: number;
-    data?: Record<string, string>;
-}
-
-interface KGEdge {
-    id: string;
-    source: string;
-    target: string;
-    label: string;
-}
-
-interface KnowledgeGraphData {
-    nodes: KGNode[];
-    edges: KGEdge[];
-}
-
-const STATIC_KG_DATA: KnowledgeGraphData = {
-    nodes: [
-        { id: 'agent_0', type: 'agent', label: 'agent_0', x: 0, y: 0 },
-        { id: 'agent_1', type: 'agent', label: 'agent_1', x: 0, y: 0 },
-        { id: 'agent_2', type: 'agent', label: 'agent_2', x: 0, y: 0 },
-        { id: 'agent_3', type: 'agent', label: 'agent_3', x: 0, y: 0 },
-        { id: 'round_1', type: 'task', label: 'Round 1', x: 0, y: 0 },
-        { id: 'round_2', type: 'task', label: 'Round 2', x: 0, y: 0 },
-        { id: 'round_3', type: 'task', label: 'Round 3', x: 0, y: 0 },
-        { id: 'round_4', type: 'task', label: 'Round 4', x: 0, y: 0 },
-        { id: 'node_A', type: 'stance', label: 'A', x: 0, y: 0 },
-        { id: 'node_B', type: 'stance', label: 'B', x: 0, y: 0 },
-    ],
-    edges: [
-        { id: 'e1', source: 'agent_1', target: 'round_2', label: 'participates_in' },
-        { id: 'e2', source: 'agent_1', target: 'round_3', label: 'participates_in' },
-        { id: 'e3', source: 'agent_1', target: 'round_4', label: 'participates_in' },
-        { id: 'e4', source: 'agent_1', target: 'node_B', label: 'supports' },
-        { id: 'e5', source: 'agent_3', target: 'round_2', label: 'participates_in' },
-        { id: 'e6', source: 'agent_3', target: 'round_3', label: 'participates_in' },
-        { id: 'e7', source: 'agent_3', target: 'round_4', label: 'participates_in' },
-        { id: 'e8', source: 'agent_3', target: 'node_B', label: 'supports' },
-        { id: 'e9', source: 'agent_2', target: 'round_1', label: 'participates_in' },
-        { id: 'e10', source: 'agent_2', target: 'round_2', label: 'participates_in' },
-        { id: 'e11', source: 'agent_2', target: 'round_3', label: 'participates_in' },
-        { id: 'e12', source: 'agent_2', target: 'round_4', label: 'participates_in' },
-        { id: 'e13', source: 'agent_2', target: 'node_A', label: 'supports' },
-        { id: 'e14', source: 'agent_2', target: 'node_B', label: 'supports' },
-        { id: 'e15', source: 'agent_0', target: 'round_1', label: 'participates_in' },
-        { id: 'e16', source: 'agent_0', target: 'round_2', label: 'participates_in' },
-        { id: 'e17', source: 'agent_0', target: 'round_3', label: 'participates_in' },
-        { id: 'e18', source: 'agent_0', target: 'round_4', label: 'participates_in' },
-        { id: 'e19', source: 'agent_0', target: 'node_B', label: 'supports' },
-    ]
-};
-
-const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
-
 // ─── KnowledgeGraphView Component ──────────────────────────
-const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData }> = ({ data }) => {
-    const svgRef = useRef<SVGSVGElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        if (!svgRef.current || !data.nodes.length) return;
-
-        const svg = d3.select(svgRef.current);
-        const width = containerRef.current?.clientWidth || 400;
-        const height = containerRef.current?.clientHeight || 600;
-
-        svg.selectAll('*').remove();
-
-        const zoom = d3.zoom<SVGSVGElement, unknown>()
-            .scaleExtent([0.1, 4])
-            .on('zoom', (e) => {
-                g.attr('transform', e.transform);
-            });
-        
-        svg.call(zoom as any);
-
-        const g = svg.append('g');
-
-        svg.append('defs').append('marker')
-            .attr('id', 'arrow')
-            .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 22)
-            .attr('refY', 0)
-            .attr('markerWidth', 5)
-            .attr('markerHeight', 5)
-            .attr('orient', 'auto')
-            .append('path')
-            .attr('fill', '#9ca3af')
-            .attr('d', 'M0,-4L8,0L0,4');
-
-        const nodes = data.nodes.map(d => ({ ...d }));
-        const edges = data.edges.map(d => ({ ...d }));
-
-        const simulation = d3.forceSimulation(nodes as any)
-            .force('link', d3.forceLink(edges).id((d: any) => d.id).distance(110))
-            .force('charge', d3.forceManyBody().strength(-400))
-            .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collide', d3.forceCollide().radius(40));
-
-        const link = g.append('g')
-            .attr('stroke', '#9ca3af')
-            .attr('stroke-opacity', 0.8)
-            .selectAll('line')
-            .data(edges)
-            .join('line')
-            .attr('stroke-width', 1.5)
-            .attr('marker-end', 'url(#arrow)');
-
-        const linkLabel = g.append('g')
-            .selectAll('text')
-            .data(edges)
-            .join('text')
-            .text((d: any) => d.label)
-            .attr('font-size', '8px')
-            .attr('fill', '#9ca3af')
-            .attr('text-anchor', 'middle');
-
-        const drag = d3.drag<SVGGElement, any>()
-            .on('start', (event, d) => {
-                if (!event.active) simulation.alphaTarget(0.3).restart();
-                d.fx = d.x;
-                d.fy = d.y;
-            })
-            .on('drag', (event, d) => {
-                d.fx = event.x;
-                d.fy = event.y;
-            })
-            .on('end', (event, d) => {
-                if (!event.active) simulation.alphaTarget(0);
-                d.fx = null;
-                d.fy = null;
-            });
-
-        const node = g.append('g')
-            .selectAll('g')
-            .data(nodes)
-            .join('g')
-            .call(drag as any)
-            .style('cursor', 'grab');
-
-        node.append('circle')
-            .attr('r', (d: any) => d.type === 'agent' ? 18 : 14)
-            .attr('fill', (d: any) => d.type === 'agent' ? '#f3f4f6' : d.type === 'stance' ? '#f5f3ff' : '#eff6ff')
-            .attr('stroke', (d: any) => d.type === 'agent' ? '#6b7280' : d.type === 'stance' ? '#7c3aed' : '#3b82f6')
-            .attr('stroke-width', 1.5);
-
-        node.append('text')
-            .text((d: any) => {
-                const parts = d.label.split(' ');
-                return d.type === 'agent' ? parts[0] : (d.label.length > 15 ? d.label.slice(0, 13) + '…' : d.label);
-            })
-            .attr('y', 28)
-            .attr('font-size', '9px')
-            .attr('fill', (d: any) => d.type === 'agent' ? '#374151' : d.type === 'stance' ? '#5b21b6' : '#1d4ed8')
-            .attr('text-anchor', 'middle')
-            .attr('font-weight', '500');
-
-        simulation.on('tick', () => {
-            link
-                .attr('x1', (d: any) => d.source.x)
-                .attr('y1', (d: any) => d.source.y)
-                .attr('x2', (d: any) => d.target.x)
-                .attr('y2', (d: any) => d.target.y);
-
-            linkLabel
-                .attr('x', (d: any) => (d.source.x + d.target.x) / 2)
-                .attr('y', (d: any) => (d.source.y + d.target.y) / 2 - 4);
-
-            node
-                .attr('transform', (d: any) => `translate(${d.x},${d.y})`);
-        });
-
-        return () => {
-            simulation.stop();
-        };
-    }, [data.nodes, data.edges]);
-
-    return (
-        <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white" style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
-            <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
-            <div className="absolute bottom-4 left-4 flex gap-4 z-10">
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f3f4f6] border border-[#6b7280]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Agent</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#eff6ff] border border-[#3b82f6]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Task</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f5f3ff] border border-[#7c3aed]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Stance</span></div>
-            </div>
-            <div className="absolute top-4 right-4 text-[10px] text-gray-500 font-mono text-right pointer-events-none">
-                scroll to zoom<br/>drag to pan
-            </div>
-        </div>
-    );
-};
-
 // ─── RoundtableView Component ──────────────────────────
 const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLive?: boolean; hideHeader?: boolean;
     summonPhase?: 'idle' | 'loading' | 'narrating' | 'selecting'; selectedSummonIds?: Set<string>;
@@ -1206,7 +1186,7 @@ const RoundtableView: React.FC<{ data: RoundtableData; isWaiting?: boolean; isLi
         <div className="flex flex-col h-full bg-white">
             {/* Knowledge Graph — fills full space */}
             <div className="flex-1 min-h-0 relative">
-                <KnowledgeGraphView data={buildKnowledgeGraph()} />
+                <KnowledgeGraphView data={buildKnowledgeGraph()} animate={!!isLive} />
             </div>
         </div>
     );
@@ -1356,7 +1336,7 @@ const CANNED_THINKING_MESSAGES: Record<string, string[]> = {
     ],
     web3: [
         'Querying CoinGecko market data',
-        'Pulling OKX perps funding',
+        'Pulling perpetual funding rates',
         'Reading on-chain signals',
         'Aggregating sentiment indicators',
         'Verifying coin identity',
@@ -1409,6 +1389,185 @@ const CANNED_THINKING_MESSAGES: Record<string, string[]> = {
         'Structuring the argument',
     ],
 };
+
+// ─── PlanPipeline — compact stage pipeline (reused by Roundtable header) ──
+// Pushes "process as result" into the left column instead of burying it in
+// the right panel. English only — we intentionally ignore backend-provided
+// `planningMessage` which may be Chinese.
+const PlanPipeline: React.FC<{ thinking: ThinkingFlow; compact?: boolean }> = ({ thinking, compact }) => {
+    // A turn counts as Roundtable as soon as ANY of these signals exist —
+    // routedMode arrives only after backend routing completes, but
+    // rtPreparationStatus / selectedAgentIds are set the moment the user
+    // confirms Summon, so the stepper appears immediately for RT flows.
+    const isRt = thinking.routedMode === 'roundtable'
+        || thinking.rtPreparationStatus !== undefined
+        || (thinking.selectedAgentIds?.length ?? 0) > 0;
+
+    const stages = useMemo(() => {
+        if (isRt) {
+            // ── Roundtable 5-dot stepper, driven by REAL backend signals ──
+            // Previously these dots were driven by `rtDataSearch` /
+            // `rtRounds` / `rtPreparationStatus` etc, which were populated
+            // by the demo timer chain in handleSummonConfirm. After we
+            // disabled the demo, those signals never advance, so the dots
+            // would freeze. Now we read directly from:
+            //   • thinking.modules         — real backend emitter events
+            //   • thinking.rtRounds        — fed by agent_responded events
+            //   • thinking.rtConsensus     — fed by consensus_done event
+            //   • thinking.isActive        — false once stream_done fires
+            const dataArr = thinking.rtDataSearch || [];
+            const dataActive = dataArr.some(s => s.status === 'active');
+            const dataDoneFromDemo = dataArr.length > 0 && dataArr.every(s => s.status === 'done');
+            const roundsArr = thinking.rtRounds || [];
+            const roundsActive = roundsArr.some(r => r.status === 'active');
+            const roundsDone = roundsArr.length > 0 && roundsArr.every(r => r.status === 'done');
+            const mods = thinking.modules || [];
+            const dataModuleCompleted = mods.some(
+                m => (m.type === 'search' || m.type === 'analysis' || m.type === 'web3') && m.status === 'completed'
+            );
+            const dataModuleActive = mods.some(
+                m =>
+                    (m.type === 'search' || m.type === 'analysis' || m.type === 'web3') &&
+                    (m.status === 'active' || (m.status as string) === 'analyzing')
+            );
+            const consensusDone = thinking.rtConsensus?.status === 'done';
+            const consensusActive = thinking.rtConsensus?.status === 'active'
+                || mods.some(m => m.type === 'consensus' && m.status === 'active');
+            const reportActive = thinking.isActive && consensusDone;
+            const reportDone = thinking.rtReportStatus === 'done'
+                || (!thinking.isActive && consensusDone);
+
+            return [
+                { key: 'summon', label: 'Summon',
+                    done: roundsArr.length > 0 || roundsActive || consensusActive || consensusDone || thinking.rtPreparationStatus === 'done',
+                    active: thinking.rtPreparationStatus !== 'done' && roundsArr.length === 0 && !consensusActive && !consensusDone },
+                { key: 'research', label: 'Research',
+                    done: dataModuleCompleted || dataDoneFromDemo,
+                    active: !dataModuleCompleted && (dataActive || dataModuleActive) },
+                { key: 'debate', label: 'Debate',
+                    done: roundsDone || consensusDone,
+                    active: !consensusDone && (roundsActive || (roundsArr.length > 0 && !roundsDone)) },
+                { key: 'consensus', label: 'Consensus',
+                    done: consensusDone,
+                    active: !consensusDone && consensusActive },
+                { key: 'report', label: 'Report',
+                    done: reportDone,
+                    active: !reportDone && reportActive },
+            ];
+        }
+        const trace = thinking.toolTrace || [];
+        const anyToolRunning = trace.some(t => t.status === 'running');
+        const anyToolDone = trace.some(t => t.status === 'done');
+        // Web / web3 / analysis research goes through modules, not toolTrace
+        // (crypto market-data queries, exa/tavily web search, etc.). Include
+        // those signals so Research lights up when tools aren't being invoked.
+        const standardMods = thinking.modules || [];
+        const isDataMod = (t: string) => t === 'search' || t === 'analysis' || t === 'web3';
+        const anyModActive = standardMods.some(
+            m => isDataMod(m.type) && (m.status === 'active' || (m.status as string) === 'analyzing')
+        );
+        const anyModDone = standardMods.some(
+            m => isDataMod(m.type) && m.status === 'completed'
+        );
+        const anyRunning = anyToolRunning || anyModActive;
+        const anyDone = anyToolDone || anyModDone;
+        // Research turns green once all data-gathering stops — don't gate on
+        // !thinking.isActive, since that's also true during the Respond/
+        // synthesis phase (tools are done but model is still streaming).
+        const researchDone = anyDone && !anyRunning;
+        return [
+            { key: 'route', label: 'Route',
+                done: !!thinking.routedMode, active: !thinking.routedMode && thinking.isActive },
+            { key: 'research', label: 'Research',
+                done: researchDone,
+                active: anyRunning },
+            { key: 'respond', label: 'Respond',
+                done: !thinking.isActive,
+                active: thinking.isActive && !anyRunning && !!thinking.routedMode },
+        ];
+    }, [thinking, isRt]);
+
+    // Product decision: the progress stepper is Roundtable-only. Standard
+    // Auto / Fast queries don't render it at all. We keep the non-RT branch
+    // above (currently unreached) so this decision is easy to revert if the
+    // product stance changes.
+    if (!isRt) return null;
+    if (stages.every(s => !s.done && !s.active)) return null;
+
+    const txtCls = compact ? 'text-[10px]' : 'text-[10.5px]';
+
+    return (
+        <div className="inline-flex items-center gap-1.5">
+            {stages.map((s, i) => {
+                const state: 'done' | 'active' | 'pending' = s.done ? 'done' : s.active ? 'active' : 'pending';
+                const prev = i > 0 ? stages[i - 1] : null;
+                // Connector filled only when prev step is done. If current step is active,
+                // animate a gradient sweep from prev (green) → current (gray) to visualize progress.
+                const connectorFilled = !!prev && prev.done;
+                const connectorAnimating = connectorFilled && state === 'active';
+                return (
+                    <React.Fragment key={s.key}>
+                        {i > 0 && (
+                            connectorAnimating ? (
+                                <span className="relative h-px w-4 rounded-full overflow-hidden bg-gray-200">
+                                    {/* base tint so it's not fully grey */}
+                                    <span className="absolute inset-0 bg-emerald-500/20" />
+                                    {/* moving shimmer */}
+                                    <span
+                                        className="absolute inset-y-0 left-0 w-1/2 rounded-full bg-gradient-to-r from-transparent via-emerald-500 to-transparent"
+                                        style={{ animation: 'stepper-connector-flow 1.4s ease-in-out infinite' }}
+                                    />
+                                </span>
+                            ) : (
+                                <span className={`h-px w-4 rounded-full transition-colors duration-500 ${connectorFilled ? 'bg-emerald-500' : 'bg-gray-200'}`} />
+                            )
+                        )}
+                        <span className="inline-flex items-center gap-1">
+                            {state === 'done' ? (
+                                <span className="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-emerald-500 text-white shrink-0 shadow-[0_0_0_2px_rgba(16,185,129,0.12)]">
+                                    <svg className="w-[8px] h-[8px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={4} strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M5 13l4 4L19 7" style={{ strokeDasharray: 24, strokeDashoffset: 0, animation: 'stepper-check-draw 0.35s ease-out' }} />
+                                    </svg>
+                                </span>
+                            ) : state === 'active' ? (
+                                <span className="relative flex items-center justify-center w-3.5 h-3.5 shrink-0">
+                                    {/* outer expanding ring */}
+                                    <span className="absolute inset-0 rounded-full border-2 border-gray-900/25" style={{ animation: 'stepper-active-ring 1.6s ease-in-out infinite' }} />
+                                    {/* rotating arc */}
+                                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 24 24" style={{ animation: 'stepper-spin 1.2s linear infinite' }}>
+                                        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"
+                                            className="text-gray-900" strokeDasharray="14 42" />
+                                    </svg>
+                                    {/* center solid dot */}
+                                    <span className="relative w-1.5 h-1.5 rounded-full bg-gray-900" />
+                                </span>
+                            ) : (
+                                <span className="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0" />
+                            )}
+                            <span className={`${txtCls} tracking-wide transition-colors ${
+                                state === 'done' ? 'text-gray-600 font-medium'
+                                : state === 'active' ? 'text-gray-900 font-semibold'
+                                : 'text-gray-400'
+                            }`}>{s.label}</span>
+                        </span>
+                    </React.Fragment>
+                );
+            })}
+        </div>
+    );
+};
+
+// Kept as a no-op alias so older imports in this file don't break during the
+// merge into RoundtableGraphInline. Safe to remove in a follow-up cleanup.
+class PlanCardBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+    constructor(props: { children: React.ReactNode }) {
+        super(props);
+        this.state = { hasError: false };
+    }
+    static getDerivedStateFromError() { return { hasError: true }; }
+    componentDidCatch(err: unknown, info: unknown) { console.error('[PlanCard crashed]', err, info); }
+    render() { return this.state.hasError ? null : this.props.children; }
+}
 
 // ─── ThinkingInlineTrigger (Grok-style with staged progress rows) ──────
 const ThinkingInlineTrigger: React.FC<{
@@ -1492,26 +1651,8 @@ const ThinkingInlineTrigger: React.FC<{
 
     useEffect(() => { setTickerIdx(0); }, [allTickerItems.length]);
 
-    const isSimple = thinking.routedMode === 'fast';
-
-    // Simple mode: single line, no panel open
-    if (isSimple) {
-        return (
-            <div className="flex items-center gap-2 py-1.5 mb-2">
-                {thinking.isActive ? (
-                    <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                ) : (
-                    <svg className="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                )}
-                <span className="text-[13px] font-medium text-gray-400">{phaseLabel}</span>
-                {thinking.isActive && elapsedSec > 0 && (
-                    <span className="text-[12px] font-semibold text-gray-500 tabular-nums">{elapsedSec}s</span>
-                )}
-            </div>
-        );
-    }
-
-    // Full mode — arrow stays aligned to line 1 (items-center on the top row)
+    // Unified rich mode for all routed modes (fast / roundtable / undefined):
+    // clickable button to open Process panel + rotating ticker of live progress.
     return (
         <button onClick={onOpen} className="group py-1.5 mb-2 hover:opacity-80 transition-opacity text-left">
             {/* Top row: spinner/check + title + elapsed + arrow */}
@@ -1564,7 +1705,6 @@ const PlatformLogo: React.FC<{ platform: string }> = ({ platform }) => {
     }
 };
 
-/** Prefer real site favicon from domain, fallback to platform icon. */
 const SourceFavicon: React.FC<{ source: SearchSource }> = ({ source }) => {
     const [imgFailed, setImgFailed] = useState(false);
     const hasDomain = !!source.domain && source.domain.trim().length > 0;
@@ -1642,6 +1782,19 @@ const okxSummarizeWindow = (
     const pct = oldestOpen > 0 ? ((latestClose - oldestOpen) / oldestOpen) * 100 : NaN;
     return { high, low, pct };
 };
+
+export const fmtTs = (ms: number) => {
+    const d = new Date(ms);
+    const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+};
+
+
+// ─── RoundtableWorkbench ─────────────────────────────────────────
+// Unified workbench card (replaces RoundtableGraphInline):
+//   left column  = rich agent roster (avatar + name + role + bio + tags)
+//   right column = tabs (Graph | Debate) — no redundant top bar
+
 // ─── ThinkingProcessSidePanel (modular right panel) ─────────
 const ThinkingProcessSidePanel: React.FC<{
     thinking: ThinkingFlow;
@@ -1773,15 +1926,22 @@ const ThinkingProcessSidePanel: React.FC<{
     // defined at module level as HtmlReportFrame
 
     // ── Analysis Module Renderer ──
+    const AnalysisStageIcon: React.FC<{ id: string; className?: string }> = ({ id, className = 'w-3.5 h-3.5' }) => {
+        switch (id) {
+            case 'fundamental':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>;
+            case 'technical':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" /></svg>;
+            case 'sentiment':
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>;
+            default:
+                return <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>;
+        }
+    };
+
     const AnalysisModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const d = mod.data as AnalysisModuleData | undefined;
         if (!d) return null;
-
-        const stageIcons: Record<string, string> = {
-            fundamental: '📊',
-            technical: '📈',
-            sentiment: '💬',
-        };
 
         return (
             <div>
@@ -1792,14 +1952,14 @@ const ThinkingProcessSidePanel: React.FC<{
                 <div className="ml-7 space-y-2.5 mb-3">
                     {d.stages.map((stage) => {
                         const hasResults = stage.status === 'done' && stage.result && stage.result.length > 0;
-                        const icon = stageIcons[stage.id || ''] || '🔍';
+                        const iconColor = stage.status === 'done' ? 'text-gray-500' : stage.status === 'active' ? 'text-blue-500' : 'text-gray-300';
                         return (
                             <div key={stage.id || stage.label} className={`rounded-xl border transition-all duration-300 overflow-hidden ${stage.status === 'done' ? 'border-gray-100 bg-gray-50/50' :
                                 stage.status === 'active' ? 'border-blue-100 bg-blue-50/30' :
                                     'border-gray-100 bg-white'
                                 }`}>
                                 <div className="flex items-center gap-2 px-3 py-2">
-                                    <span className="text-[13px]">{icon}</span>
+                                    <span className={`shrink-0 ${iconColor}`}><AnalysisStageIcon id={stage.id || ''} /></span>
                                     <span className={`text-[12px] font-medium flex-1 ${stage.status === 'done' ? 'text-gray-700' :
                                         stage.status === 'active' ? 'text-blue-600' : 'text-gray-400'
                                         }`}>{stage.label}</span>
@@ -1946,30 +2106,6 @@ const ThinkingProcessSidePanel: React.FC<{
                     <StatusIcon status="done" />
                     <span className="text-[14px] font-bold text-gray-900">Done</span>
                     {displayDur && <span className="text-[11px] text-gray-400 ml-auto">{displayDur}</span>}
-                </div>
-            </div>
-        );
-    };
-
-    // ── Web3 Module Renderer (CoinGecko MCP) ──
-    const Web3Module: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
-        const d = (mod.data || {}) as { label?: string };
-        const provider = d.label || 'CoinGecko MCP';
-        return (
-            <div>
-                <div className="flex items-center gap-2.5 mb-3">
-                    <StatusIcon status={mod.status} />
-                    <span className="text-[14px] font-bold text-gray-900">Crypto</span>
-                </div>
-                <div className="ml-7 mb-3">
-                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${mod.status === 'completed'
-                        ? 'bg-emerald-50 text-emerald-700'
-                        : mod.status === 'active'
-                            ? 'bg-blue-50 text-blue-600 animate-pulse'
-                            : 'bg-gray-50 text-gray-300'
-                        }`}>
-                        {mod.status === 'completed' ? '✓' : mod.status === 'active' ? '⟳' : '·'} {provider}
-                    </span>
                 </div>
             </div>
         );
@@ -2302,30 +2438,38 @@ const ThinkingProcessSidePanel: React.FC<{
     };
 
     const RtPhaseDataSearch: React.FC = () => {
-        // Live-derive categories from the current modules so the panel updates
-        // continuously as search / analysis events stream in (not only once at
-        // consensus_done). If rtDataSearch was already populated by a completed
-        // consensus (history restore), merge it over the derived one.
-        const derived = deriveRtDataSearchFromModules(thinking.modules);
-        const saved = thinking.rtDataSearch;
-        const enriched: RtDataCategory[] = saved
-            ? derived.map(d => {
-                const s = saved.find(x => x.id === d.id);
-                if (!s) return d;
-                // Prefer saved data when it's more complete
-                return {
-                    ...d,
-                    ...s,
-                    status: s.status === 'done' ? 'done' : d.status,
-                    sources: s.sources && s.sources.length > 0 ? s.sources : d.sources,
-                    items: s.items && s.items.length > 0 ? s.items : d.items,
-                    count: s.count ?? d.count,
-                };
-            })
-            : derived;
+        // Merge sources from search module if available
+        const searchMod = thinking.modules.find(m => m.type === 'search');
+        const searchData = searchMod?.data as SearchModuleData | undefined;
+        const searchSources = searchData?.sources || [];
+        const sectionSources = searchData?.sections?.find(s => s.id === 'social')?.sources || [];
+
+        const categories: RtDataCategory[] = thinking.rtDataSearch || [
+            { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'pending' },
+            { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'pending' },
+            { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'pending' },
+        ];
+
+        // Auto-inject search sources into news/social if they have no sources yet
+        const enriched = categories.map(cat => {
+            if (cat.sources && cat.sources.length > 0) return cat;
+            if (cat.id === 'news') {
+                const newsSrc = searchSources.filter(s =>
+                    !['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+                );
+                if (newsSrc.length > 0) return { ...cat, sources: newsSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })), count: cat.count ?? newsSrc.length };
+            }
+            if (cat.id === 'social') {
+                const socialSrc = [...sectionSources, ...searchSources.filter(s =>
+                    ['x.com', 'twitter.com', 'reddit.com', 'stocktwits.com'].includes(s.domain)
+                )];
+                if (socialSrc.length > 0) return { ...cat, sources: socialSrc.map(s => ({ title: s.title, domain: s.domain, favicon: s.favicon, url: s.url })), count: cat.count ?? socialSrc.length };
+            }
+            return cat;
+        });
 
         const anyActive = enriched.some(c => c.status === 'active');
-        const allDone = enriched.length > 0 && enriched.every(c => c.status === 'done');
+        const allDone = enriched.every(c => c.status === 'done');
         const phaseStatus = allDone ? 'done' : anyActive ? 'active' : 'pending';
         const collapsed = !!collapsedSections['dataCollection'];
 
@@ -2411,7 +2555,7 @@ const ThinkingProcessSidePanel: React.FC<{
         return (
             <div>
                 <button onClick={() => toggleSection('round1')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
-                    <StepBadge step={1} done={allDone} />
+                    <StepBadge step={3} done={allDone} />
                     <div className="flex-1 min-w-0">
                         <span className="text-[14px] font-bold text-gray-900">Round 1 · Thesis Formation</span>
                         <p className="text-[10px] text-gray-400 mt-0.5">Generating analytical conclusions</p>
@@ -2483,7 +2627,7 @@ const ThinkingProcessSidePanel: React.FC<{
         return (
             <div>
                 <button onClick={() => toggleSection('round2')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
-                    <StepBadge step={2} done={allDone} />
+                    <StepBadge step={4} done={allDone} />
                     <div className="flex-1 min-w-0">
                         <span className="text-[14px] font-bold text-gray-900">Round 2 · Cross Validation</span>
                         <p className="text-[10px] text-gray-400 mt-0.5">Agents debate, challenge, and re-evaluate</p>
@@ -2549,13 +2693,6 @@ const ThinkingProcessSidePanel: React.FC<{
                                 </div>
                             );
                         })}
-                        {allDone && mindChanges > 0 && (
-                            <div className="mt-1 px-3 py-2 bg-amber-50/60 rounded-xl border border-amber-100/60 text-center">
-                                <span className="text-[10px] text-amber-700 font-medium">
-                                    ↻ {mindChanges} agent{mindChanges > 1 ? 's' : ''} changed conclusion after cross-validation
-                                </span>
-                            </div>
-                        )}
                     </div>
                 )}
             </div>
@@ -2575,7 +2712,7 @@ const ThinkingProcessSidePanel: React.FC<{
         return (
             <div>
                 <button onClick={() => toggleSection('consensus')} className="flex items-center gap-2.5 mb-3 w-full text-left group">
-                    <StepBadge step={3} done={consensus.status === 'done'} />
+                    <StepBadge step={5} done={consensus.status === 'done'} />
                     <span className="text-[14px] font-bold text-gray-900 flex-1">Consensus & Report</span>
                     <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${collapsed ? '-rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
                 </button>
@@ -2650,27 +2787,12 @@ const ThinkingProcessSidePanel: React.FC<{
         const hasCons = !!thinking.rtConsensus;
 
         return (
-            <div className="space-y-6">
-                {/* ── Section I: Preparation ── */}
-                <div>
-                    <h3 className="text-[13px] font-extrabold text-gray-800 tracking-wide mb-4">Preparation</h3>
-                    <div className="space-y-5 ml-1">
-                        <RtPhasePreparation />
-                        <RtPhaseDataSearch />
-                    </div>
-                </div>
-
-                {/* ── Section II: Roundtable ── */}
-                {(hasR1 || hasR2 || hasCons) && (
-                    <div>
-                        <h3 className="text-[13px] font-extrabold text-gray-800 tracking-wide mb-4">Roundtable</h3>
-                        <div className="space-y-5 ml-1">
-                            {hasR1 && <RtPhaseRound1 />}
-                            {hasR2 && <RtPhaseRound2 />}
-                            {hasCons && <RtPhaseConsensus />}
-                        </div>
-                    </div>
-                )}
+            <div className="space-y-5 ml-1">
+                <RtPhasePreparation />
+                <RtPhaseDataSearch />
+                {hasR1 && <RtPhaseRound1 />}
+                {hasR2 && <RtPhaseRound2 />}
+                {hasCons && <RtPhaseConsensus />}
             </div>
         );
     };
@@ -2698,19 +2820,14 @@ const ThinkingProcessSidePanel: React.FC<{
         // Remaining modules
         for (const mod of thinking.modules) {
             if (mod.type === 'search') continue;
+            if (mod.type === 'simulation') continue; // Simulation module hidden
             if (mod.type === 'done' && mod.status !== 'completed') continue;
             switch (mod.type) {
                 case 'analysis':
                     mods.push({ key: 'analysis', element: <AnalysisModule mod={mod} /> });
                     break;
-                case 'simulation':
-                    mods.push({ key: 'simulation', element: <SimulationModule mod={mod} /> });
-                    break;
                 case 'consensus':
                     mods.push({ key: 'consensus', element: <ConsensusModule mod={mod} /> });
-                    break;
-                case 'web3':
-                    mods.push({ key: 'web3', element: <Web3Module mod={mod} /> });
                     break;
                 case 'done':
                     mods.push({ key: 'done', element: <DoneModule mod={mod} /> });
@@ -2721,7 +2838,7 @@ const ThinkingProcessSidePanel: React.FC<{
     })();
 
     return (
-        <div className="flex flex-col h-full bg-white">
+        <div className="flex flex-col h-full">
             {!hideHeader && (
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <div>
@@ -2734,47 +2851,75 @@ const ThinkingProcessSidePanel: React.FC<{
             </div>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-                {isRoundtable ? (
-                    <RoundtableProcessView />
-                ) : (
-                    orderedModules.map((item) => (
-                        <div key={item.key}>{item.element}</div>
-                    ))
-                )}
+                {orderedModules.map((item) => (
+                    <div key={item.key}>{item.element}</div>
+                ))}
             </div>
         </div>
     );
 };
 
 // ─── Summarize user question into a short topic title ──────
-const STOP_WORDS = new Set(['THE', 'AND', 'FOR', 'NOT', 'ARE', 'BUT', 'HOW', 'WHY', 'CAN', 'YOU', 'HAS', 'WAS', 'HIS', 'HER', 'ALL', 'ANY', 'WHO', 'ITS', 'GET', 'LET', 'MAY', 'OUR', 'SAY', 'SHE', 'TOO', 'USE', 'WAY', 'NOW']);
+const STOP_WORDS = new Set(['THE', 'AND', 'FOR', 'NOT', 'ARE', 'BUT', 'HOW', 'WHY', 'CAN', 'YOU', 'HAS', 'WAS', 'HIS', 'HER', 'ALL', 'ANY', 'WHO', 'ITS', 'GET', 'LET', 'MAY', 'OUR', 'SAY', 'SHE', 'TOO', 'USE', 'WAY', 'NOW', 'FROM', 'WITH', 'VIEW', 'TAKE']);
+
+// Detect guru names mentioned in the query → returns display-friendly short name
+const GURU_TITLE_MAP: Array<[RegExp, string]> = [
+    [/\b(warren\s+)?buffett\b|巴菲特|股神/i, 'Buffett'],
+    [/\b(charlie\s+)?munger\b|芒格/i, 'Munger'],
+    [/\b(peter\s+)?lynch\b|林奇/i, 'Lynch'],
+    [/\b(ben(jamin)?\s+)?graham\b|格雷厄姆/i, 'Graham'],
+    [/\b(phil(ip)?\s+)?fisher\b|费雪/i, 'Fisher'],
+    [/\b(bill\s+)?ackman\b|阿克曼/i, 'Ackman'],
+    [/\bcathie(\s+wood)?\b|木头姐/i, 'Cathie Wood'],
+    [/\b(michael\s+)?burry\b|伯里|大空头/i, 'Burry'],
+    [/\b(mohnish\s+)?pabrai\b|帕布莱/i, 'Pabrai'],
+    [/\b(nassim\s+)?taleb\b|塔勒布|黑天鹅/i, 'Taleb'],
+    [/\b(stanley\s+)?druckenmiller\b|德鲁肯米勒/i, 'Druckenmiller'],
+    [/\b(aswath\s+)?damodaran\b|达摩达兰/i, 'Damodaran'],
+    [/\bjhunjhunwala\b|rakesh/i, 'Jhunjhunwala'],
+];
+
+function detectGurus(q: string): string[] {
+    const found = new Set<string>();
+    for (const [re, name] of GURU_TITLE_MAP) {
+        if (re.test(q)) found.add(name);
+    }
+    return Array.from(found);
+}
+
 function summarizeTitle(raw: string): string {
     if (!raw) return 'New Chat';
     const q = raw.replace(/[？?！!。]+$/g, '').trim();
     const tickers = [...new Set((q.match(/\b[A-Z]{2,5}\b/g) || []).filter(t => !STOP_WORDS.has(t)))];
+    const gurus = detectGurus(q);
+    const isZh = /[\u4e00-\u9fff]/.test(q);
+
+    // Guru-centric queries → "TSLA: Damodaran's Take" / "巴菲特看 TSLA"
+    if (gurus.length > 0) {
+        const subject = tickers[0] || (() => {
+            // Try extract a subject noun before/after the guru mention
+            const m = q.match(/(?:on|about|for|看|怎么看|的观点|分析)\s*([A-Za-z\u4e00-\u9fff0-9\.\-]{2,20})/i);
+            return m ? m[1].trim() : '';
+        })();
+        const guruStr = gurus.length === 1 ? gurus[0] : gurus.slice(0, 2).join(' & ');
+        if (subject) return isZh ? `${guruStr}看${subject}` : `${subject}: ${guruStr}'s Take`;
+        return isZh ? `${guruStr}的观点` : `${guruStr}'s View`;
+    }
 
     const cmpMatch = q.match(/(?:compare|对比|vs\.?)\s+(.{2,15})\s+(?:vs\.?|and|与|和|跟)\s+(.{2,15})/i);
     if (cmpMatch) return `${cmpMatch[1].trim()} vs ${cmpMatch[2].trim().replace(/\s*(fundamentals|for|的|基本面).*/i, '')} Comparison`;
 
-    // risk-reward pattern: must be checked before generic analyze/risk rules
-    if (/risk[\s-]reward/i.test(q)) {
-        return tickers.length > 0 ? `${tickers[0]} Risk-Reward Analysis` : 'Risk-Reward Analysis';
-    }
-
-    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,50}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况).*)?$/i);
+    const analyzeMatch = q.match(/(?:analyze|analysis|分析|研究|evaluate|评估)\s+(.{2,30}?)(?:\s+(?:stock|recent|latest|最近|performance|表现|情况|from|by).*)?$/i);
     if (analyzeMatch) {
-        if (tickers.length > 0) return `${tickers.slice(0, 2).join(' & ')} Analysis`;
-        const captured = analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim();
-        const words = captured.split(/\s+/).slice(0, 4).join(' ');
-        return `${words} Analysis`;
+        const subject = analyzeMatch[1].replace(/^(the|a|an|this)\s+/i, '').replace(/'s$/, '').trim();
+        return `${subject} Analysis`;
     }
 
     const buyMatch = q.match(/(?:is|should|are|值得|适合|能不能|可以)\s+(.{2,20}?)\s+(?:still\s+)?(?:a\s+)?(?:buy|worth|invest|入手|买入|购买)/i);
     if (buyMatch) return `${buyMatch[1].replace(/^(i|we)\s+/i, '').trim()} Investment Outlook`;
 
     if (/risk|风险/.test(q)) {
-        if (tickers.length > 0) return `${tickers[0]} Risk Assessment`;
-        const subject = q.match(/(?:risk|风险)\s+(?:(?:assessment|评估|of|for)\s+)?(.{2,20})/i);
+        const subject = q.match(/(?:risk|风险)\s*(?:of|assessment|评估)?\s*(?:of|for)?\s*(.{2,20})/i);
         return subject ? `${subject[1].trim()} Risk Assessment` : 'Risk Assessment';
     }
     if (/forecast|predict|预测|simulate|模拟/.test(q)) {
@@ -2795,8 +2940,8 @@ function summarizeTitle(raw: string): string {
         .replace(/^(search|find|look|check|tell me|give me|show me)\s+(for|about|into|up)?\s*/i, '')
         .trim();
     const words = core.split(/\s+/);
-    const short = words.length > 5 ? words.slice(0, 5).join(' ') : core;
-    return short.length > 25 ? short.slice(0, 22) + '…' : short;
+    const short = words.length > 8 ? words.slice(0, 8).join(' ') : core;
+    return short.length > 50 ? short.slice(0, 48) + '…' : short;
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -2804,16 +2949,19 @@ function summarizeTitle(raw: string): string {
 // ═════════════════════════════════════════════════════════════
 interface SuperAgentChatProps {
     initialMessage: string;
-    initialImages?: ChatImagePayload[];
     onBack: () => void;
     agentCount?: number;
     selectedAgentId?: string;
     initialSessionId?: string;
     /** From home screen mode selector (not used when opening history-only session). */
     initialChatMode?: 'auto' | 'fast' | 'roundtable';
+    /** When true, the Roundtable summon flow auto-confirms after the selecting
+     *  phase reveals, producing a hands-free "live demo" run from the home banner. */
+    autoStartRoundtable?: boolean;
 }
 
-/** Replace bare citations with linked tags and remove malformed URL fragments. */
+/** Replace bare [Source Name] citations with [Source Name](url) using the sources list,
+ *  AND linkify plain-text mentions of source domains / publication names. */
 function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     if (!sources || sources.length === 0) return text;
 
@@ -2855,6 +3003,9 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
 
     // Remove duplicate consecutive markdown links: [A](url)[A](url) → [A](url)
     result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*\1/g, '$1');
+
+    // Remove bare source-name text leaked right after its own markdown link
+    result = result.replace(/(\[([^\]]+)\]\([^)]+\))\s*\n?\s*\2\s*\n?/g, '$1 ');
 
     // Strip stray closing parens/brackets after a valid markdown link
     result = result.replace(/(\[[^\]]+\]\([^)]+\))\s*[)\]]+/g, '$1');
@@ -2915,41 +3066,13 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     // Remove parenthesised citation wrappers like （[Link](url) 数据）
     result = result.replace(/[（(]\s*(\[[^\]]+\]\([^)]+\))\s*(?:数据|data|来源|source)?\s*[)）]/gi, ' $1');
 
-    // Move markdown citations to the end of normal prose lines so badges do not
-    // interrupt reading in the middle of a sentence.
-    result = result
-        .split('\n')
-        .map((line) => {
-            const trimmed = line.trim();
-            if (!trimmed) return line;
-            if (/^\s*[#>|-]/.test(line)) return line;
-            if (/^\s*\d+\.\s+/.test(line)) return line;
-            if (/\|/.test(line)) return line;
-            const citationRe = /\s*(\[[^\]]+\]\((https?:\/\/[^)]+)\))/g;
-            const citations = Array.from(line.matchAll(citationRe)).map((m) => m[1]);
-            if (citations.length === 0) return line;
-            const uniqueCitations = Array.from(new Set(citations));
-            let body = line.replace(citationRe, ' ').replace(/\s{2,}/g, ' ').trim();
-            body = body.replace(/\s+([，。；！？,.!?])/g, '$1');
-            const tail = uniqueCitations.join(' ');
-            return body ? `${body} ${tail}` : tail;
-        })
-        .join('\n');
-
     // Clean repeated blank lines left by cleanup.
     result = result.replace(/\n{3,}/g, '\n\n').trim();
     return result;
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
-    initialMessage,
-    initialImages = [],
-    onBack,
-    agentCount = 2,
-    selectedAgentId,
-    initialSessionId,
-    initialChatMode
-}) => {
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable }) => {
+    const navigate = useNavigate();
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
         try {
@@ -2967,27 +3090,42 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const [messages, setMessages] = useState<Message[]>(() => {
         try {
             const raw = sessionStorage.getItem(SA_PENDING_KEY);
-            if (!raw) return [];
-            const p = JSON.parse(raw) as {
-                sessionId?: string;
-                userContent?: string;
-                userImages?: ChatImagePayload[];
-                streaming?: boolean;
-            };
-            const pendingImages = Array.isArray(p.userImages) ? p.userImages : [];
-            // When viewing an existing session, the "effective" sid is initialSessionId.
-            // Falling back to SA_SID_KEY is only correct when starting a brand-new chat.
-            const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
-            if (!p?.streaming || (typeof p.userContent !== 'string' && pendingImages.length === 0) || p.sessionId !== effectiveSid) return [];
-            return [
-                { role: 'user', content: p.userContent || '', images: pendingImages, timestamp: new Date().toLocaleTimeString() },
-                {
-                    role: 'assistant',
-                    content: '',
-                    timestamp: new Date().toLocaleTimeString(),
-                    isStreaming: true,
-                },
-            ];
+            if (raw) {
+                const p = JSON.parse(raw) as {
+                    sessionId?: string;
+                    userContent?: string;
+                    streaming?: boolean;
+                };
+                // When viewing an existing session, the "effective" sid is initialSessionId.
+                // Falling back to SA_SID_KEY is only correct when starting a brand-new chat.
+                const effectiveSid = initialSessionId || sessionStorage.getItem(SA_SID_KEY);
+                if (p?.streaming && p.userContent && p.sessionId === effectiveSid) {
+                    return [
+                        { role: 'user', content: p.userContent, timestamp: new Date().toLocaleTimeString() },
+                        {
+                            role: 'assistant',
+                            content: '',
+                            timestamp: new Date().toLocaleTimeString(),
+                            isStreaming: true,
+                        },
+                    ];
+                }
+            }
+            // Guest mode: restore chat history from localStorage so their
+            // conversation survives reloads. Only when there's no in-flight
+            // session and the caller didn't pass a fresh initialMessage.
+            if (!initialMessage && !api.isAuthenticated) {
+                const guestRaw = localStorage.getItem('loka_guest_chat_history');
+                if (guestRaw) {
+                    const parsed = JSON.parse(guestRaw) as { messages?: Message[]; savedAt?: number };
+                    const savedAt = parsed?.savedAt || 0;
+                    const SEVEN_DAYS_MS = 7 * 86400_000;
+                    if (Array.isArray(parsed?.messages) && Date.now() - savedAt < SEVEN_DAYS_MS) {
+                        return parsed.messages;
+                    }
+                }
+            }
+            return [];
         } catch {
             return [];
         }
@@ -3006,11 +3144,41 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         }
     });
     const [thinkingProcesses, setThinkingProcesses] = useState<Record<number, ThinkingFlow>>({});
-    // True while fetching session history from the server (prevents blank-page flash).
-    const [historyLoading, setHistoryLoading] = useState(!!initialSessionId);
+    // Skeleton state: true while we're fetching history for an existing session
+    // and have nothing to show yet. Initialized true only when we have a session
+    // id but no in-flight stream populated `messages`. Avoids flashing skeleton
+    // for fresh chats or stream-resume scenarios.
+    const [isLoadingHistory, setIsLoadingHistory] = useState(() => {
+        if (!initialSessionId) return false;
+        try {
+            const raw = sessionStorage.getItem(SA_PENDING_KEY);
+            if (raw) {
+                const p = JSON.parse(raw) as { streaming?: boolean; sessionId?: string };
+                if (p?.streaming && p.sessionId === initialSessionId) return false;
+            }
+        } catch { /* ignore */ }
+        return true;
+    });
+
+    // Guest-only: persist chat history to localStorage so conversations
+    // survive reloads. Authenticated users are already persisted in the DB.
+    useEffect(() => {
+        if (api.isAuthenticated) return;
+        if (!messages.length) return;
+        try {
+            localStorage.setItem('loka_guest_chat_history', JSON.stringify({
+                messages,
+                savedAt: Date.now(),
+            }));
+        } catch {
+            /* localStorage full or disabled — silently degrade */
+        }
+    }, [messages]);
+
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const lastUserMsgRef = useRef<HTMLDivElement>(null);
+    const tocNavRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
     const restoredFromPendingRef = useRef(
@@ -3030,119 +3198,60 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const [showGraphPanel, setShowGraphPanel] = useState(false);
     const [showThinkingPanel, setShowThinkingPanel] = useState(false);
     const [activeGraphMsgIdx, setActiveGraphMsgIdx] = useState<number | null>(null);
-    const [panelTab, setPanelTab] = useState<'process' | 'graph'>('process');
+    const [panelTab, setPanelTab] = useState<'process' | 'terminal'>('process');
+    // Terminal dock (inside Process panel) — collapsible bottom drawer
+    const [terminalDockOpen, setTerminalDockOpen] = useState(true);
     const [rtPanelExpanded, setRtPanelExpanded] = useState(false);
     const [summonPhase, setSummonPhase] = useState<'idle' | 'loading' | 'narrating' | 'selecting'>('idle');
     const [selectedSummonIds, setSelectedSummonIds] = useState(() => new Set(DEFAULT_SUMMON_IDS));
+    // Bumps whenever an auto-confirm (Live Demo) is requested; a downstream
+    // effect fires handleSummonConfirm with the latest closure.
+    const [autoConfirmTick, setAutoConfirmTick] = useState(0);
     const [pendingRtText, setPendingRtText] = useState<string | null>(null);
     const summonBypassRef = useRef(false);
+    const rtDemoTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+    useEffect(() => {
+        return () => { rtDemoTimersRef.current.forEach(clearTimeout); rtDemoTimersRef.current = []; };
+    }, []);
     const [chatMode, setChatMode] = useState<'auto' | 'fast' | 'roundtable'>(() => initialChatMode ?? 'auto');
-    const [chatModeOpen, setChatModeOpen] = useState(false);
-    const chatModeRef = useRef<HTMLDivElement>(null);
+    const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
+    const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
     const [htmlReports, setHtmlReports] = useState<Record<number, string>>({});
     const [htmlGenerating, setHtmlGenerating] = useState<Record<number, boolean>>({});
     const [msgViewMode, setMsgViewMode] = useState<Record<number, 'docs' | 'web'>>({});
-    const [imagePreview, setImagePreview] = useState<{ images: ChatImagePayload[]; index: number } | null>(null);
-    const htmlPendingTimersRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
     const [chatSelectedAgent, setChatSelectedAgent] = useState<string | null>(selectedAgentId || null);
     const [agentPickerOpen, setAgentPickerOpen] = useState(false);
     const agentPickerRef = useRef<HTMLDivElement>(null);
     const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
     const voiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const [chatImageAttachments, setChatImageAttachments] = useState<PendingChatImage[]>([]);
+    const [chatPastedImages, setChatPastedImages] = useState<string[]>([]);
     const chatFileRef = useRef<HTMLInputElement>(null);
-    const chatImageAttachmentsRef = useRef<PendingChatImage[]>([]);
-
-    useEffect(() => {
-        chatImageAttachmentsRef.current = chatImageAttachments;
-    }, [chatImageAttachments]);
-
-    useEffect(() => {
-        return () => {
-            for (const img of chatImageAttachmentsRef.current) {
-                URL.revokeObjectURL(img.previewUrl);
-            }
-        };
-    }, []);
-
-    const enqueueChatImages = useCallback((incomingFiles: File[]) => {
-        const availableSlots = Math.max(0, MAX_IMAGES_PER_MESSAGE - chatImageAttachmentsRef.current.length);
-        if (availableSlots <= 0) return;
-        const imageFiles = incomingFiles.filter(file => file.type.startsWith('image/')).slice(0, availableSlots);
-        for (const file of imageFiles) {
-            const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-            const previewUrl = URL.createObjectURL(file);
-            setChatImageAttachments(prev => [...prev, {
-                id,
-                previewUrl,
-                status: 'uploading' as const,
-                url: '',
-                mime: file.type,
-                name: file.name,
-            }].slice(-MAX_IMAGES_PER_MESSAGE));
-
-            void (async () => {
-                const prepared = await prepareImageForUpload(file);
-                if (!prepared.file) {
-                    throw new Error(prepared.error || 'Image preprocessing failed');
-                }
-                const res = await api.uploadFile(prepared.file);
-                return { res, uploadFile: prepared.file };
-            })()
-                .then(({ res, uploadFile }) => {
-                    if (res.type !== 'image' || !res.url) throw new Error('Invalid image upload response');
-                    setChatImageAttachments(prev => prev.map(item => (
-                        item.id === id
-                            ? { ...item, status: 'uploaded', url: res.url, mime: uploadFile.type || file.type, name: file.name }
-                            : item
-                    )));
-                })
-                .catch(() => {
-                    setChatImageAttachments(prev => prev.map(item => (
-                        item.id === id ? { ...item, status: 'error' } : item
-                    )));
-                });
-        }
-    }, []);
-
-    const removeChatImage = useCallback((id: string) => {
-        setChatImageAttachments(prev => {
-            const target = prev.find(item => item.id === id);
-            if (target) URL.revokeObjectURL(target.previewUrl);
-            return prev.filter(item => item.id !== id);
-        });
-    }, []);
-
-    const clearChatImages = useCallback(() => {
-        setChatImageAttachments(prev => {
-            for (const item of prev) URL.revokeObjectURL(item.previewUrl);
-            return [];
-        });
-    }, []);
-
-    const openPendingImagePreview = useCallback((startIndex: number) => {
-        if (!chatImageAttachments.length) return;
-        const previewImages: ChatImagePayload[] = chatImageAttachments.map(item => ({
-            url: item.previewUrl,
-            name: item.name,
-            mime: item.mime,
-        }));
-        const nextIndex = Math.min(Math.max(startIndex, 0), previewImages.length - 1);
-        setImagePreview({ images: previewImages, index: nextIndex });
-    }, [chatImageAttachments]);
 
     const handleChatPaste = (e: React.ClipboardEvent) => {
         const items = Array.from(e.clipboardData.items);
         const imageItems = items.filter(it => it.type.startsWith('image/'));
         if (!imageItems.length) return;
         e.preventDefault();
-        const files = imageItems.map(item => item.getAsFile()).filter((f): f is File => Boolean(f));
-        enqueueChatImages(files);
+        imageItems.forEach(item => {
+            const file = item.getAsFile();
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = ev => {
+                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
+            };
+            reader.readAsDataURL(file);
+        });
     };
 
     const handleChatFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
-        enqueueChatImages(files);
+        files.forEach(file => {
+            const reader = new FileReader();
+            reader.onload = ev => {
+                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
+            };
+            reader.readAsDataURL(file);
+        });
         e.target.value = '';
     };
 
@@ -3210,33 +3319,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const [copied, setCopied] = useState<Record<number, boolean>>({});
     const [sourcePanelData, setSourcePanelData] = useState<SearchSource[] | null>(null);
 
-    const closeImagePreview = useCallback(() => setImagePreview(null), []);
-    const moveImagePreview = useCallback((delta: number) => {
-        setImagePreview(prev => {
-            if (!prev || prev.images.length === 0) return prev;
-            const nextIndex = (prev.index + delta + prev.images.length) % prev.images.length;
-            return { ...prev, index: nextIndex };
-        });
-    }, []);
-
-    useEffect(() => {
-        if (!imagePreview) return;
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                closeImagePreview();
-            } else if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                moveImagePreview(-1);
-            } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                moveImagePreview(1);
-            }
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, [imagePreview, closeImagePreview, moveImagePreview]);
-
     const handleCopy = (idx: number, content: string) => {
         navigator.clipboard.writeText(content).then(() => {
             setCopied(prev => ({ ...prev, [idx]: true }));
@@ -3248,64 +3330,32 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setReactions(prev => ({ ...prev, [idx]: prev[idx] === type ? null : type }));
     };
 
-    /** Normalize one follow-up line: drop citations/links, coerce into a concise question. */
-    const sanitizeFollowUpQuestionLine = useCallback((raw: string): string | null => {
-        let s = raw
-            .replace(/\[[^\]]*]\([^)]*\)/g, '')
-            .replace(/\([^)]*https?:\/\/[^)]+\)/gi, '')
-            .replace(/https?:\/\/[^\s\])]+/gi, '')
-            .replace(/\*\*/g, '')
-            .replace(/`/g, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-        const qIdx = s.search(/[?？]/);
-        if (qIdx >= 0) {
-            s = s.slice(0, qIdx + 1).trim();
-        } else {
-            // Some models output "questions to watch" as statements without punctuation.
-            // Normalize these lines into interrogative form so UI can stay consistent.
-            s = s.replace(/[。.!！]+$/g, '').trim();
-            if (s.length < 6) return null;
-            s = /[\u4e00-\u9fff]/.test(s) ? `${s}？` : `${s}?`;
-        }
-        if (s.length < 4) return null;
-        return s;
-    }, []);
-
     /** Extract "Questions to watch" / follow-up questions from the end of a synthesis response */
     const extractFollowUpQuestions = useCallback((content: string): { body: string; questions: string[] } => {
-        // Only match explicit "follow-up question" blocks near the tail to avoid truncating main report sections.
-        // Examples: **Questions to watch**, ## Follow-up Questions, **你可能还会问**
-        const pattern =
-            /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:questions?\s+to\s+watch|follow[\s-]*up\s+questions?|next\s+questions?|key\s+questions?|你可能还会问|后续问题|追问建议|延伸问题|相关问题|值得(?:继续)?关注(?:的)?问题|持续关注的核心问题|需要持续追踪的关键问题|持续追踪的关键问题)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)])\s+.+\n?)+)\s*$/i;
+        // Match a bold/heading title that clearly announces a follow-up / suggested-question
+        // section, followed by a bullet list that is the LAST thing in the response.
+        // The `\s*$` anchor prevents over-matching headings that merely mention "问题"
+        // in the middle of the analysis (which used to swallow analytical bullets into
+        // the "相关问题" UI).
+        // Covers: **Questions to watch:**, ## Follow-up Questions, **值得关注的问题：**, etc.
+        const pattern = /\n(?:---\s*\n+)?(?:\*\*|#{1,3}\s*)[^\n]*?(?:follow.?up|questions?\s+to\s+watch|值得[^\n]{0,6}(?:关注|思考)|需要[^\n]{0,6}关注|持续关注|持续跟踪|后续[^\n]{0,3}问题|延伸[^\n]{0,3}问题|关注[^\n]{0,3}问题|关键问题|follow-?up\s+questions?)[^\n]*?(?:\*\*)?\s*\n((?:\s*(?:[-•*]|\d+[.)]\s).+\n?)+)\s*$/i;
         const match = content.match(pattern);
         if (match) {
-            const questions = match[1].split('\n')
+            const rawLines = match[1].split('\n')
                 .map(l => l.trim())
                 .filter(l => /^(?:[-•*]|\d+[.)]\s)/.test(l))
-                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
-                .map((l) => sanitizeFollowUpQuestionLine(l))
-                .filter((q): q is string => Boolean(q));
-            const dedupedQuestions = Array.from(new Set(questions));
-            // Guardrail: only strip when the follow-up block is at the end and contains multiple items.
-            const isTailBlock = typeof match.index === 'number' && match.index > content.length * 0.6;
-            if (dedupedQuestions.length >= 1 && isTailBlock) {
-                return { body: content.slice(0, match.index).trimEnd(), questions: dedupedQuestions };
+                .map(l => l.replace(/^(?:[-•*]|\d+[.)]\s)\s*/, '').replace(/\*\*/g, '').trim())
+                .filter(Boolean);
+            // Extra safety: a true follow-up section should contain questions — require
+            // at least one item to look interrogative. This blocks analytical bullets
+            // (declarative statements) from being hijacked.
+            const looksLikeQuestion = (s: string) => /[?？]/.test(s) || /(吗|呢|是否|如何|怎样|为何|何时|是不是|要不要|还是)\s*[?？]?\s*$/.test(s) || /^(should|can|will|why|how|what|when|where|who|is|are|do|does)\b/i.test(s);
+            const hasAnyQuestion = rawLines.some(looksLikeQuestion);
+            if (rawLines.length > 0 && hasAnyQuestion) {
+                return { body: content.slice(0, match.index).trimEnd(), questions: rawLines };
             }
         }
         return { body: content, questions: [] };
-    }, [sanitizeFollowUpQuestionLine]);
-
-    /** Strip follow-up question blocks from generated HTML so both modes share one unified related-questions component. */
-    const stripFollowUpSectionFromHtml = useCallback((html: string): string => {
-        if (!html) return html;
-        const heading =
-            '(?:questions?\\s+to\\s+watch|follow[\\s-]*up\\s+questions?|next\\s+questions?|key\\s+questions?|你可能还会问|后续问题|追问建议|延伸问题|相关问题|值得(?:继续)?关注(?:的)?问题|持续关注的核心问题|需要持续追踪的关键问题|持续追踪的关键问题)';
-        const blockPattern = new RegExp(
-            `<h[1-6][^>]*>[\\s\\S]{0,120}?${heading}[\\s\\S]{0,120}?<\\/h[1-6]>\\s*(?:<(?:ul|ol)[\\s\\S]*?<\\/(?:ul|ol)>|(?:<p[^>]*>[\\s\\S]*?<\\/p>\\s*){1,10})`,
-            'gi',
-        );
-        return html.replace(blockPattern, '');
     }, []);
 
     // Chat title: summarize the user's question into a short topic label
@@ -3314,12 +3364,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         return summarizeTitle(raw);
     }, [initialMessage, messages]);
 
+    // Fetch Fast / Roundtable usage quotas so the mode selector can show
+    // remaining counts (matches SuperAgentHome behavior — same picker, same badges).
     useEffect(() => {
-        if (!chatModeOpen) return;
-        const h = (e: MouseEvent) => { if (chatModeRef.current && !chatModeRef.current.contains(e.target as Node)) setChatModeOpen(false); };
-        document.addEventListener('mousedown', h);
-        return () => document.removeEventListener('mousedown', h);
-    }, [chatModeOpen]);
+        if (!api.isAuthenticated) {
+            setRoundtableQuota(null);
+            setFastQuota(null);
+            return;
+        }
+        api.getQuota()
+            .then(q => {
+                setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+                if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+            })
+            .catch(() => {
+                setRoundtableQuota({ used: 1, limit: 3 });
+                setFastQuota({ used: 4, limit: 20 });
+            });
+    }, []);
 
     useEffect(() => {
         if (!agentPickerOpen) return;
@@ -3327,8 +3389,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         document.addEventListener('mousedown', h);
         return () => document.removeEventListener('mousedown', h);
     }, [agentPickerOpen]);
-
-    const currentChatMode = CHAT_MODES.find(m => m.id === chatMode)!;
 
     // Auto-grow textarea
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -3344,7 +3404,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     const [consensusResults, setConsensusResults] = useState<Record<number, any>>({});
     // Stock quote cards keyed by message index
     const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
-    /** X/Twitter account snapshot from research (followers / joined / avatar) */
+    // X profile cards keyed by message index
     const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }>>({});
     const currentConsensus = (() => {
         // First try the active message's consensus
@@ -3355,8 +3415,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         const keys = Object.keys(consensusResults).map(Number).sort((a, b) => b - a);
         return keys.length > 0 ? consensusResults[keys[0]] : null;
     })();
-    const currentRoundtableData: RoundtableData = currentConsensus
-        ? buildRoundtableFromConsensus(currentConsensus)
+    // Demo mode: RoundtableView graph renders when current message has roundtable data.
+    // We put a sentinel round so RoundtableView's `rounds.length > 0` check passes and the KG shows.
+    // Mount as soon as roundtable preparation is staged (so stages 0-1 of the reveal animation can run).
+    const hasRtThinking = currentThinking?.routedMode === 'roundtable'
+        && (((currentThinking.rtRounds?.length ?? 0) > 0)
+            || currentThinking.rtPreparationStatus === 'done'
+            || (currentThinking.rtDataSearch?.length ?? 0) > 0);
+    const currentRoundtableData: RoundtableData = hasRtThinking
+        ? { rounds: [{ round: 1, agents: [], status: 'done' } as any], finalVerdict: { summary: '', confidence: 0 } }
         : { rounds: [], finalVerdict: { summary: '', confidence: 0 } };
 
 
@@ -3387,9 +3454,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         return keys.length > 0 ? keys[keys.length - 1] : -1;
     })();
     const tocMsgInWebMode = tocVisibleMsgIdx >= 0 && msgViewMode[tocVisibleMsgIdx] === 'web';
-    const showToc = tocHeadings.length > 0 && !tocMsgInWebMode;
+    const showToc = tocHeadings.length >= 3 && !tocMsgInWebMode;
 
-    // Scroll-spy: track which heading is currently in view + which message's TOC to show
+    // Scroll-spy: track which heading is currently in view + TOC floating position.
+    // Uses rAF throttling + ResizeObserver + delayed recalcs so the active item
+    // stays in sync even as markdown, quote cards, and fonts load asynchronously.
+    const [tocTopPx, setTocTopPx] = useState(0);
     useLayoutEffect(() => {
         const container = scrollContainerRef.current;
         if (!container) return;
@@ -3408,16 +3478,25 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         const recalcToc = () => {
             const containerRect = container.getBoundingClientRect();
 
-            // Determine which assistant message's TOC to show:
-            // Use the LAST message whose first heading has scrolled into or above the viewport top.
-            // This way, a message's TOC only appears once you've scrolled to its title.
+            // Determine which assistant message's TOC to show.
+            //
+            // Each conversation turn is [user message, assistant message]. The
+            // turn visually begins at the user bubble, not at the assistant
+            // answer's first heading — so we anchor off the USER message
+            // wrapper (the msg at idx-1) rather than the answer's first H2.
+            // This makes the TOC switch as soon as the next user question
+            // scrolls to the top, instead of waiting for the answer body's
+            // first heading (which can be hundreds of pixels down past the
+            // price card / Docs-Web tabs / opening paragraphs).
+            //
+            // Falls back to the assistant wrapper itself if the preceding
+            // message isn't a user turn (e.g. the very first message).
             let bestIdx = tocIndices[0];
             for (const idx of tocIndices) {
-                const heads = allTocHeadings[idx];
-                if (!heads || heads.length === 0) continue;
-                const firstEl = document.getElementById(heads[0].id);
-                if (firstEl) {
-                    const top = firstEl.getBoundingClientRect().top - containerRect.top;
+                const anchorIdx = idx - 1 >= 0 && messages[idx - 1]?.role === 'user' ? idx - 1 : idx;
+                const anchorEl = document.getElementById(`msg-wrap-${anchorIdx}`);
+                if (anchorEl) {
+                    const top = anchorEl.getBoundingClientRect().top - containerRect.top;
                     if (top <= 80) bestIdx = idx;
                 }
             }
@@ -3436,13 +3515,44 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 }
             }
             setActiveTocId(current);
+
+            // Float position – the TOC pins near the top of the viewport while
+            // the answer is being read. Only when the bottom action bar approaches
+            // the TOC do we let it scroll up with content.
+            const TOC_PINNED_TOP = 24;   // desired top offset while reading
+            const TOC_MIN_TOP = 8;       // absolute minimum (TOC can't go above this)
+            const firstEl = ids[0] ? document.getElementById(ids[0]) : null;
+            if (firstEl) {
+                // Start from where the heading currently sits vertically, but
+                // CAP it so that when the heading is still far below the
+                // viewport top the TOC pins to TOC_PINNED_TOP (not pushed down
+                // to wherever the heading happens to be).
+                let floatTop = firstEl.offsetTop - container.scrollTop;
+                floatTop = Math.min(floatTop, TOC_PINNED_TOP);
+
+                // Bottom boundary: when the action bar approaches, pull TOC up with content
+                const actionsEl = document.getElementById(`msg-actions-${bestIdx}`);
+                const tocH = tocNavRef.current?.offsetHeight || 0;
+                if (actionsEl && tocH > 0) {
+                    const pinnedTop = actionsEl.offsetTop - container.scrollTop - tocH - 16;
+                    floatTop = Math.min(floatTop, pinnedTop);
+                }
+
+                // Clamp floor — don't go above the viewport top
+                floatTop = Math.max(TOC_MIN_TOP, floatTop);
+
+                // Ensure TOC doesn't overlap the input bar (reserve 80px at bottom)
+                const maxTop = container.clientHeight - 80;
+                floatTop = Math.min(floatTop, maxTop);
+                setTocTopPx(floatTop);
+            }
         };
 
         container.addEventListener('scroll', scheduleRecalc, { passive: true });
         window.addEventListener('resize', scheduleRecalc);
         scheduleRecalc();
 
-        // Observe late layout shifts from markdown, quote cards, fonts, and the TOC panel itself.
+        // Observe late layout shifts from markdown, quote cards, fonts, and side panels.
         const resizeObserver = typeof ResizeObserver !== 'undefined'
             ? new ResizeObserver(() => scheduleRecalc())
             : null;
@@ -3454,7 +3564,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         }
 
         const delayedRecalcIds = [120, 360, 900].map(delay =>
-            window.setTimeout(scheduleRecalc, delay)
+            window.setTimeout(scheduleRecalc, delay),
         );
         const fontSet = typeof document !== 'undefined' ? (document as Document & { fonts?: FontFaceSet }).fonts : undefined;
         fontSet?.ready?.then(() => scheduleRecalc()).catch(() => undefined);
@@ -3467,6 +3577,46 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             container.removeEventListener('scroll', scheduleRecalc);
         };
     }, [allTocHeadings, showToc]);
+
+    // ── Scroll-to-bottom floating button ──
+    // Shown only when the user has scrolled meaningfully above the latest
+    // message (> ~1 viewport's worth). Click does a smooth scroll to the
+    // messages-end anchor. Matches the standard chat-app pattern.
+    const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+    useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        let rafId = 0;
+        const check = () => {
+            const { scrollTop, scrollHeight, clientHeight } = container;
+            const distFromBottom = scrollHeight - scrollTop - clientHeight;
+            // 240px ≈ roughly one answer-card's worth; below that we treat as
+            // "near the bottom" and hide the button to avoid visual clutter.
+            setShowScrollToBottom(distFromBottom > 240);
+        };
+        const onScroll = () => {
+            cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(check);
+        };
+        container.addEventListener('scroll', onScroll, { passive: true });
+        check();
+        // Also re-evaluate on content size changes (streaming tokens, images,
+        // quote cards) so the button appears/disappears without needing a
+        // manual scroll to trigger it.
+        const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onScroll) : null;
+        if (ro && container.firstElementChild instanceof HTMLElement) ro.observe(container.firstElementChild);
+        return () => {
+            cancelAnimationFrame(rafId);
+            container.removeEventListener('scroll', onScroll);
+            ro?.disconnect();
+        };
+    }, [messages.length]);
+
+    const handleScrollToBottom = useCallback(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    }, []);
 
     // Scroll user’s question to top when a new message is sent
     const scrollUserMsgToTop = useCallback(() => {
@@ -3516,8 +3666,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             });
         };
 
-        const onRouted = (data: { sessionId: string; mode: string }) => {
-            saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, match: data.sessionId === sessionId });
+        const onRouted = (data: { sessionId: string; mode: string; actualTier?: string; requested?: string; autoResolved?: string | null; degraded?: boolean }) => {
+            saLog('← agent:chat:routed', { expect: sessionId, got: data?.sessionId, mode: data?.mode, actual: data?.actualTier, auto: data?.autoResolved, degraded: data?.degraded, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             setThinkingProcesses(prev => {
                 const msgIdx = activeMsgIdxRef.current;
@@ -3526,6 +3676,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 // Don't overwrite roundtable routedMode set by handleSummonConfirm
                 if (flow.routedMode === 'roundtable') return prev;
                 return { ...prev, [msgIdx]: { ...flow, routedMode: data.mode } };
+            });
+        };
+
+        const onQuotaDegraded = (data: { sessionId: string; reason: string; hint: string }) => {
+            saLog('← agent:chat:quota_degraded', { sessionId: data?.sessionId, reason: data?.reason });
+            if (data.sessionId !== sessionId) return;
+            setMessages(prev => {
+                const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
+                if (!updated[msgIdx]) return prev;
+                updated[msgIdx] = { ...updated[msgIdx], liteMode: { hint: data.hint } };
+                return updated;
             });
         };
 
@@ -3568,7 +3730,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     const nextStatus = isDowngradeToActive ? prevStatus : incoming;
                     mods[modIdx] = { ...prev, status: nextStatus as any };
                     if (data.data) {
-                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...data.data };
+                        // When we block a status downgrade, also protect the
+                        // nested data.status field so renderers (e.g. ConsensusModule
+                        // which reads data.status to drive its sub-step UI) don't
+                        // see the module flip back to an earlier state.
+                        const incomingData = isDowngradeToActive
+                            ? Object.fromEntries(
+                                Object.entries(data.data).filter(([k]) => k !== 'status'),
+                            )
+                            : data.data;
+                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...incomingData };
                     }
                 }
 
@@ -3611,17 +3782,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 // Guard: if this message is no longer streaming (previous run already finished
                 // or a new run already took over), ignore stale stream_done
                 if (!updated[msgIdx].isStreaming) return prev;
-                const streamedContent = updated[msgIdx].content || '';
-                const finalContent = data.content || '';
-                // Prefer authoritative stream_done payload when it is longer/different.
-                // This fixes truncation when some progress chunks were dropped.
-                const resolvedContent =
-                    finalContent && finalContent.length >= streamedContent.length
-                        ? finalContent
-                        : streamedContent || finalContent;
                 updated[msgIdx] = {
                     ...updated[msgIdx],
-                    content: resolvedContent,
+                    // Only use server content if we have nothing accumulated (e.g. reconnect)
+                    content: updated[msgIdx].content || data.content || '',
                     isStreaming: false, 
                     timestamp: new Date().toLocaleTimeString(),
                     sources: data.sources,
@@ -3632,37 +3796,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             setThinkingProcesses(prev => {
                 const msgIdx = activeMsgIdxRef.current;
                 if (!prev[msgIdx]) return prev;
-                const flow = prev[msgIdx];
-                const finalizedModules = (flow.modules || []).map((m) => {
-                    const nextStatus = m.status === 'active' ? 'completed' : m.status;
-                    if (m.type === 'consensus' && m.data) {
-                        const c = m.data as ConsensusModuleData;
-                        const finalizedConsensus: ConsensusModuleData = {
-                            ...c,
-                            status: 'concluded',
-                            round: typeof c.round === 'number' ? c.round : 1,
-                            maxRounds: typeof c.maxRounds === 'number' ? c.maxRounds : (typeof c.round === 'number' ? c.round : 1),
-                        };
-                        return { ...m, status: nextStatus, data: finalizedConsensus };
-                    }
-                    return { ...m, status: nextStatus };
-                });
-                return { ...prev, [msgIdx]: { ...flow, modules: finalizedModules, isActive: false } };
+                return { ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } };
             });
         };
 
-        const normalizeAgentError = (raw: string) => {
-            const msg = String(raw || '').trim();
-            if (/do_request_failed|upstream error|AI API error \(500\)/i.test(msg)) {
-                return '上游模型服务暂时不稳定，已中断本次合成。你可以直接重试，或稍后再试。';
-            }
-            if (/timeout|timed out/i.test(msg)) {
-                return '本次处理超时。建议简化问题后重试，或稍后再试。';
-            }
-            return msg || '请求失败，请稍后重试。';
-        };
-
-        const onError = (data: { sessionId: string; error: string }) => {
+        const onError = (data: { sessionId: string; error: string; mode?: string; resetAt?: string; hint?: string }) => {
             saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             try {
@@ -3670,31 +3808,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             } catch {
                 /* ignore */
             }
-            const msgIdx = activeMsgIdxRef.current;
-            const friendlyError = normalizeAgentError(data.error);
+            // Quota exhaustion gets a friendlier, actionable message
+            let displayMsg = data.error;
+            if (data.error === 'quota_exhausted') {
+                const modeLabel = data.mode === 'roundtable' ? 'Roundtable' : 'Fast';
+                const resetTxt = data.resetAt ? ` Resets ${new Date(data.resetAt).toLocaleString()}.` : '';
+                displayMsg = `Your ${modeLabel} quota is exhausted.${resetTxt} Switch to Auto mode (always free) or upgrade your plan.`;
+                // Invalidate cached plan/quota so Settings + mode selector refresh
+                try { window.dispatchEvent(new CustomEvent('plan-changed')); } catch { /* ignore */ }
+            } else if (data.error === 'guest_quota_exhausted' || data.error === 'guest_ip_quota_exhausted') {
+                const resetTxt = data.resetAt ? ` Resets ${new Date(data.resetAt).toLocaleString()}.` : '';
+                displayMsg = `You've used all your free Auto turns for now.${resetTxt} Sign in to get more Auto turns plus Fast and Roundtable modes.`;
+                try { window.dispatchEvent(new Event('show-auth-modal')); } catch { /* ignore */ }
+            } else if (data.error === 'login_required') {
+                displayMsg = 'Sign in to unlock Fast and Roundtable modes. Auto mode is always free.';
+                try { window.dispatchEvent(new Event('show-auth-modal')); } catch { /* ignore */ }
+            }
             setMessages(prev => {
                 const updated = [...prev];
+                const msgIdx = activeMsgIdxRef.current;
                 if (!updated[msgIdx]) return prev;
-                updated[msgIdx] = {
-                    ...updated[msgIdx],
-                    content: `${updated[msgIdx].content}\n\n**提示：** ${friendlyError}`,
-                    isStreaming: false
-                };
+                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + '\n\n**Error:** ' + displayMsg, isStreaming: false };
                 return updated;
             });
             setIsStreaming(false);
-            setThinkingProcesses(prev => {
-                const flow = prev[msgIdx];
-                if (!flow) return prev;
-                const hasDone = flow.modules.some(m => m.type === 'done');
-                const modules = flow.modules.map(m =>
-                    m.status === 'active' ? { ...m, status: 'completed' as const } : m
-                );
-                if (!hasDone) {
-                    modules.push({ type: 'done', status: 'completed', data: { duration: 0 } });
-                }
-                return { ...prev, [msgIdx]: { ...flow, modules, isActive: false } };
-            });
         };
 
         const onThinkingLog = (data: { sessionId: string; line: string }) => {
@@ -3769,26 +3906,189 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         };
 
         const onConsensusDone = (data: { sessionId: string; result: any }) => {
-            saLog('← agent:chat:consensus_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:consensus_done (live → overwrite demo)', {
+                sessionId: data.sessionId,
+                rounds: data?.result?.consensus?.roundsUsed,
+                reached: data?.result?.consensus?.consensusReached,
+            });
             const msgIdx = activeMsgIdxRef.current;
             if (msgIdx < 0) return;
-            setConsensusResults(prev => ({ ...prev, [msgIdx]: data.result }));
-            // Sync the real consensus output into thinkingProcesses so the right-side
-            // Roundtable panel (Data Collection / Round 1 / Round 2 / Consensus) shows
-            // genuine agent names, verdicts and reasoning instead of any placeholder.
-            setThinkingProcesses(prev => {
-                const existing = prev[msgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
-                const rtFields = reconstructRtFieldsFromConsensus(data.result, existing.modules || []);
-                if (!rtFields) return prev;
+            const result = data.result || {};
+            const resp: Array<{ agentId: string; answer: string; confidence: number }> =
+                result?.consensus?.agentResponses || [];
+            const finalAnswer: string = result?.consensus?.finalAnswer || '';
+            const finalConfidencePct = Math.round(
+                ((result?.consensus?.confidence as number) || 0) * 100,
+            );
+            const reached = result?.consensus?.consensusReached !== false;
+
+            // Derive each persona's conclusion verdict/confidence from its raw answer.
+            const conclusions = resp.map((r) => ({
+                agentName: getAnalystDisplayName(r.agentId),
+                verdict: parsePersonaVerdict(r.answer),
+                confidence: Math.round((r.confidence || 0) * 100),
+            }));
+
+            // Majority signal across personas → surface as finalVerdict.
+            const tally: Record<string, number> = { Bullish: 0, Bearish: 0, Neutral: 0 };
+            for (const c of conclusions) {
+                tally[c.verdict] = (tally[c.verdict] || 0) + 1;
+            }
+            const finalVerdict =
+                (Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] as string) || 'Neutral';
+
+            // Rough conflict rate: 100% minus the majority share.
+            const majorityCount = tally[finalVerdict] || 0;
+            const conflictRate =
+                conclusions.length > 0
+                    ? Math.round(((conclusions.length - majorityCount) / conclusions.length) * 100)
+                    : 0;
+
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const next: RtConsensusResult = {
+                    status: 'done',
+                    hasConsensus: reached,
+                    conflictRate,
+                    agentConclusions: conclusions,
+                    finalVerdict,
+                    finalConfidence: finalConfidencePct,
+                };
                 return {
                     ...prev,
                     [msgIdx]: {
                         ...existing,
-                        routedMode: 'roundtable',
-                        ...rtFields,
+                        rtConsensus: next,
+                        rtReportStatus: 'active',
                     },
                 };
+            });
+        };
+
+        // ─── NEW Roundtable persona events (Stage 4 protocol, Stage 5 wire-up) ──
+        // These handlers overlay real backend data onto thinkingProcesses.
+        // The demo animation in handleSummonConfirm still runs in parallel
+        // (for initial UI smoothness while we wait for the backend to return);
+        // once real events arrive, they overwrite the demo state so the
+        // AgentRoom / Debate Tab end up showing the actual personas' verdicts.
+        const onAnalystsSelected = (data: {
+            sessionId: string;
+            analysts: Array<{
+                id: string;
+                displayName: { zh: string; en: string };
+                role: { zh: string; en: string };
+                initials: string;
+                color: string;
+                category: 'system' | 'enhanced' | 'master';
+            }>;
+        }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:analysts_selected', {
+                count: data.analysts.length,
+                ids: data.analysts.map((a) => a.id).join(','),
+            });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const ids = data.analysts.map((a) => a.id);
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                return {
+                    ...prev,
+                    [msgIdx]: {
+                        ...existing,
+                        // Overwrite demo roster with the real backend-resolved one.
+                        selectedAgentIds: ids,
+                    },
+                };
+            });
+        };
+        const onAgentResponded = (data: {
+            sessionId: string;
+            analystId: string;
+            round: number;
+            confidence: number;
+            summary: string;
+            answer: string;
+        }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:agent_responded', {
+                analystId: data.analystId,
+                round: data.round,
+                confidence: data.confidence,
+                len: data.answer?.length ?? 0,
+            });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            const displayName = getAnalystDisplayName(data.analystId);
+            const verdict = parsePersonaVerdict(data.answer);
+            const reasoning = parsePersonaReasoning(data.answer);
+            const confPct = Math.round((data.confidence || 0) * 100);
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const existingRounds = existing.rtRounds || [];
+                let rounds = [...existingRounds];
+                const roundIdx = rounds.findIndex((r) => r.round === data.round);
+                const newAgent: RtAgentInference = {
+                    agentId: data.analystId,
+                    agentName: displayName,
+                    status: 'done',
+                    verdict,
+                    confidence: confPct,
+                    reasoning,
+                };
+                if (roundIdx === -1) {
+                    rounds.push({ round: data.round, status: 'active', agents: [newAgent] });
+                } else {
+                    const agents = [...rounds[roundIdx].agents];
+                    const agentPos = agents.findIndex((a) => a.agentId === data.analystId);
+                    if (agentPos === -1) {
+                        agents.push(newAgent);
+                    } else {
+                        agents[agentPos] = { ...agents[agentPos], ...newAgent };
+                    }
+                    rounds[roundIdx] = { ...rounds[roundIdx], agents };
+                }
+                return {
+                    ...prev,
+                    [msgIdx]: { ...existing, rtRounds: rounds },
+                };
+            });
+        };
+        const onRoundStarted = (data: { sessionId: string; round: number; maxRounds: number }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:round_started', { round: data.round, maxRounds: data.maxRounds });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const rounds = [...(existing.rtRounds || [])];
+                const idx = rounds.findIndex((r) => r.round === data.round);
+                if (idx === -1) {
+                    rounds.push({ round: data.round, status: 'active', agents: [] });
+                } else if (rounds[idx].status !== 'done') {
+                    rounds[idx] = { ...rounds[idx], status: 'active' };
+                }
+                return { ...prev, [msgIdx]: { ...existing, rtRounds: rounds } };
+            });
+        };
+        const onRoundCompleted = (data: { sessionId: string; round: number; maxRounds: number }) => {
+            if (data.sessionId !== sessionId) return;
+            saLog('← agent:chat:round_completed', { round: data.round, maxRounds: data.maxRounds });
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setThinkingProcesses((prev) => {
+                const existing = prev[msgIdx];
+                if (!existing) return prev;
+                const rounds = [...(existing.rtRounds || [])];
+                const idx = rounds.findIndex((r) => r.round === data.round);
+                if (idx === -1) return prev;
+                rounds[idx] = { ...rounds[idx], status: 'done' };
+                return { ...prev, [msgIdx]: { ...existing, rtRounds: rounds } };
             });
         };
 
@@ -3799,40 +4099,21 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
         };
 
-        const onXProfile = (data: { sessionId: string; profile: { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string } }) => {
-            if (data.sessionId !== sessionId) return;
-            const msgIdx = activeMsgIdxRef.current;
-            if (msgIdx < 0) return;
-            setXProfileCards(prev => ({ ...prev, [msgIdx]: data.profile }));
-        };
-
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
-            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; delete n[-1]; return n; });
+            setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
             setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
             if (data.sessionId !== sessionId) return;
-            const idx = data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
-            if (idx < 0) return;
-            setHtmlGenerating(prev => ({ ...prev, [idx]: true }));
-        };
-
-        const onHtmlFailed = (data: { sessionId: string; msgIdx?: number }) => {
-            if (data.sessionId !== sessionId) return;
-            const idx = data.msgIdx !== undefined && data.msgIdx >= 0 ? data.msgIdx : activeMsgIdxRef.current;
-            setHtmlGenerating(prev => {
-                const n = { ...prev };
-                if (idx >= 0) delete n[idx];
-                delete n[-1];
-                return n;
-            });
+            setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
         };
 
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
+        socket.on('agent:chat:quota_degraded', onQuotaDegraded);
         socket.on('agent:chat:started', onStarted);
         socket.on('agent:chat:module', onModule);
         socket.on('agent:chat:progress', onProgress);
@@ -3843,14 +4124,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
         socket.on('agent:chat:quote', onQuote);
-        socket.on('agent:chat:x_profile', onXProfile);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
-        socket.on('agent:chat:html_failed', onHtmlFailed);
+        // New Roundtable persona events (log-only in Stage 4)
+        socket.on('agent:chat:analysts_selected', onAnalystsSelected);
+        socket.on('agent:chat:agent_responded', onAgentResponded);
+        socket.on('agent:chat:round_started', onRoundStarted);
+        socket.on('agent:chat:round_completed', onRoundCompleted);
 
         return () => {
             socket.off('agent:chat:routing', onRouting);
             socket.off('agent:chat:routed', onRouted);
+            socket.off('agent:chat:quota_degraded', onQuotaDegraded);
             socket.off('agent:chat:started', onStarted);
             socket.off('agent:chat:module', onModule);
             socket.off('agent:chat:progress', onProgress);
@@ -3861,13 +4146,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
             socket.off('agent:chat:quote', onQuote);
-            socket.off('agent:chat:x_profile', onXProfile);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
-            socket.off('agent:chat:html_failed', onHtmlFailed);
-            const timers = Object.values(htmlPendingTimersRef.current);
-            for (const t of timers) clearTimeout(t);
-            htmlPendingTimersRef.current = {};
+            socket.off('agent:chat:analysts_selected', onAnalystsSelected);
+            socket.off('agent:chat:agent_responded', onAgentResponded);
+            socket.off('agent:chat:round_started', onRoundStarted);
+            socket.off('agent:chat:round_completed', onRoundCompleted);
         };
     }, [sessionId]);
 
@@ -3904,7 +4188,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                         const msgIdx = activeMsgIdxRef.current >= 0 ? activeMsgIdxRef.current : 1;
                         const trace = hasSteps ? buildTraceFromSteps(res.steps!) : undefined;
                         const planning = hasSteps ? extractPlanningMessage(res.steps!) : undefined;
-                        // Reduce module event stream into final per-type module state
+                        // Reduce the raw module event stream into final per-type module
+                        // state so the Thinking Process panel can render after A→B→A.
                         const rebuiltModules: ThinkingModule[] = [];
                         if (hasModules) {
                             const byType = new Map<string, ThinkingModule>();
@@ -3989,7 +4274,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     }
 
                     /** Server has no memory buffer (common during restart or never successfully started) and local still has SA_PENDING: resend agent:chat */
-                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; userImages?: ChatImagePayload[]; assistantMsgIdx?: number } | null = null;
+                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; assistantMsgIdx?: number } | null = null;
                     try {
                         const raw = sessionStorage.getItem(SA_PENDING_KEY);
                         pending = raw ? (JSON.parse(raw) as typeof pending) : null;
@@ -3999,7 +4284,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     const canResend =
                         pending?.streaming &&
                         pending.sessionId === sessionId &&
-                        (typeof pending.userContent === 'string' || Array.isArray(pending.userImages)) &&
+                        typeof pending.userContent === 'string' &&
+                        pending.userContent.length > 0 &&
                         !replayRecoverAttemptedRef.current;
 
                     if (canResend) {
@@ -4013,8 +4299,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                         }));
                         setIsStreaming(true);
                         socket.emit('agent:chat', {
-                            content: pending!.userContent || '',
-                            images: pending!.userImages || [],
+                            content: pending!.userContent!,
                             mode: chatMode,
                             sessionId,
                             agentId: msgIdx <= 1 ? chatSelectedAgent : undefined,
@@ -4069,14 +4354,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         };
     }, [sessionId, chatMode, chatSelectedAgent]);
 
-    const sendToAI = useCallback((text: string, existingMessages?: Message[], images?: ChatImagePayload[]) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[], analystIds?: string[]) => {
         // Bump generation so stale events from a previous run are dropped
         chatGenRef.current += 1;
         activeChatGenRef.current = chatGenRef.current;
 
         saLog('sendToAI()', {
             textPreview: text.slice(0, 100),
-            imageCount: images?.length || 0,
             mode: chatMode,
             sessionId,
             gen: activeChatGenRef.current,
@@ -4093,9 +4377,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date().toLocaleTimeString(), isStreaming: true }]);
 
         setActiveGraphMsgIdx(msgIdx);
-        // In roundtable mode, show the unified panel with process tab
+        // Roundtable mode: panel stays closed by default; user can open it
+        // from the thinking indicator on the assistant message.
         if (chatMode === 'roundtable') {
-            setShowThinkingPanel(true);
             setPanelTab('process');
         }
         setShowGraphPanel(false);
@@ -4119,7 +4403,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 JSON.stringify({
                     sessionId,
                     userContent: text,
-                    userImages: images || [],
                     assistantMsgIdx: msgIdx,
                     streaming: true,
                 }),
@@ -4130,13 +4413,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
 
         socket.emit('agent:chat', {
             content: text,
-            images: images || [],
             mode: chatMode,
             sessionId,
             // Only send agentId on the first message (the one that started this session).
             // Subsequent messages let the router decide based on content — prevents
             // sticky guru-council mode when user switches topics.
             agentId: currentMessages.length === 0 ? chatSelectedAgent : undefined,
+            // Roundtable persona selection — sent only when user picks analysts.
+            // Must include the 4 system IDs + ≥1 user-picked (validated server-side).
+            ...(analystIds && analystIds.length > 0 ? { analystIds } : {}),
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -4146,36 +4431,28 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     useEffect(() => {
         if (initialSessionId) {
             api.getChatHistory(undefined, undefined, initialSessionId).then(history => {
-                setHistoryLoading(false);
+                setIsLoadingHistory(false);
                 if (history && history.length > 0) {
-                    // Guard: if we're returning to a session that is currently streaming
-                    // (pending restore is active), only override messages once the server
-                    // Always apply history from DB (no guard). If the stream is still
-                    // mid-flight, append a streaming placeholder below so socket events
-                    // have a slot to write into. This handles A→B→A navigation cleanly:
-                    //  - completed stream: DB has final content → placeholder skipped
-                    //  - mid-stream return: DB has only user msg → placeholder added
-                    const transformedHistory = history.map((m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
-                        let sources: SearchSource[] | undefined;
-                        const userImages = m.role === 'user' ? parseUserImagesFromMetadata(m.metadata) : [];
-                        if (m.metadata) {
-                            try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
-                        }
-                        return {
-                            role: m.role as 'user' | 'assistant',
-                            content: m.content || '',
-                            timestamp: new Date(m.createdAt).toLocaleTimeString(),
-                            isStreaming: false,
-                            images: userImages.length > 0 ? userImages : undefined,
-                            metadata: m.metadata ?? null,
-                            sources,
-                        };
-                    });
-                    // Decide based on history shape alone: if the last persisted message is a
-                    // user msg or an empty assistant msg, treat the stream as still in-flight
-                    // and append a placeholder. Replay (below) resolves the actual server state
-                    // — either filling the placeholder with content, or replacing it with a
-                    // "cannot restore" notice if the server has no buffer.
+                    const transformedHistory: Message[] = history.map(
+                        (m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
+                            let sources: SearchSource[] | undefined;
+                            if (m.metadata) {
+                                try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
+                            }
+                            return {
+                                role: m.role as 'user' | 'assistant',
+                                content: m.content || '',
+                                timestamp: new Date(m.createdAt).toLocaleTimeString(),
+                                isStreaming: false,
+                                metadata: m.metadata ?? null,
+                                sources,
+                            };
+                        },
+                    );
+                    // If the last persisted message is a user msg or an empty assistant msg,
+                    // the stream is likely still in-flight — append a placeholder so socket
+                    // replay / live events have a target to fill, rather than returning early
+                    // and leaving the chat blank.
                     const lastHistoryMsg = transformedHistory[transformedHistory.length - 1];
                     const streamStillActive = (
                         lastHistoryMsg.role === 'user' ||
@@ -4197,7 +4474,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
-                    const restoredXProfiles: Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }> = {};
                     const restoredHtml: Record<number, string> = {};
                     const restoredViewModes: Record<number, 'docs' | 'web'> = {};
                     let hasRoundtableHistory = false;
@@ -4205,28 +4481,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; xProfileCard?: any; htmlReport?: string; sources?: SearchSource[] };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
-                                    const rtFields = isRt && !meta.thinkingFlow.rtRounds && meta.consensusResult
-                                        ? reconstructRtFieldsFromConsensus(meta.consensusResult, meta.thinkingFlow.modules)
-                                        : null;
-                                    restoredThinking[idx] = {
-                                        ...meta.thinkingFlow,
-                                        isActive: false,
-                                        ...(isRt && !meta.thinkingFlow.routedMode ? { routedMode: 'roundtable' } : {}),
-                                        ...(rtFields || {}),
-                                    };
-                                    if (isRt) hasRoundtableHistory = true;
+                                    if (isRt) {
+                                        // Demo mode: always override with canonical 7-agent demo data
+                                        restoredThinking[idx] = {
+                                            ...meta.thinkingFlow,
+                                            isActive: false,
+                                            routedMode: 'roundtable',
+                                            ...buildDemoRtFields(),
+                                        };
+                                        hasRoundtableHistory = true;
+                                    } else {
+                                        restoredThinking[idx] = {
+                                            ...meta.thinkingFlow,
+                                            isActive: false,
+                                        };
+                                    }
                                 }
                                 if (meta.consensusResult) {
                                     restoredConsensus[idx] = meta.consensusResult;
                                 }
                                 if (meta.quoteCard) {
                                     restoredQuotes[idx] = meta.quoteCard;
-                                }
-                                if (meta.xProfileCard) {
-                                    restoredXProfiles[idx] = meta.xProfileCard;
                                 }
                                 if (meta.htmlReport) {
                                     restoredHtml[idx] = meta.htmlReport;
@@ -4240,17 +4518,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     // Merge instead of replace: preserves the active-stream placeholder's
                     // thinkingProcesses entry (set by the initial-send useEffect) when we
                     // return to a session whose stream is still mid-flight.
-                    // If we appended a streaming placeholder, guarantee it has an active
-                    // thinking entry so the ThinkingInlineTrigger actually renders.
                     const placeholderIdx = transformedHistory.length;
+                    // Recover start time from the last user message's createdAt so the
+                    // elapsed counter ("12s") keeps showing across A→B→A switches. The
+                    // socket-side `startTime` local isn't persisted to DB, so this is the
+                    // best available proxy (off by at most the routing latency).
+                    const lastUserCreatedAt = (() => {
+                        for (let k = history.length - 1; k >= 0; k--) {
+                            if (history[k]?.role === 'user' && history[k]?.createdAt) {
+                                const t = Date.parse(history[k].createdAt);
+                                if (!Number.isNaN(t)) return t;
+                            }
+                        }
+                        return undefined;
+                    })();
                     setThinkingProcesses(prev => {
-                        const merged = { ...prev, ...restoredThinking };
+                        const merged: Record<number, ThinkingFlow> = { ...prev, ...restoredThinking };
                         if (streamStillActive) {
+                            const existing = merged[placeholderIdx];
                             merged[placeholderIdx] = {
-                                modules: merged[placeholderIdx]?.modules ?? [],
-                                route: merged[placeholderIdx]?.route || 'Investment Analyst',
-                                ...merged[placeholderIdx],
+                                modules: existing?.modules ?? [],
+                                route: existing?.route || 'Investment Analyst',
+                                ...existing,
                                 isActive: true,
+                                startTime: existing?.startTime ?? lastUserCreatedAt ?? Date.now(),
                             };
                         }
                         return merged;
@@ -4265,18 +4556,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                     if (Object.keys(restoredQuotes).length > 0) {
                         setQuoteCards(prev => ({ ...prev, ...restoredQuotes }));
                     }
-                    if (Object.keys(restoredXProfiles).length > 0) {
-                        setXProfileCards(prev => ({ ...prev, ...restoredXProfiles }));
-                    }
                     if (Object.keys(restoredHtml).length > 0) {
                         setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
                         setMsgViewMode(prev => ({ ...prev, ...restoredViewModes }));
                     }
                     // If we appended a streaming placeholder, point activeMsgIdxRef at it
-                    // so incoming socket chunks write into the placeholder, not the user msg.
+                    // so incoming socket chunks write into the placeholder, not the last user msg.
                     activeMsgIdxRef.current = streamStillActive ? transformedHistory.length : transformedHistory.length - 1;
                 }
-            }).catch(err => { setHistoryLoading(false); console.error(err); });
+            }).catch((err) => {
+                setIsLoadingHistory(false);
+                console.error(err);
+            });
         }
     }, [initialSessionId]);
 
@@ -4293,11 +4584,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         if (initialSessionId) {
             hasSentInitial.current = true;
             saLog('initial: skipped auto-send because initialSessionId is provided (history load)');
-            // If messages init created a streaming placeholder (from SA_PENDING_KEY match),
-            // point activeMsgIdxRef at it IMMEDIATELY so socket events (onModule, onProgress)
-            // that arrive before history fetch resolves land on the correct slot.
-            // Without this, modules events would write to index -1 and be lost, leaving the
-            // Thinking Process panel empty even though the inline trigger shows activity.
+            // If the history restore appended a streaming placeholder (A→B→A case
+            // where the previous session's stream is still mid-flight), point
+            // activeMsgIdxRef at it so modules / tool_trace events that arrive
+            // before history fetch resolves land on the correct slot. Without this,
+            // events write to index -1 and are lost, leaving the Thinking panel empty.
             const streamingIdx = messages.findIndex(m => m.role === 'assistant' && m.isStreaming);
             if (streamingIdx >= 0) {
                 activeMsgIdxRef.current = streamingIdx;
@@ -4325,7 +4616,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             }));
             return;
         }
-        if (!initialMessage.trim() && initialImages.length === 0) return;
+        if (!initialMessage.trim()) return;
         hasSentInitial.current = true;
 
         // Broadcast new session for sidebar
@@ -4333,7 +4624,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             detail: { id: sessionId, title: summarizeTitle(initialMessage), agentId: chatSelectedAgent || 'auto' }
         }));
 
-        const userMsg: Message = { role: 'user', content: initialMessage, images: initialImages, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
 
@@ -4347,12 +4638,20 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
             setTimeout(() => { setSummonPhase('narrating'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 1400);
             setTimeout(() => { setSummonPhase('selecting'); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, 3200);
             setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 300);
+            // Live Demo: pre-pick a few lenses and request auto-confirm so the
+            // visitor sees the full Roundtable run without any clicks.
+            if (autoStartRoundtable) {
+                setTimeout(() => {
+                    setSelectedSummonIds(new Set(['buffett_style', 'munger_style', 'lynch_style', 'sentiment_focus']));
+                }, 3600);
+                setTimeout(() => { setAutoConfirmTick(Date.now()); }, 4800);
+            }
             return;
         }
 
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages, initialImages); setTimeout(scrollUserMsgToTop, 150); }, 50);
-    }, [initialMessage, initialImages, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 150); }, 50);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSummonConfirm = useCallback(() => {
@@ -4361,52 +4660,244 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         setSummonPhase('idle');
         setPendingRtText(null);
         summonBypassRef.current = true;
-        // Open side panel on Roundtable Graph tab
-        setShowThinkingPanel(true);
+        // Process panel stays closed by default — users can open it from the
+        // thinking indicator on the assistant message if they want the animation.
         setShowGraphPanel(false);
         setSourcePanelData(null);
-        setPanelTab('graph');
-        // Initialize roundtable thinking state with REAL agent selection only.
-        // Panel data (rtDataSearch, rtRounds, rtConsensus) is populated by real
-        // socket events (agent:chat:consensus_done) and metadata restoration
-        // on stream completion — not from hardcoded preview data.
+        setPanelTab('process');
+        // Store roundtable context in thinking process (with demo data for UI preview)
         const agentIds = [...selectedSummonIds];
-        const nextMsgIdx = messages.length;
+        const nextMsgIdx = messages.length; // assistant message will be at this index
+        const selectedAgents = SUMMON_POOL.filter(a => agentIds.includes(a.id));
         const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
-        const selectedAgents = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
-        const finalAgentIds = [...systemAgents.map(a => a.id), ...selectedAgents.map(a => a.id)];
+        const allAgents = [...systemAgents, ...selectedAgents];
+        // Demo: if no user-selected agents, inject some defaults for preview
+        const demoExtraIds = allAgents.length <= 4 ? ['buffett_style', 'dalio_style', 'sentiment_focus'] : [];
+        const demoExtras = SUMMON_POOL.filter(a => demoExtraIds.includes(a.id));
+        const demoAllAgents = [...allAgents, ...demoExtras];
+        const demoAgentIds = demoAllAgents.map(a => a.id);
+        // Use up to 4 for round 1, all for round 2
+        const r1Agents = demoAllAgents.slice(0, 2);
+        const r2Agents = demoAllAgents.slice(0, Math.min(7, demoAllAgents.length));
+        const verdicts = ['Bullish', 'Neutral', 'Bearish', 'Bullish', 'Bearish', 'Neutral', 'Bullish'];
+        const confs = [78, 62, 45, 71, 82, 58, 75];
+        const reasonings = [
+            'Revenue grew 18% YoY to $4.2B, beating consensus by $120M. Operating margins expanded 240bps to 28.3% driven by cost optimization and scale efficiencies. Free cash flow conversion improved to 92%. Forward P/E of 22x sits below 5-year average of 26x, suggesting room for multiple expansion. RSI at 58 indicates neutral momentum with no overbought signals. Key risk: rising interest rates could compress multiples in the near term.',
+            'Current valuation appears fair at 1.8x PEG ratio. Technical indicators are mixed — MACD shows a pending bullish crossover but volume has been declining for 3 consecutive weeks. The 50-day moving average ($148) is approaching the 200-day ($152), and a golden cross could trigger momentum buying. However, broad macro headwinds including hawkish Fed commentary and rising 10Y yields create uncertainty. Recommend maintaining position but not adding until clearer directional signals emerge.',
+            'Sector-wide de-rating in progress as competition intensifies. Company lost 2.1% market share in the latest quarter per IDC data. Gross margins contracted 180bps sequentially. Social sentiment turned notably negative after the product recall announcement, with Twitter mention sentiment dropping from +0.42 to -0.18 in two weeks. Balance sheet remains strong with $8.2B cash and minimal debt, which provides a floor, but near-term catalysts are lacking.',
+            'Tail risk assessment: correlation breakdown probability sits at 12% based on our fractal model. The current volatility regime is transitioning from low to moderate — VIX term structure shifted to contango. Max drawdown scenario under a 2-sigma stress event would be -18%. However, the company maintains a strong Altman Z-score of 4.2, suggesting minimal bankruptcy risk. Hedging cost via put spreads is relatively cheap at 45bps.',
+            'This is a wonderful business at a fair price. 85% customer retention rate, $3.2B in recurring revenue, and a brand moat evidenced by 40% pricing premium vs. closest competitor. Management has demonstrated disciplined capital allocation with $2.1B returned via buybacks. The stock trades at a 21% discount to peer median. As I always say: it is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.',
+            'The debt cycle analysis shows we are in the late expansion phase. Central bank tightening is creating headwinds across risk assets. However, this particular company has low leverage (0.8x net debt/EBITDA) and strong cash generation, making it relatively defensive. In an all-weather framework, this position contributes positive risk-adjusted returns across 3 of 4 economic environments. Maintain position but size conservatively given macro uncertainty.',
+            'Social sentiment analysis reveals a notable divergence: retail sentiment is turning bullish (+340% mention volume) while institutional positioning shows cautious accumulation. NLP analysis of recent earnings call transcripts indicates management confidence has increased — forward-looking language ratio improved from 0.42 to 0.61. The contrarian signal here is moderately bullish: when retail and institutions align gradually, the trend tends to persist.',
+        ];
         setThinkingProcesses(prev => {
             const flow = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable' };
             return {
                 ...prev,
                 [nextMsgIdx]: {
                     ...flow,
-                    selectedAgentIds: finalAgentIds,
+                    selectedAgentIds: demoAgentIds,
                     startTime: Date.now(),
                     routedMode: 'roundtable',
-                    // Leave rtPreparationStatus/rtDataSearch/rtRounds/rtConsensus
-                    // unset — they populate from real events as the backend progresses.
+                    rtPreparationStatus: 'done',
+                    // Phase 1: Data Collection — start all pending, stream below
+                    rtDataSearch: [
+                        { id: 'indicators', label: 'Market Indicators', labelCN: '市场指标', icon: 'indicators', status: 'pending', count: 12, items: ['P/E', 'EPS', 'RSI', 'MACD', 'Volume', 'Revenue', 'Net Income', 'FCF'] },
+                        { id: 'news', label: 'News & Reports', labelCN: '新闻与报告', icon: 'news', status: 'pending', count: 15, sources: [
+                            { title: 'Q4 Earnings Beat Expectations — Revenue surges 18% YoY', domain: 'reuters.com', favicon: 'reuters', url: 'https://reuters.com' },
+                            { title: 'Analyst Upgrades Rating to Overweight on Margin Expansion', domain: 'bloomberg.com', favicon: 'bloomberg', url: 'https://bloomberg.com' },
+                            { title: 'Sector Outlook: Mixed Signals Amid Rising Rates', domain: 'wsj.com', favicon: 'wsj', url: 'https://wsj.com' },
+                            { title: 'New Product Line Could Drive $2B in Incremental Revenue', domain: 'cnbc.com', favicon: 'cnbc', url: 'https://cnbc.com' },
+                        ]},
+                        { id: 'social', label: 'Social Media', labelCN: '社交媒体', icon: 'social', status: 'pending', count: 23, sources: [
+                            { title: 'Bullish sentiment trending — $TICKER mentions up 340% this week', domain: 'x.com', favicon: 'x', url: 'https://x.com' },
+                            { title: 'Community DD: Deep value analysis with DCF model breakdown', domain: 'reddit.com', favicon: 'reddit', url: 'https://reddit.com' },
+                            { title: 'Institutional flow data shows heavy accumulation at support', domain: 'stocktwits.com', favicon: 'stocktwits', url: 'https://stocktwits.com' },
+                        ]},
+                    ],
+                    // Rounds & consensus will be populated by the timeline below
+                    rtRounds: [],
+                    rtConsensus: {
+                        status: 'pending',
+                        hasConsensus: false,
+                        agentConclusions: [],
+                    },
                     rtReportStatus: 'pending',
                 },
             };
         });
-        sendToAI(text, messages);
+
+        // ── Demo animation gate ──
+        // When true, the legacy mock-data + timed reveal still runs
+        // (useful for offline UI previewing). When false (default in
+        // production), the panel scaffolds empty and waits for real
+        // backend events to fill it in. We turned this OFF after Stage 5
+        // wired the AgentRoom / Debate Tab to live socket events —
+        // otherwise users see ~30s of fake "Revenue grew 18%" mock
+        // before real consensus output arrives.
+        const USE_DEMO_ANIMATION = false;
+
+        // ── Build final-state data (used to hydrate each stage) ──
+        const finalR1Agents: RtAgentInference[] = r1Agents.map((a, i) => ({
+            agentId: a.id,
+            agentName: a.name,
+            status: 'done' as const,
+            verdict: verdicts[i],
+            confidence: confs[i],
+            reasoning: reasonings[i],
+        }));
+        const finalR2Agents: RtAgentInference[] = r2Agents.map((a, i) => ({
+            agentId: a.id,
+            agentName: a.name,
+            status: 'done' as const,
+            verdict: i === 2 ? 'Neutral' : verdicts[i],
+            confidence: confs[i] + (i === 2 ? 10 : 0),
+            reasoning: reasonings[i],
+            changedMind: i === 2,
+            previousVerdict: i === 2 ? 'Bearish' : undefined,
+            crossReferences: [r2Agents[(i + 1) % r2Agents.length]?.name, r2Agents[(i + 2) % r2Agents.length]?.name].filter(Boolean) as string[],
+        }));
+        const finalConsensus: RtConsensusResult = {
+            status: 'done',
+            hasConsensus: true,
+            conflictRate: 20,
+            agentConclusions: r2Agents.map((a, i) => ({
+                agentName: a.name,
+                verdict: i === 2 ? 'Neutral' : verdicts[i],
+                confidence: confs[i] + (i === 2 ? 10 : 0),
+            })),
+            finalVerdict: 'Bullish',
+            finalConfidence: 74,
+        };
+
+        // ── Staged reveal (mirrors the graph's 5 phases) ──
+        const patch = (fn: (f: ThinkingFlow) => ThinkingFlow) => {
+            setThinkingProcesses(prev => {
+                const cur = prev[nextMsgIdx] || { modules: [], isActive: true, route: 'Roundtable', routedMode: 'roundtable' };
+                return { ...prev, [nextMsgIdx]: fn(cur) };
+            });
+        };
+        const setDataStatus = (idx: number, status: 'pending' | 'active' | 'done') => patch(c => ({
+            ...c,
+            rtDataSearch: (c.rtDataSearch || []).map((d, i) => i === idx ? { ...d, status } : d),
+        }));
+
+        // Tuning: each phase gets enough dwell time to feel intentional (total ~10s)
+        const T_DATA_STEP = 900;          // per feed
+        const T_ROUND1_START = T_DATA_STEP * 3 + 300;   // 3000ms
+        const T_R1_AGENT_STEP = 600;
+        const T_ROUND2_START = T_ROUND1_START + T_R1_AGENT_STEP * 2 + 200; // ~4400ms
+        const T_R2_AGENT_STEP = 500;
+        const steps: { t: number; run: () => void }[] = [
+            // Data collection streams
+            { t: 0,                     run: () => setDataStatus(0, 'active') },
+            { t: T_DATA_STEP,           run: () => { setDataStatus(0, 'done'); setDataStatus(1, 'active'); } },
+            { t: T_DATA_STEP * 2,       run: () => { setDataStatus(1, 'done'); setDataStatus(2, 'active'); } },
+            { t: T_DATA_STEP * 3,       run: () => { setDataStatus(2, 'done'); } },
+            // Round 1 spawn
+            { t: T_ROUND1_START, run: () => patch(c => ({
+                ...c,
+                rtRounds: [{
+                    round: 1,
+                    status: 'active',
+                    agents: finalR1Agents.map((a, i) => ({ ...a, status: i === 0 ? 'active' : 'pending' })),
+                }],
+            })) },
+            { t: T_ROUND1_START + T_R1_AGENT_STEP, run: () => patch(c => ({
+                ...c,
+                rtRounds: c.rtRounds && c.rtRounds[0] ? [{
+                    ...c.rtRounds[0],
+                    agents: c.rtRounds[0].agents.map((a, i) => i === 0 ? { ...a, status: 'done' } : i === 1 ? { ...a, status: 'active' } : a),
+                }] : c.rtRounds,
+            })) },
+            // Round 2 spawn (closes Round 1, opens Round 2 agent 0)
+            { t: T_ROUND2_START, run: () => patch(c => ({
+                ...c,
+                rtRounds: [
+                    c.rtRounds && c.rtRounds[0]
+                        ? { ...c.rtRounds[0], status: 'done', agents: c.rtRounds[0].agents.map(a => ({ ...a, status: 'done' })) }
+                        : { round: 1, status: 'done', agents: finalR1Agents },
+                    { round: 2, status: 'active', agents: finalR2Agents.map((a, i) => ({ ...a, status: i === 0 ? 'active' : 'pending' })) },
+                ],
+            })) },
+        ];
+        // Round 2 agents stream
+        for (let i = 1; i < finalR2Agents.length; i++) {
+            const k = i;
+            steps.push({ t: T_ROUND2_START + T_R2_AGENT_STEP * k, run: () => patch(c => ({
+                ...c,
+                rtRounds: c.rtRounds && c.rtRounds[1] ? [c.rtRounds[0], {
+                    ...c.rtRounds[1],
+                    agents: c.rtRounds[1].agents.map((a, j) => j < k ? { ...a, status: 'done' } : j === k ? { ...a, status: 'active' } : a),
+                }] : c.rtRounds,
+            })) });
+        }
+        const r2EndT = T_ROUND2_START + T_R2_AGENT_STEP * finalR2Agents.length;
+        steps.push({ t: r2EndT, run: () => patch(c => ({
+            ...c,
+            rtRounds: c.rtRounds && c.rtRounds[1]
+                ? [c.rtRounds[0], { ...c.rtRounds[1], status: 'done', agents: c.rtRounds[1].agents.map(a => ({ ...a, status: 'done' })) }]
+                : c.rtRounds,
+            rtConsensus: { ...(c.rtConsensus || finalConsensus), status: 'active' },
+        })) });
+        steps.push({ t: r2EndT + 700, run: () => patch(c => ({
+            ...c,
+            rtConsensus: finalConsensus,
+            rtReportStatus: 'active',
+        })) });
+        steps.push({ t: r2EndT + 1600, run: () => patch(c => ({ ...c, rtReportStatus: 'done' })) });
+
+        // Clear any previous timers (e.g. rapid re-confirm) before scheduling
+        rtDemoTimersRef.current.forEach(clearTimeout);
+        rtDemoTimersRef.current = USE_DEMO_ANIMATION
+            ? steps.map(s => setTimeout(s.run, s.t))
+            : [];
+        // Send REAL selection to backend — 4 system (always on) + user-picked
+        // enhanced/master personas. Demo injection above is UI preview only.
+        const systemIds = SUMMON_POOL.filter(a => a.group === 'system').map(a => a.id);
+        const userPickedIds = [...selectedSummonIds].filter(id => !systemIds.includes(id));
+        const realAnalystIds = [...systemIds, ...userPickedIds];
+
+        // When demo is off, also overwrite the demo state init's
+        // `selectedAgentIds: demoAgentIds` (which can include 3 unrelated
+        // master personas as "preview" picks) with the actual roster the
+        // user chose. The onAnalystsSelected socket event will refresh this
+        // again with backend-resolved metadata, but doing it eagerly avoids
+        // a momentary flash of the wrong avatars in the AgentRoom.
+        if (!USE_DEMO_ANIMATION) {
+            setThinkingProcesses(prev => {
+                const existing = prev[nextMsgIdx];
+                if (!existing) return prev;
+                return {
+                    ...prev,
+                    [nextMsgIdx]: {
+                        ...existing,
+                        selectedAgentIds: realAnalystIds,
+                    },
+                };
+            });
+        }
+
+        sendToAI(text, messages, realAnalystIds);
         setTimeout(scrollUserMsgToTop, 150);
-    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop]);
+    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop, selectedSummonIds]);
+
+    // Live Demo: when autoConfirmTick bumps, fire the confirm with the latest
+    // closure so the pre-selected lenses are picked up correctly.
+    useEffect(() => {
+        if (!autoConfirmTick) return;
+        handleSummonConfirm();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoConfirmTick]);
 
     const handleSend = () => {
-        if (isStreaming) return;
-        const hasUploadingImages = chatImageAttachments.some(img => img.status === 'uploading');
-        if (hasUploadingImages) return;
-        const uploadedImages = chatImageAttachments
-            .filter(img => img.status === 'uploaded' && img.url)
-            .map(img => ({ url: img.url, mime: img.mime, name: img.name }));
-        if (!inputText.trim() && uploadedImages.length === 0) return;
+        if (!inputText.trim() || isStreaming) return;
         const text = inputText.trim();
         saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
+
         // Roundtable mode: intercept to show summon character selection inline
         if (chatMode === 'roundtable' && !summonBypassRef.current) {
-            const userMsg: Message = { role: 'user', content: text, images: uploadedImages, timestamp: new Date().toLocaleTimeString() };
+            const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
             setMessages(prev => [...prev, userMsg]);
             setInputText('');
             setPendingRtText(text);
@@ -4420,12 +4911,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
         }
 
         summonBypassRef.current = false;
-        const userMsg: Message = { role: 'user', content: text, images: uploadedImages, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
         setInputText('');
-        sendToAI(text, newMessages, uploadedImages);
-        clearChatImages();
+        sendToAI(text, newMessages);
         // Scroll so the user’s question appears at the top
         setTimeout(scrollUserMsgToTop, 150);
     };
@@ -4458,7 +4948,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
     };
 
     return (
-        <div className="flex flex-col h-full bg-white overflow-hidden">
+        <div className="flex h-full bg-white overflow-hidden">
             <style>{`
                 @keyframes voice-bar { 0%,100%{height:3px} 50%{height:10px} }
                 .voice-bar { min-height: 3px; display:inline-block; border-radius:9999px; background:#9ca3af; }
@@ -4467,44 +4957,66 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                 @keyframes summon-text { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
                 @keyframes summon-dot { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
                 @keyframes summon-glow { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } 50% { box-shadow: 0 0 12px 2px rgba(34,197,94,0.25); } }
-            `}</style>
-            {/* ══ Header: chat title ══ */}
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
-                <h1 className="text-[13px] font-semibold text-gray-800 truncate max-w-[60%]">{chatTitle}</h1>
-            </div>
 
-            {/* ══ Content Row ══ */}
+                /* Mode icon hover animations */
+                @keyframes mode-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                @keyframes mode-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+                @keyframes mode-shake { 0%,100% { transform: translateX(0) rotate(0); } 25% { transform: translateX(-1px) rotate(-6deg); } 75% { transform: translateX(1px) rotate(6deg); } }
+                .mode-icon-anim { display: inline-flex; transition: transform .2s ease; transform-origin: center; }
+                .mode-icon-auto:hover .mode-icon-anim { animation: mode-pulse 1.1s ease-in-out infinite; }
+                .mode-icon-fast:hover .mode-icon-anim { animation: mode-shake .45s ease-in-out infinite; }
+                .mode-icon-roundtable:hover .mode-icon-anim { animation: mode-spin 2.4s linear infinite; }
+            `}</style>
+
+            {/* ══ Content Row — two independent full-height columns ══ */}
             <div className="flex flex-1 overflow-hidden">
                 {/* Chat column */}
                 <div className="relative flex flex-col flex-1 min-w-0 overflow-hidden">
-                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 md:px-6 xl:px-8 py-8 pb-28">
+                    {/* Chat column header (above chat content only) */}
+                    <div className="flex items-center justify-between px-5 py-4 shrink-0">
+                        <h1 className="text-[13px] font-semibold text-gray-800 truncate flex-1 min-w-0 mr-4">{chatTitle}</h1>
+                        <PlanUpgradeEntry size="sm" hideIfMax />
+                    </div>
+                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overscroll-y-contain px-4 md:px-6 xl:px-8 py-8 pb-28">
                         <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
                             <div className={`flex items-start gap-6 xl:gap-8 ${showToc ? '' : 'justify-center'}`}>
                                 {showToc && (
                                     <aside className="hidden md:block w-[220px] shrink-0 self-start sticky" style={{ top: TOC_STICKY_TOP_PX }}>
                                         <nav
+                                            ref={tocNavRef}
                                             className="overflow-hidden"
                                             style={{
                                                 maxHeight: `max(${TOC_MIN_VIEWPORT_PX}px, calc(100dvh - ${TOC_STICKY_TOP_PX + TOC_BOTTOM_RESERVE_PX}px))`,
                                             }}
                                         >
                                             <div className="w-[220px] max-h-[inherit] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-200/60 rounded-xl shadow-lg shadow-gray-200/30 py-3 px-2">
-                                                <p className="px-2 pb-1.5 text-[11px] font-semibold text-gray-500 tracking-wide sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
+                                                <p className="px-2 pb-2 text-[13px] font-bold text-gray-900 tracking-tight sticky top-0 bg-white/95 backdrop-blur-md z-10">Sections</p>
                                                 <ul className="space-y-0.5">
                                                     {(() => {
                                                         // Filter and optimize TOC hierarchy:
-                                                        // Collapse level-3 items when a level-2 parent has only one level-3 child
+                                                        // 1. If there's only one level-2 heading, promote its
+                                                        //    level-3 children to top-level (avoid the "1 section
+                                                        //    → everything under it" redundant tree).
+                                                        // 2. Otherwise, collapse level-3 items when the level-2
+                                                        //    parent has only 1 child.
                                                         const filtered = tocHeadings.filter(h => h.level >= 2);
-                                                        const optimized: typeof filtered = [];
-                                                        for (let fi = 0; fi < filtered.length; fi++) {
-                                                            const h = filtered[fi];
-                                                            if (h.level === 2) {
-                                                                optimized.push(h);
-                                                            } else if (h.level >= 3) {
-                                                                let siblingCount = 0;
-                                                                for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
-                                                                // Only show sub-items if there are 2+ siblings
-                                                                if (siblingCount >= 2) optimized.push(h);
+                                                        const level2Count = filtered.filter(h => h.level === 2).length;
+                                                        let optimized: typeof filtered = [];
+                                                        if (level2Count <= 1) {
+                                                            optimized = filtered
+                                                                .filter(h => h.level >= 3)
+                                                                .map(h => ({ ...h, level: 2 }));
+                                                            if (optimized.length === 0) optimized = filtered;
+                                                        } else {
+                                                            for (let fi = 0; fi < filtered.length; fi++) {
+                                                                const h = filtered[fi];
+                                                                if (h.level === 2) {
+                                                                    optimized.push(h);
+                                                                } else if (h.level >= 3) {
+                                                                    let siblingCount = 0;
+                                                                    for (let si = fi; si < filtered.length && filtered[si].level >= 3; si++) siblingCount++;
+                                                                    if (siblingCount >= 2) optimized.push(h);
+                                                                }
                                                             }
                                                         }
                                                         return optimized;
@@ -4547,52 +5059,53 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                     </aside>
                                 )}
                                 <div className={`min-w-0 space-y-8 ${showToc ? 'flex-1 max-w-4xl' : 'w-full max-w-4xl'}`}>
-                            {historyLoading && messages.length === 0 ? (
-                                /* Loading skeleton while fetching session history (only when no pending messages) */
-                                <div className="space-y-8 animate-pulse">
+                            {isLoadingHistory && messages.length === 0 && (
+                                <div className="space-y-8 animate-pulse" aria-label="Loading conversation">
+                                    {/* User bubble skeleton */}
                                     <div className="flex justify-end">
-                                        <div className="h-10 w-56 bg-gray-200 rounded-2xl" />
+                                        <div className="max-w-[60%] px-4 py-3 bg-gray-100 rounded-2xl rounded-br-sm border border-gray-200/70">
+                                            <div className="h-3.5 w-48 bg-gray-200 rounded" />
+                                        </div>
                                     </div>
+                                    {/* Assistant reply skeleton */}
                                     <div className="flex items-start gap-3">
-                                        <div className="w-7 h-7 rounded-xl bg-gray-200 shrink-0" />
-                                        <div className="flex-1 space-y-2">
-                                            <div className="h-4 bg-gray-200 rounded w-3/4" />
-                                            <div className="h-4 bg-gray-200 rounded w-5/6" />
-                                            <div className="h-4 bg-gray-200 rounded w-2/3" />
+                                        <div className="flex-1 min-w-0 space-y-3">
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-4 h-4 rounded-full bg-gray-200" />
+                                                <div className="h-3 w-24 bg-gray-200 rounded" />
+                                            </div>
+                                            <div className="h-4 w-3/5 bg-gray-200 rounded" />
+                                            <div className="space-y-2 pt-2">
+                                                <div className="h-3 w-full bg-gray-200/80 rounded" />
+                                                <div className="h-3 w-11/12 bg-gray-200/80 rounded" />
+                                                <div className="h-3 w-4/5 bg-gray-200/80 rounded" />
+                                                <div className="h-3 w-2/3 bg-gray-200/80 rounded" />
+                                            </div>
+                                            <div className="flex gap-2 pt-3">
+                                                <div className="h-16 flex-1 bg-gray-100 rounded-xl border border-gray-200/70" />
+                                                <div className="h-16 flex-1 bg-gray-100 rounded-xl border border-gray-200/70" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {/* Second user bubble skeleton */}
+                                    <div className="flex justify-end">
+                                        <div className="max-w-[45%] px-4 py-3 bg-gray-100 rounded-2xl rounded-br-sm border border-gray-200/70">
+                                            <div className="h-3.5 w-32 bg-gray-200 rounded" />
                                         </div>
                                     </div>
                                 </div>
-                            ) : messages.map((msg, i) => (
-                                <div key={i} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
+                            )}
+                            {messages.map((msg, i) => (
+                                <div key={i} id={`msg-wrap-${i}`} ref={msg.role === 'user' ? lastUserMsgRef : undefined}>
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
-                                            <div className="max-w-[72%] px-4 py-3 bg-gray-900 text-white rounded-2xl rounded-br-sm shadow-sm space-y-2">
-                                                {!!msg.images?.length && (
-                                                    <div className={`grid gap-2 ${msg.images.length === 1 ? 'grid-cols-1 w-[170px]' : 'grid-cols-2'}`}>
-                                                        {msg.images.map((img, idx) => (
-                                                            <button
-                                                                key={`${img.url}-${idx}`}
-                                                                type="button"
-                                                                onClick={() => setImagePreview({ images: msg.images || [], index: idx })}
-                                                                className="group relative rounded-lg overflow-hidden border border-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
-                                                            >
-                                                                <img
-                                                                    src={img.url}
-                                                                    alt={img.name || 'uploaded image'}
-                                                                    className={`rounded-lg object-cover cursor-zoom-in ${msg.images.length === 1 ? 'w-[170px] h-[170px]' : 'w-full max-h-36'}`}
-                                                                />
-                                                                <span className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                                {msg.content ? <p className="text-[13px] leading-relaxed">{msg.content}</p> : null}
-                                                <p className="text-[9px] text-gray-500 mt-1.5 text-right">{msg.timestamp}</p>
+                                            <div className="max-w-[72%] px-4 py-3 bg-gray-100 text-gray-900 rounded-2xl rounded-br-sm border border-gray-200/70">
+                                                <p className="text-[15px] leading-relaxed tracking-[-0.011em]" style={{ fontFamily: "'Open Runde', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif", fontWeight: 500 }}>{msg.content}</p>
+                                                <p className="text-[9px] text-gray-400 mt-1.5 text-right">{msg.timestamp}</p>
                                             </div>
                                         </div>
                                     ) : (
                                         <div className="flex items-start gap-3">
-                                            <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
                                             <div className="flex-1 min-w-0">
                                                 {thinkingProcesses[i] && (
                                                     <ThinkingInlineTrigger
@@ -4609,8 +5122,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                         }}
                                                     />
                                                 )}
+                                                {/* Lite-mode banner: Auto fell back to no-agent because both buckets are empty */}
+                                                {msg.role === 'assistant' && msg.liteMode && (
+                                                    <div className="mb-3 flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200">
+                                                        <svg className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-[12px] font-semibold text-amber-900 leading-snug">Running in lite mode</p>
+                                                            <p className="text-[11px] text-amber-800 leading-snug mt-0.5">{msg.liteMode.hint}</p>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => navigate('/settings')}
+                                                            className="shrink-0 text-[11px] font-bold text-amber-900 hover:text-amber-950 underline underline-offset-2"
+                                                        >
+                                                            Upgrade
+                                                        </button>
+                                                    </div>
+                                                )}
                                                 {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && (!msg.isStreaming || htmlReports[i]) && ((htmlReports[i] || htmlGenerating[i]) || consensusResults[i]) && (
+                                                {msg.role === 'assistant' && !msg.isStreaming && (htmlReports[i] || htmlGenerating[i]) && (
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className="flex items-center gap-1.5">
                                                         {(htmlReports[i] || htmlGenerating[i]) && (
@@ -4638,27 +5169,28 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                             </div>
                                                         )}
                                                         </div>
-                                                        {consensusResults[i] && (
-                                                            <button
-                                                                onClick={() => {
-                                                                    setActiveGraphMsgIdx(i);
-                                                                    setSourcePanelData(null);
-                                                                    if (chatMode === 'roundtable') {
-                                                                        setShowThinkingPanel(true);
-                                                                        setShowGraphPanel(false);
-                                                                        setPanelTab('graph');
-                                                                    } else {
-                                                                        setShowThinkingPanel(false);
-                                                                        setShowGraphPanel(true);
-                                                                    }
-                                                                }}
-                                                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 text-[11px] text-indigo-600 font-medium transition-colors"
-                                                            >
-                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                                                                Roundtable
-                                                            </button>
-                                                        )}
                                                     </div>
+                                                )}
+                                                {/* Bare stage pipeline — shows for all modes:
+                                                    - Roundtable: 5 stages (Summon → Research → Debate → Consensus → Report)
+                                                    - Fast / Auto: 3 stages (Route → Research → Respond) */}
+                                                {!!thinkingProcesses[i]?.routedMode && (
+                                                    <div className="mb-3 mt-1 -mx-1 px-1 overflow-x-auto md:overflow-visible md:mx-0 md:px-0" style={{ scrollbarWidth: 'none' }}>
+                                                        <PlanPipeline thinking={thinkingProcesses[i]} />
+                                                    </div>
+                                                )}
+                                                {/* Roundtable Workbench — left roster + right (detail + Graph/Debate tabs) */}
+                                                {thinkingProcesses[i]?.routedMode === 'roundtable'
+                                                  && (thinkingProcesses[i]!.rtPreparationStatus === 'done'
+                                                      || ((thinkingProcesses[i]!.rtRounds?.length ?? 0) > 0)
+                                                      || ((thinkingProcesses[i]!.rtDataSearch?.length ?? 0) > 0)) && (
+                                                    <PlanCardBoundary>
+                                                        <RoundtableWorkbench
+                                                            thinking={thinkingProcesses[i]!}
+                                                            isLive={!!thinkingProcesses[i]?.isActive}
+                                                            topicLabel={messages.slice(0, i).reverse().find(m => m.role === 'user')?.content || ''}
+                                                        />
+                                                    </PlanCardBoundary>
                                                 )}
                                                 {msg.content === '__cancelled__' ? (() => {
                                                     const prevUser = messages.slice(0, i).reverse().find(m => m.role === 'user');
@@ -4811,9 +5343,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                                                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6" />
                                                                                             </svg>
                                                                                             <span className="text-[9px] uppercase tracking-[0.08em] text-amber-600 font-semibold leading-none">{liveQuote.lang === 'en' ? 'Derivatives' : '衍生品'}</span>
-                                                                                            {matchingOkx.swapInstId && (
-                                                                                                <span className="text-[9px] text-gray-400 font-mono">{matchingOkx.swapInstId}</span>
-                                                                                            )}
                                                                                         </div>
                                                                                         {derivStats.length > 0 && (
                                                                                             <div className="grid grid-cols-3 gap-x-4 gap-y-3">
@@ -4946,7 +5475,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                                 );
                                                             })()}
                                                             {showWebView ? (
-                                                                <HtmlReportFrame html={stripFollowUpSectionFromHtml(htmlReports[i])} isStreaming={false} />
+                                                                <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
                                                             ) : showWebSkeleton ? (
                                                                 <div className="rounded-xl border border-gray-100 bg-gray-50 p-6 space-y-4 animate-pulse">
                                                                     <div className="h-3 bg-gray-200 rounded w-1/4" />
@@ -4973,6 +5502,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                                 {/* Sources bar — click to open side panel */}
                                                 {!msg.isStreaming && msg.content && (
                                                     <div id={`msg-actions-${i}`} className="flex items-center gap-0.5 mt-3">
+                                                        {/* Docs / Web view toggle — relocated here from above the answer */}
+                                                        {msg.role === 'assistant' && (htmlReports[i] || htmlGenerating[i]) && (
+                                                            <>
+                                                                <div className="flex items-center gap-0.5 p-0.5 bg-gray-100 rounded-lg mr-1">
+                                                                    <button
+                                                                        onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
+                                                                        className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
+                                                                            (msgViewMode[i] || 'docs') === 'docs'
+                                                                                ? 'bg-white text-gray-900 shadow-sm'
+                                                                                : 'text-gray-500 hover:text-gray-700'
+                                                                        }`}
+                                                                    >
+                                                                        Docs
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
+                                                                        className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
+                                                                            msgViewMode[i] === 'web'
+                                                                                ? 'bg-white text-gray-900 shadow-sm'
+                                                                                : 'text-gray-500 hover:text-gray-700'
+                                                                        }`}
+                                                                    >
+                                                                        Web
+                                                                    </button>
+                                                                </div>
+                                                                <div className="w-px h-4 bg-gray-200 mx-1" />
+                                                            </>
+                                                        )}
                                                         {/* Copy — hide for cancelled */}
                                                         {msg.content !== '__cancelled__' && (
                                                             <button
@@ -5124,7 +5681,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                 };
                                 return (
                                 <div className="flex items-start gap-3">
-                                    <div className="w-7 h-7 rounded-xl bg-gray-900 flex items-center justify-center text-white text-[10px] font-black shrink-0 mt-0.5">L</div>
                                     <div className="flex-1 min-w-0">
                                         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden" style={{ maxWidth: 680 }}>
                                             {summonPhase === 'loading' || summonPhase === 'narrating' ? (
@@ -5313,15 +5869,38 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                             );})()}
 
                             <div ref={messagesEndRef} />
+                                </div>
+                            </div>
                         </div>
                     </div>
-                </div>
-            </div>
 
                     {/* Input */}
-                    <div className="absolute bottom-0 left-0 right-0 z-40 pt-2 pb-4 px-4 md:px-8 pointer-events-none">
+                    <div className="absolute bottom-0 left-0 right-0 pt-2 pb-4 px-4 md:px-8 pointer-events-none" style={{ zIndex: 10 }}>
                         <div className="max-w-2xl mx-auto pointer-events-auto">
-                            <div className="bg-white/90 backdrop-blur-xl border border-gray-200 rounded-2xl relative ring-1 ring-gray-100" style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06)' }}>
+                            {/* Scroll-to-bottom FAB: only while user is scrolled above the latest reply */}
+                            {showScrollToBottom && (
+                                <div className="flex justify-center mb-3">
+                                    <button
+                                        onClick={handleScrollToBottom}
+                                        aria-label="Scroll to latest message"
+                                        title="Scroll to latest"
+                                        className="group w-9 h-9 rounded-full bg-white border border-gray-200 text-gray-500 hover:text-gray-900 hover:bg-gray-50 hover:border-gray-300 shadow-md hover:shadow-lg flex items-center justify-center transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-95"
+                                        style={{ animation: 'menu-pop 0.2s ease-out', boxShadow: '0 4px 14px -2px rgba(15,23,42,0.12), 0 1px 3px rgba(15,23,42,0.08)' }}
+                                    >
+                                        <svg className="w-4 h-4 transition-transform group-hover:translate-y-[1px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.25} strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M12 5v14M19 12l-7 7-7-7" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            )}
+                            <div
+                                className="group/composer bg-white backdrop-blur-xl border border-gray-200/80 rounded-[20px] relative ring-1 ring-black/[0.04] transition-all duration-200 focus-within:border-gray-300 focus-within:ring-gray-300/30 focus-within:shadow-[0_20px_60px_-12px_rgba(15,23,42,0.25),0_6px_20px_-4px_rgba(15,23,42,0.12)]"
+                                style={{
+                                    boxShadow: '0 12px 48px -8px rgba(15,23,42,0.18), 0 4px 16px -2px rgba(15,23,42,0.10), 0 1px 3px rgba(15,23,42,0.06)',
+                                    backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(250,250,252,1) 100%)',
+                                }}
+                            >
+
                                 {/* Voice overlay: Recording */}
                                 {voiceState === 'recording' && (
                                     <div className="absolute inset-x-0 top-0 bottom-[52px] flex items-center justify-center">
@@ -5358,30 +5937,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                 {/* Hidden file input */}
                                 <input ref={chatFileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleChatFileChange} />
                                 {/* Image preview strip */}
-                                {chatImageAttachments.length > 0 && voiceState === 'idle' && (
+                                {chatPastedImages.length > 0 && voiceState === 'idle' && (
                                     <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
-                                        {chatImageAttachments.map((img) => (
-                                            <div key={img.id} className="relative group shrink-0">
-                                                <img
-                                                    src={img.previewUrl}
-                                                    alt=""
-                                                    onClick={() => openPendingImagePreview(chatImageAttachments.findIndex(item => item.id === img.id))}
-                                                    className={`w-12 h-12 rounded-xl object-cover border shadow-sm cursor-zoom-in ${img.status === 'error' ? 'border-red-300' : 'border-gray-200'}`}
-                                                />
-                                                {img.status === 'uploading' && (
-                                                    <span className="absolute inset-0 rounded-xl bg-black/35 flex items-center justify-center">
-                                                        <span className="w-5 h-5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-                                                    </span>
-                                                )}
-                                                {img.status === 'error' && (
-                                                    <span className="absolute inset-0 rounded-xl bg-red-500/50 flex items-center justify-center" title="Upload failed">
-                                                        <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8v5m0 3h.01M10.29 3.86L1.82 18a2 2 0 001.73 3h16.9a2 2 0 001.73-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                                                        </svg>
-                                                    </span>
-                                                )}
+                                        {chatPastedImages.map((src, idx) => (
+                                            <div key={idx} className="relative group shrink-0">
+                                                <img src={src} alt="" className="w-12 h-12 rounded-xl object-cover border border-gray-200 shadow-sm" />
                                                 <button
-                                                    onClick={() => removeChatImage(img.id)}
+                                                    onClick={() => setChatPastedImages(prev => prev.filter((_, i) => i !== idx))}
                                                     className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                                                 >
                                                     <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -5396,58 +5958,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                     value={inputText}
                                     onChange={e => setInputText(e.target.value)}
                                     onPaste={handleChatPaste}
-                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                                    placeholder={voiceState !== 'idle' ? '' : 'Ask a follow-up question...'}
-                                    disabled={isStreaming || voiceState !== 'idle'}
-                                    className="w-full bg-transparent outline-none resize-none text-[14px] text-gray-900 placeholder:text-gray-400 px-4 pt-3 pb-1.5 leading-relaxed overflow-y-auto"
-                                    style={{ minHeight: '42px', maxHeight: '200px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
+                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isStreaming) handleSend(); } }}
+                                    placeholder={voiceState !== 'idle' ? '' : isStreaming ? 'Waiting for reply… type your next message' : 'Ask a follow-up…'}
+                                    disabled={voiceState !== 'idle'}
+                                    className="w-full bg-transparent outline-none resize-none text-[14.5px] text-gray-900 placeholder:text-gray-400 px-5 pt-4 pb-1 leading-relaxed overflow-y-auto"
+                                    style={{ minHeight: '50px', maxHeight: '180px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
-                                <div className="flex items-center justify-between px-3 pb-3">
-                                    {/* Left: mode selector + agent selector */}
+                                <div className="flex items-center justify-between px-2.5 pb-2.5 pt-0.5">
+                                    {/* Left: Mode selector — plain text, ChatGPT/Claude style */}
                                     <div className="flex items-center gap-1">
-                                        <div className="relative" ref={chatModeRef}>
-                                            <button
-                                                onClick={() => setChatModeOpen(v => !v)}
-                                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-gray-500 hover:bg-gray-100 transition-all"
-                                            >
-                                                {React.createElement(currentChatMode.icon)}
-                                                {currentChatMode.label}
-                                                <ChatChevron />
-                                            </button>
-                                            {chatModeOpen && (
-                                                <div className="absolute bottom-full left-0 mb-1.5 w-64 bg-white border border-gray-100 rounded-xl shadow-lg overflow-hidden z-30" style={{ animation: 'menu-pop 0.15s ease-out' }}>
-                                                    {CHAT_MODES.map(m => {
-                                                        const MIcon = m.icon;
-                                                        const isActive = chatMode === m.id;
-                                                        return (
-                                                            <button
-                                                                key={m.id}
-                                                                onClick={() => {
-                                                                    setChatMode(m.id);
-                                                                    setChatModeOpen(false);
-                                                                }}
-                                                                className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${isActive ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
-                                                            >
-                                                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400'}`}>
-                                                                    <MIcon />
-                                                                </div>
-                                                                <div className="min-w-0 flex-1">
-                                                                    <p className={`text-[12px] font-semibold ${isActive ? 'text-gray-900' : 'text-gray-700'}`}>{m.label}</p>
-                                                                    <p className="text-[10px] text-gray-400 leading-tight">{m.desc}</p>
-                                                                </div>
-                                                                {isActive && (
-                                                                    <svg className="w-3.5 h-3.5 text-gray-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
-                                                                )}
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-                                        </div>
-
+                                        <ModeSelector
+                                            mode={chatMode}
+                                            onModeChange={setChatMode}
+                                            roundtableQuota={roundtableQuota}
+                                            fastQuota={fastQuota}
+                                            isGuest={!api.isAuthenticated}
+                                            onLockedClick={() => window.dispatchEvent(new Event('show-auth-modal'))}
+                                        />
                                     </div>
                                     {/* Right: action buttons */}
-                                    <div className="flex items-center gap-1">
+                                    <div className="flex items-center gap-0.5">
                                         <button onClick={() => chatFileRef.current?.click()} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all" title="Attach file">
                                             <InputIcons.Attach />
                                         </button>
@@ -5463,23 +5993,28 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                             disabled={voiceState === 'transcribing'}
                                         >
                                             {voiceState === 'recording' ? (
-                                                <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
                                             ) : (
                                                 <InputIcons.Mic />
                                             )}
                                         </button>
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
-                                            disabled={!isStreaming && (chatImageAttachments.some(img => img.status === 'uploading') || (!inputText.trim() && !chatImageAttachments.some(img => img.status === 'uploaded' && img.url)))}
-                                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isStreaming
-                                                    ? 'bg-gray-900 text-white hover:bg-gray-700'
-                                                    : (inputText.trim() || chatImageAttachments.some(img => img.status === 'uploaded' && img.url))
-                                                        ? 'bg-gray-900 text-white hover:bg-gray-800'
+                                            disabled={!isStreaming && !inputText.trim()}
+                                            title={isStreaming ? 'Stop generating' : 'Send'}
+                                            aria-label={isStreaming ? 'Stop generating' : 'Send'}
+                                            className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-all ml-1 ${isStreaming
+                                                    ? 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
+                                                    : inputText.trim()
+                                                        ? 'bg-gray-700 text-white hover:bg-gray-800 shadow-[0_6px_16px_-4px_rgba(55,65,81,0.35)] hover:-translate-y-[1px]'
                                                         : 'bg-gray-100 text-gray-300 cursor-not-allowed'
                                                 }`}
                                         >
                                             {isStreaming ? (
-                                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                                    <circle cx="12" cy="12" r="9" />
+                                                    <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" stroke="none" />
+                                                </svg>
                                             ) : (
                                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
                                             )}
@@ -5494,142 +6029,72 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
 
                 {/* ── Unified Roundtable Panel (tabs: Process | Graph) ── */}
                 {(() => { if (showThinkingPanel) console.log('[RT-DEBUG] panel check', { chatMode, routedMode: currentThinking?.routedMode, rtPanelExpanded, activeGraphMsgIdx }); return null; })()}
-                {showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && !rtPanelExpanded && (
-                    <div className="w-[480px] shrink-0 border-l border-gray-100 flex flex-col overflow-hidden bg-white">
-                        {/* Tab bar */}
-                        <div className="flex items-center px-4 py-2.5 border-b border-gray-100 gap-1 shrink-0">
-                            <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                                <button onClick={() => setPanelTab('process')}
-                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
-                                        panelTab === 'process' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                                    }`}>Process</button>
-                                <button onClick={() => setPanelTab('graph')}
-                                    className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
-                                        panelTab === 'graph' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                                    }`}>Roundtable Graph</button>
-                            </div>
-                            <div className="flex-1" />
-                            <button onClick={() => setRtPanelExpanded(true)}
-                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
-                                title="Expand">
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
-                            </button>
-                            <button onClick={() => setShowThinkingPanel(false)}
-                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                        </div>
-                        {/* Content */}
-                        {panelTab === 'process' ? (
-                            currentThinking ? (
-                                <div className="flex-1 overflow-hidden">
+                {/* ── Unified Process Panel (floating card, same for all modes) ── */}
+                {/* Mobile: fullscreen overlay with backdrop. Desktop (md+): inline side column. */}
+                {showThinkingPanel && currentThinking && (
+                    <>
+                        <div
+                            className="md:hidden fixed inset-0 z-40 bg-black/40"
+                            onClick={() => setShowThinkingPanel(false)}
+                            aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 p-3 md:static md:z-auto md:w-[440px] md:shrink-0 md:p-3 md:pl-0">
+                            <div className="h-full flex flex-col overflow-hidden bg-[#fafafb] rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
+                                <div className="flex items-center px-4 py-3 gap-2 shrink-0">
+                                    <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Process</span>
+                                    <div className="flex-1" />
+                                    <button onClick={() => setShowThinkingPanel(false)}
+                                        aria-label="Close"
+                                        className="w-9 h-9 md:w-7 md:h-7 rounded-lg bg-white/60 hover:bg-white flex items-center justify-center text-gray-500 hover:text-gray-700 transition-all">
+                                        <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                    </button>
+                                </div>
+                                <div className="flex-1 min-h-0 overflow-hidden">
                                     <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => setShowThinkingPanel(false)} hideHeader chatMode={chatMode} />
                                 </div>
-                            ) : (
-                                <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
-                            )
-                        ) : (
-                            <div className="flex-1 overflow-hidden">
-                                <RoundtableView data={currentRoundtableData}
-                                    isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
-                                    isLive={isStreaming}
-                                    hideHeader
-                                    summonPhase={summonPhase}
-                                    selectedSummonIds={selectedSummonIds}
-                                    onSummonToggle={(id) => setSelectedSummonIds(prev => {
-                                        const next = new Set(prev);
-                                        next.has(id) ? next.delete(id) : next.add(id);
-                                        return next;
-                                    })}
-                                    onSummonConfirm={handleSummonConfirm}
-                                />
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {/* ── Fullscreen Roundtable Panel (Process 1/3 + Graph 2/3) ── */}
-                {rtPanelExpanded && showThinkingPanel && (chatMode === 'roundtable' || currentThinking?.routedMode === 'roundtable') && (
-                    <div className="fixed inset-0 z-50 bg-white flex flex-col">
-                        {/* Header bar */}
-                        <div className="flex items-center px-5 py-3 border-b border-gray-100 shrink-0">
-                            <span className="text-[14px] font-bold text-gray-900">Roundtable Analysis</span>
-                            <div className="flex-1" />
-                            <button onClick={() => setRtPanelExpanded(false)}
-                                className="w-8 h-8 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all mr-1.5"
-                                title="Collapse">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" /></svg>
-                            </button>
-                            <button onClick={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }}
-                                className="w-8 h-8 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                        </div>
-                        {/* Split: Process (1/3) + Graph (2/3) */}
-                        <div className="flex flex-1 min-h-0">
-                            <div className="w-1/3 border-r border-gray-100 overflow-hidden flex flex-col">
-                                <div className="px-4 py-3 border-b border-gray-50 shrink-0">
-                                    <span className="text-[13px] font-bold text-gray-800">Process</span>
-                                </div>
-                                {currentThinking ? (
-                                    <div className="flex-1 overflow-hidden">
-                                        <ThinkingProcessSidePanel thinking={currentThinking} onClose={() => { setRtPanelExpanded(false); setShowThinkingPanel(false); }} hideHeader chatMode={chatMode} />
-                                    </div>
-                                ) : (
-                                    <div className="flex-1 flex items-center justify-center text-[12px] text-gray-400">Waiting for a new discussion…</div>
-                                )}
-                            </div>
-                            <div className="w-2/3 overflow-hidden flex flex-col">
-                                <div className="px-4 py-3 border-b border-gray-50 shrink-0">
-                                    <span className="text-[13px] font-bold text-gray-800">Roundtable Graph</span>
-                                </div>
-                                <div className="flex-1 overflow-hidden">
-                                    <RoundtableView data={currentRoundtableData}
-                                        isWaiting={isStreaming && currentRoundtableData.rounds.length === 0}
-                                        isLive={isStreaming}
-                                        hideHeader
-                                        summonPhase={summonPhase}
-                                        selectedSummonIds={selectedSummonIds}
-                                        onSummonToggle={(id) => setSelectedSummonIds(prev => {
-                                            const next = new Set(prev);
-                                            next.has(id) ? next.delete(id) : next.add(id);
-                                            return next;
-                                        })}
-                                        onSummonConfirm={handleSummonConfirm}
-                                    />
-                                </div>
                             </div>
                         </div>
-                    </div>
-                )}
-
-                {/* Non-roundtable: original Thinking Process Side Panel */}
-                {showThinkingPanel && currentThinking && chatMode !== 'roundtable' && currentThinking.routedMode !== 'roundtable' && (
-                    <div className="w-[360px] shrink-0 border-l border-gray-100 overflow-hidden">
-                        <ThinkingProcessSidePanel
-                            thinking={currentThinking}
-                            onClose={() => setShowThinkingPanel(false)}
-                            chatMode={chatMode}
-                        />
-                    </div>
+                    </>
                 )}
 
                 {/* Standalone Roundtable Panel — only for non-roundtable mode fallback */}
                 {showGraphPanel && !showThinkingPanel && !sourcePanelData && chatMode !== 'roundtable' && (
-                    <div className="w-[520px] shrink-0 border-l border-gray-100 overflow-hidden relative">
-                        <button
+                    <>
+                        <div
+                            className="md:hidden fixed inset-0 z-40 bg-black/40"
                             onClick={() => setShowGraphPanel(false)}
-                            className="absolute top-2 right-2 z-20 w-7 h-7 rounded-lg bg-white/80 backdrop-blur border border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all shadow-sm"
-                        >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                        <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && currentRoundtableData.rounds.length === 0} isLive={isStreaming} />
-                    </div>
+                            aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 p-3 md:static md:z-auto md:w-[540px] md:shrink-0 md:p-3 md:pl-0">
+                            <div className="h-full flex flex-col overflow-hidden bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] relative">
+                                <div className="flex items-center px-4 py-3 border-b border-gray-100 gap-2 shrink-0">
+                                    <div className="w-5 h-5 rounded-md bg-gray-900 flex items-center justify-center text-white text-[9px] font-black">L</div>
+                                    <span className="text-[12.5px] font-bold text-gray-900 tracking-tight">Loka's Computer</span>
+                                    <div className="flex-1" />
+                                    <button onClick={() => setShowGraphPanel(false)}
+                                        aria-label="Close"
+                                        className="w-9 h-9 md:w-7 md:h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-all">
+                                        <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                    </button>
+                                </div>
+                                <div className="flex-1 min-h-0 overflow-hidden">
+                                    <RoundtableView data={currentRoundtableData} isWaiting={isStreaming && (chatMode as string) === 'roundtable' && currentRoundtableData.rounds.length === 0} isLive={isStreaming && (chatMode as string) === 'roundtable'} />
+                                </div>
+                            </div>
+                        </div>
+                    </>
                 )}
 
-                {/* Sources Side Panel */}
+                {/* Sources Side Panel — floating card */}
                 {sourcePanelData && !showThinkingPanel && (
-                    <div className="w-[380px] shrink-0 border-l border-gray-100 flex flex-col bg-white overflow-hidden">
+                    <>
+                        <div
+                            className="md:hidden fixed inset-0 z-40 bg-black/40"
+                            onClick={() => setSourcePanelData(null)}
+                            aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 p-3 md:static md:z-auto md:w-[400px] md:shrink-0 md:p-3 md:pl-0">
+                            <div className="h-full flex flex-col bg-white rounded-2xl border border-gray-200/80 shadow-[0_8px_30px_rgba(0,0,0,0.08)] overflow-hidden">
                         {/* Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
                             <div className="flex items-center gap-2">
@@ -5638,9 +6103,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                             </div>
                             <button
                                 onClick={() => setSourcePanelData(null)}
-                                className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-all"
+                                aria-label="Close"
+                                className="w-9 h-9 md:w-7 md:h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-all"
                             >
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
                         </div>
                         {/* Source list */}
@@ -5679,55 +6145,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({
                                 </a>
                             ))}
                         </div>
-                    </div>
+                            </div>
+                        </div>
+                    </>
                 )}
             </div>
-
-            {imagePreview && imagePreview.images.length > 0 && (
-                <div
-                    className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
-                    onClick={closeImagePreview}
-                >
-                    <div className="relative max-w-[92vw] max-h-[92vh]" onClick={e => e.stopPropagation()}>
-                        <img
-                            src={imagePreview.images[imagePreview.index]?.url}
-                            alt={imagePreview.images[imagePreview.index]?.name || 'preview'}
-                            className="max-w-[92vw] max-h-[92vh] object-contain rounded-xl shadow-2xl"
-                        />
-                        <button
-                            type="button"
-                            onClick={closeImagePreview}
-                            className="absolute -top-3 -right-3 w-9 h-9 rounded-full bg-white text-gray-700 flex items-center justify-center shadow-lg hover:bg-gray-100"
-                            title="关闭"
-                        >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                        {imagePreview.images.length > 1 && (
-                            <>
-                                <button
-                                    type="button"
-                                    onClick={() => moveImagePreview(-1)}
-                                    className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
-                                    title="上一张"
-                                >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => moveImagePreview(1)}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 text-gray-700 flex items-center justify-center shadow-lg hover:bg-white"
-                                    title="下一张"
-                                >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
-                                </button>
-                                <div className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[12px] text-white/90">
-                                    {imagePreview.index + 1} / {imagePreview.images.length}
-                                </div>
-                            </>
-                        )}
-                    </div>
-                </div>
-            )}
         </div>
     );
 };

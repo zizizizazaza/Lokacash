@@ -275,6 +275,79 @@ export function mapStockReportToSkill(ticker: string, report: string): SkillStoc
   };
 }
 
+// ── AI Hedge Fund result → Lokacash multi-analyst portfolio decision ──
+export type SkillPortfolioAnalysis = {
+  tickers: string[];
+  period: { start: string; end: string };
+  model: string;
+  analysts: string[];
+  decisions: Record<string, {
+    action: string;             // BUY | SELL | SHORT | HOLD | COVER
+    quantity: number;
+    confidence: number;         // 0..100
+    reasoning: string;
+  }>;
+  analystSignals: Record<string, Record<string, {
+    signal: string;             // BULLISH | BEARISH | NEUTRAL
+    confidence: number;
+    reasoning: string;
+  }>>;
+  report: string;               // Full markdown report (formatted via formatReport)
+  asOf: number;
+};
+
+export function mapHedgeFundToSkill(
+  raw: unknown,
+  formattedReport: string,
+): SkillPortfolioAnalysis | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as {
+    tickers?: string[];
+    start_date?: string;
+    end_date?: string;
+    model?: string;
+    analysts?: string[];
+    decisions?: Record<string, { action?: string; quantity?: number; confidence?: number; reasoning?: string }>;
+    analyst_signals?: Record<string, Record<string, { signal?: string; confidence?: number; reasoning?: string }>>;
+  };
+
+  const decisions: SkillPortfolioAnalysis['decisions'] = {};
+  for (const [t, d] of Object.entries(r.decisions || {})) {
+    decisions[t.toUpperCase()] = {
+      action: (d.action || 'HOLD').toUpperCase(),
+      quantity: typeof d.quantity === 'number' ? d.quantity : 0,
+      confidence: typeof d.confidence === 'number' ? d.confidence : 0,
+      reasoning: d.reasoning || '',
+    };
+  }
+
+  const analystSignals: SkillPortfolioAnalysis['analystSignals'] = {};
+  for (const [analyst, perTicker] of Object.entries(r.analyst_signals || {})) {
+    analystSignals[analyst] = {};
+    for (const [t, sig] of Object.entries(perTicker)) {
+      analystSignals[analyst][t.toUpperCase()] = {
+        signal: (sig.signal || 'NEUTRAL').toUpperCase(),
+        confidence: typeof sig.confidence === 'number' ? sig.confidence : 0,
+        reasoning: sig.reasoning || '',
+      };
+    }
+  }
+
+  return {
+    tickers: (r.tickers || []).map((t) => t.toUpperCase()),
+    period: {
+      start: r.start_date || '',
+      end: r.end_date || '',
+    },
+    model: r.model || '',
+    analysts: r.analysts || [],
+    decisions,
+    analystSignals,
+    report: formattedReport || '',
+    asOf: Date.now(),
+  };
+}
+
 // ── Consensus engine result → Lokacash multi-agent verdict ──
 export type SkillConsensus = {
   question: string;

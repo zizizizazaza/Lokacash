@@ -10,6 +10,7 @@ import Portfolio from './components/Portfolio';
 import RealChatsPage from './components/ChatsPage';
 import RealContactsPage from './components/ContactsPage';
 import DiscoverPage from './components/DiscoverPage';
+import Settings from './components/Settings';
 import ApiLanding from './components/ApiLanding';
 import AuthModal from './components/AuthModal';
 import TxModal from './components/TxModal';
@@ -17,6 +18,7 @@ import OAuthCallbackHandler from './components/OAuthCallbackHandler';
 import { PAGE_PATHS } from './constants';
 import { api } from './services/api';
 import { socket } from './services/socket';
+import { getOrCreateGuestId } from './services/guestId';
 
 // ── Re-exports for backward compatibility ──
 // Other components import these from '../App'
@@ -61,6 +63,19 @@ const App: React.FC = () => {
   });
   const isLoggedIn = ready && authenticated;
 
+  // ── Cached profile — read synchronously to avoid FOAS ──
+  const [cachedProfile] = useState<{ name: string; initial: string; avatar: string | null } | null>(() => {
+    try { return JSON.parse(localStorage.getItem('loka_cached_profile') || 'null'); }
+    catch { return null; }
+  });
+
+  // ── Guest identity: always set first so socket can fall back to guest mode on logout ──
+  useEffect(() => {
+    const guestId = getOrCreateGuestId();
+    api.setGuestId(guestId);
+    socket.setGuestId(guestId);
+  }, []);
+
   // ── Socket + API token (do not rely on the entire `user` object, otherwise it will repeatedly reconnect → WS flash)──
   useEffect(() => {
     if (ready && authenticated) {
@@ -101,6 +116,8 @@ const App: React.FC = () => {
     } else if (ready && !authenticated) {
       api.clearToken();
       socket.clearToken();
+      // Reset plan cache so sidebar/settings immediately show guest state
+      window.dispatchEvent(new CustomEvent('plan-changed'));
     }
   }, [ready, authenticated, getAccessToken]);
 
@@ -131,6 +148,22 @@ const App: React.FC = () => {
     return () => window.removeEventListener('loka-profile-updated', handler);
   }, []);
 
+  // ── Persist profile to localStorage so next page load shows it immediately ──
+  useEffect(() => {
+    if (isLoggedIn && profileData?.name) {
+      localStorage.setItem('loka_cached_profile', JSON.stringify({
+        name: profileData.name,
+        initial: profileData.name.charAt(0).toUpperCase(),
+        avatar: profileData.avatar || null,
+      }));
+    }
+  }, [isLoggedIn, profileData]);
+
+  // Clear cache when Privy confirms there is no authenticated session
+  useEffect(() => {
+    if (ready && !authenticated) localStorage.removeItem('loka_cached_profile');
+  }, [ready, authenticated]);
+
   // Listen for global auth modal triggers
   useEffect(() => {
     const handler = () => setShowAuthModal(true);
@@ -141,6 +174,13 @@ const App: React.FC = () => {
   const userName = profileData?.name || user?.google?.name || user?.twitter?.username || user?.email?.address?.split('@')[0] || 'User';
   const userInitial = userName.charAt(0).toUpperCase();
   const userAvatar = profileData?.avatar || null;
+
+  // Optimistic display values: while Privy is still loading, show cached profile
+  const privyLoading = !ready;
+  const optimistic = privyLoading && !isLoggedIn ? cachedProfile : null;
+  const displayName = isLoggedIn ? userName : (optimistic?.name ?? '');
+  const displayInitial = isLoggedIn ? userInitial : (optimistic?.initial ?? 'U');
+  const displayAvatar: string | null = isLoggedIn ? userAvatar : (optimistic?.avatar ?? null);
 
   const toggleDark = () => {
     setIsDark(prev => {
@@ -167,6 +207,21 @@ const App: React.FC = () => {
   const appBg = isDark ? 'bg-[#0e0e0e]' : 'bg-gray-50/30';
   const mainBg = isDark ? 'bg-[#141414]' : 'bg-white md:bg-transparent';
 
+  // Standalone pages (no sidebar / main chrome). Render their own layout.
+  if (location.pathname.startsWith('/developers')) {
+    return (
+      <div className="h-screen w-screen flex flex-col overflow-hidden bg-white">
+        <AnimStyles />
+        <div className="flex-1 overflow-hidden">
+          <Routes>
+            <Route path="/developers" element={<ApiLanding />} />
+            <Route path="/developers/*" element={<ApiLanding />} />
+          </Routes>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`h-screen w-screen flex overflow-hidden ${appBg} selection:bg-gray-900 selection:text-white transition-colors duration-300`}>
 
@@ -176,8 +231,8 @@ const App: React.FC = () => {
       <TxModal />
 
       <Sidebar expanded={expanded} onToggle={() => setExpanded(!expanded)} page={page} go={(p: Page) => { go(p); setMobileDrawerOpen(false); }} isDark={isDark} onToggleDark={toggleDark}
-        isLoggedIn={isLoggedIn} onLogin={() => { setShowAuthModal(true); setMobileDrawerOpen(false); }} onLogout={logout}
-        userName={userName} userInitial={userInitial} userAvatar={userAvatar}
+        isLoggedIn={isLoggedIn} privyReady={ready} onLogin={() => { setShowAuthModal(true); setMobileDrawerOpen(false); }} onLogout={logout}
+        userName={displayName} userInitial={displayInitial} userAvatar={displayAvatar}
         mobileDrawerOpen={mobileDrawerOpen} onCloseMobileDrawer={() => setMobileDrawerOpen(false)} />
 
       <main className={`flex-1 flex flex-col overflow-hidden h-full pt-0 md:pt-0 pb-[env(safe-area-inset-bottom,0px)] md:pb-0 ${mainBg}`}>
@@ -190,21 +245,27 @@ const App: React.FC = () => {
           <div className="flex-1" />
           {isLoggedIn ? (
             <div onClick={() => { go(Page.PORTFOLIO); }} className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-[10px] font-bold text-white cursor-pointer overflow-hidden hover:ring-2 hover:ring-emerald-300 transition-all">
-              {userAvatar ? <img src={userAvatar} alt="" className="w-full h-full object-cover" /> : userInitial}
+              {displayAvatar ? <img src={displayAvatar} alt="" className="w-full h-full object-cover" /> : displayInitial}
             </div>
-          ) : (
+          ) : optimistic ? (
+            <div className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-[10px] font-bold text-white overflow-hidden opacity-70">
+              {displayAvatar ? <img src={displayAvatar} alt="" className="w-full h-full object-cover" /> : displayInitial}
+            </div>
+          ) : ready ? (
             <button onClick={() => setShowAuthModal(true)} className="text-[12px] font-bold text-gray-500 hover:text-gray-900 transition-colors">Sign in</button>
+          ) : (
+            <div className="w-8 h-8 bg-gray-100 rounded-full animate-pulse" />
           )}
         </div>
         <div className={`flex-1 overflow-y-auto flex flex-col md:m-0 ${location.pathname.startsWith('/market/startup/') ? 'bg-gray-50 md:bg-gray-100/80' : ''}`}>
           <Routes>
-            <Route path="/" element={<SuperAgentHome isLoggedIn={isLoggedIn} onRequireLogin={() => setShowAuthModal(true)} />} />
+            <Route path="/" element={<SuperAgentHome />} />
             <Route path="/chat" element={<RealChatsPage />} />
             <Route path="/contacts" element={<RealContactsPage />} />
             <Route path="/market/*" element={<Market />} />
             <Route path="/discover" element={<DiscoverPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/api" element={<ApiLanding />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/developers" element={<ApiLanding />} />
             <Route path="/signal-radar" element={<SignalRadarToSuperAgentRedirect />} />
             <Route path="/portfolio" element={<Portfolio isWalletConnected={isLoggedIn} onConnect={() => setShowAuthModal(true)} onLogout={logout} defaultTab="personal" />} />
             <Route path="/enterprise" element={<Portfolio isWalletConnected={isLoggedIn} onConnect={() => setShowAuthModal(true)} onLogout={logout} defaultTab="enterprise" />} />

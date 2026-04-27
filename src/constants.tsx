@@ -118,7 +118,7 @@ import { Page } from './types';
 
 
 export const FEATURED_GROUPS = [
-  { id: 'g1', name: 'Polymarket Predictions', desc: 'Crowd-sourced market predictions 鈥?weather, elections, earnings surprises, and more.', memberCount: 3, agentCount: 2, online: 2, avatar: 'PP', color: 'bg-blue-100 text-blue-600', avatars: ['AC', 'SK', 'CW', 'LA', 'RA'] },
+  { id: 'g1', name: 'Polymarket Predictions', desc: 'Crowd-sourced market predictions — weather, elections, earnings surprises, and more.', memberCount: 3, agentCount: 2, online: 2, avatar: 'PP', color: 'bg-blue-100 text-blue-600', avatars: ['AC', 'SK', 'CW', 'LA', 'RA'] },
   { id: 'g2', name: 'Daily Market Pulse', desc: 'Hot topics, trending tickers, and breaking macro news powered by multi-agent research.', memberCount: 3, agentCount: 1, online: 2, avatar: 'DM', color: 'bg-emerald-100 text-emerald-600', avatars: ['MR', 'EZ', 'RB', 'LA'] },
   { id: 'g3', name: 'Alpha Research Circle', desc: 'Deep-dive signals: cross-asset momentum, earnings revisions, and sentiment shifts.', memberCount: 2, agentCount: 2, online: 1, avatar: 'AR', color: 'bg-violet-100 text-violet-600', avatars: ['DP', 'AT', 'LA', 'MR'] },
   { id: 'g4', name: 'Global Macro Signals', desc: 'Fed watch, inflation expectations, bond yields, and central bank policy tracking.', memberCount: 4, agentCount: 1, online: 3, avatar: 'GM', color: 'bg-amber-100 text-amber-600', avatars: ['JL', 'NP', 'TW', 'LW', 'MB'] },
@@ -137,13 +137,26 @@ export const QUICK_ACTIONS = [
   { id: 'portfolio', icon: ActionIcons.Portfolio, label: 'Review Portfolio' },
 ];
 
-export const USE_CASES = [
-  { id: 'invest', title: 'Is NVIDIA Still a Buy After Q4?', desc: 'Multi-agent consensus on earnings, valuation, and market timing', prompt: 'Help me analyze NVIDIA\'s recent stock performance and whether it\'s worth investing now', tags: ['Stock', 'Earnings'] },
-  { id: 'research', title: 'SE Asia Food Delivery Landscape', desc: 'Market sizing, key players, and growth trends across the region', prompt: 'Research the competitive landscape of the Southeast Asian food delivery market', tags: ['Industry', 'Market Size'] },
-  { id: 'compete', title: 'AI Agent Demand in the Last 30 Days', desc: 'Track how market demand shifted across categories recently', prompt: 'Search and analyze how AI Agent demand has changed in the last 30 days across different categories', tags: ['Trends', '30-Day'] },
-  { id: 'evaluate', title: 'Startup Due Diligence Report', desc: 'Team background check, business model, and tech feasibility', prompt: 'Evaluate this startup — analyze team background, business model, and technical feasibility', tags: ['Team', 'Feasibility'] },
-  { id: 'collab', title: 'Q2 Roadmap → Task Breakdown', desc: 'Turn a product roadmap into assigned tasks with deadlines', prompt: 'Help me break down the Q2 product roadmap into actionable tasks with owners and deadlines', tags: ['Tasks', 'Planning'] },
-  { id: 'predict', title: 'Polymarket Opportunities Now', desc: 'Which prediction markets have the best risk-reward right now?', prompt: 'Which prediction markets on Polymarket are worth paying attention to right now?', tags: ['Odds', 'Sentiment'] },
+export type UseCaseDomain = 'stocks' | 'web3';
+
+export const USE_CASES: Array<{
+  id: string;
+  title: string;
+  desc: string;
+  prompt: string;
+  tags: string[];
+  domain: UseCaseDomain;
+}> = [
+  // ── Stocks ──
+  { id: 'invest',   domain: 'stocks', title: 'Is NVIDIA Still a Buy After Q4?',       desc: 'Multi-agent consensus on earnings, valuation, and market timing',       prompt: "Help me analyze NVIDIA's recent stock performance and whether it's worth investing now",          tags: ['Stock', 'Earnings'] },
+  { id: 'ai-moat',  domain: 'stocks', title: 'AI Infrastructure Moat',                desc: 'Which AI infra companies have real defensibility vs hype',              prompt: 'Which AI infrastructure companies have the best moat right now?',                                  tags: ['AI', 'Moat'] },
+  { id: 'research', domain: 'stocks', title: 'SE Asia Food Delivery Landscape',       desc: 'Market sizing, key players, and growth trends across the region',       prompt: 'Research the competitive landscape of the Southeast Asian food delivery market',                   tags: ['Industry', 'Market Size'] },
+  { id: 'evaluate', domain: 'stocks', title: 'Startup Due Diligence Report',          desc: 'Team background check, business model, and tech feasibility',           prompt: 'Evaluate this startup — analyze team background, business model, and technical feasibility',       tags: ['Team', 'Feasibility'] },
+  // ── Web3 ──
+  { id: 'l2-traction', domain: 'web3', title: 'Which L2s Have Real Traction?',        desc: 'Usage data, TVL growth, and real-user signals across L2s this quarter', prompt: 'Which L2s are gaining real user traction this quarter? Look at on-chain activity and TVL trends.', tags: ['L2', 'On-Chain'] },
+  { id: 'compete',   domain: 'web3', title: 'AI Agent Demand · 30-Day Trend',         desc: 'Track how AI-agent narrative demand shifted on-chain recently',          prompt: 'Search and analyze how AI Agent demand has changed in the last 30 days across different categories', tags: ['Narrative', '30-Day'] },
+  { id: 'predict',   domain: 'web3', title: 'Polymarket Opportunities Now',           desc: 'Which prediction markets have the best risk-reward right now?',         prompt: 'Which prediction markets on Polymarket are worth paying attention to right now?',                  tags: ['Odds', 'Sentiment'] },
+  { id: 'l1-compare',domain: 'web3', title: 'Sui vs Aptos · Tokenomics Deep Dive',    desc: 'Compare supply schedules, staking yields, and validator economics',     prompt: 'Evaluate Sui vs Aptos — which L1 has better tokenomics and long-term defensibility?',              tags: ['L1', 'Tokenomics'] },
 ];
 
 export const FEATURED_AGENTS = [
@@ -268,7 +281,7 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
         id: 'intel', label: 'Recon',
         prompts: [
           'Scan the last 30 days: what is the community saying about AI coding tools?',
-          'Gather intelligence on OpenAI\'s latest moves 鈥?Reddit, X, HN combined',
+          'Gather intelligence on OpenAI\'s latest moves — Reddit, X, HN combined',
           'What do investors really think about NVIDIA after Q4? Cross-platform scan',
         ],
       },
@@ -291,9 +304,46 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
       {
         id: 'competitor', label: 'Competitor Watch',
         prompts: [
-          'Claude Code vs Cursor vs Windsurf 鈥?community sentiment comparison last 30 days',
+          'Claude Code vs Cursor vs Windsurf — community sentiment comparison last 30 days',
           'What are users complaining about with Perplexity AI recently?',
           'Monitor: how is the community reacting to Manus\'s latest update?',
+        ],
+      },
+      // ── Web3-only scenarios (hidden in Stocks) ──
+      {
+        id: 'w3-intel', label: 'On-chain Recon',
+        prompts: [
+          'Scan the last 30 days: what is the crypto community saying about Solana?',
+          'Cross-platform intel on Base L2 — Farcaster, X, and Reddit combined.',
+          'What are whales quietly accumulating this week? On-chain + social scan.',
+          'Gather signals on restaking narratives — EigenLayer, Ether.fi, Renzo.',
+        ],
+      },
+      {
+        id: 'w3-narratives', label: 'Narratives',
+        prompts: [
+          'Which Web3 narratives are going viral right now — DePIN, AI agents, RWA?',
+          'Is the meme coin cycle heating up again? Cross-chain sentiment check.',
+          'What are crypto researchers saying about modular vs monolithic L1s?',
+          'Track the "ETF inflows" narrative — news, on-chain, and sentiment.',
+        ],
+      },
+      {
+        id: 'w3-tokens', label: 'Token Watch',
+        prompts: [
+          'Sentiment and on-chain monitoring for SOL, SUI, and APT this week.',
+          'Top 5 most discussed altcoins across X and Farcaster last 7 days.',
+          'Which tokens had a sudden wallet-growth spike in the last 30 days?',
+          'Social buzz vs price action — is BTC sentiment confirming the rally?',
+        ],
+      },
+      {
+        id: 'w3-protocols', label: 'Protocol Pulse',
+        prompts: [
+          'Monitor TVL trends for Ethereum L2s — Base, Arbitrum, Optimism.',
+          'How is the community reacting to Uniswap v4 hooks?',
+          'Compare developer activity on Solana vs Ethereum vs Sui.',
+          'What are users complaining about with major CEXs this month?',
         ],
       },
     ],
@@ -358,6 +408,34 @@ export const AGENT_GUIDES: Record<string, AgentGuide> = {
           'Earnings calendar: who reported today and how did the market react?',
           'Geopolitical risk update — tariffs, sanctions, and trade tensions.',
           'Crypto market daily — Bitcoin, Ethereum, and key altcoin moves.',
+        ],
+      },
+      // ── Web3-only scenarios (hidden in Stocks) ──
+      {
+        id: 'w3-majors', label: 'Majors',
+        prompts: [
+          'Daily briefing on BTC and ETH — key price action, flows, and news.',
+          'What drove the crypto market today? Top 10 movers and catalysts.',
+          'ETF flows update: BTC and ETH spot ETF net inflows today.',
+          'Overnight in crypto: funding rates, open interest, and liquidations.',
+        ],
+      },
+      {
+        id: 'w3-ecosystems', label: 'Ecosystems',
+        prompts: [
+          'Solana ecosystem news today — top dApps, memes, and launches.',
+          'Ethereum L2 recap — Base, Arbitrum, Optimism, Blast movers.',
+          'Modular stack update: Celestia, EigenDA, and rollup news.',
+          'Bitcoin ecosystem: runes, ordinals, and BTCFi news today.',
+        ],
+      },
+      {
+        id: 'w3-onchain', label: 'On-chain & Signals',
+        prompts: [
+          'On-chain highlights: large transfers, whale wallets, and CEX flows.',
+          'Which tokens had the biggest holder growth in the last 24h?',
+          'Stablecoin supply changes today — USDT, USDC, DAI on each chain.',
+          'DEX volume leaders and unusual activity across major chains today.',
         ],
       },
     ],

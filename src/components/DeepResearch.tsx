@@ -433,7 +433,7 @@ export default function DeepResearch() {
 
                           {/* Final report */}
                           {!msg.isRunning && msg.content && !msg.isError && (
-                            <div className="text-[13px] text-gray-700 leading-relaxed space-y-1">
+                            <div className="markdown-content text-[16px] text-gray-700 leading-relaxed space-y-1">
                               {renderMarkdownContent(
                                 msg.role === 'agent' ? stripInternalResearchCitations(msg.content) : msg.content,
                               )}
