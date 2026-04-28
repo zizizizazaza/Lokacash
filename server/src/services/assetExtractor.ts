@@ -152,6 +152,10 @@ export async function extractAsset(userMessage: string): Promise<AssetInfo | nul
         max_tokens: MAX_TOKENS,
         temperature: 0.0,
         response_format: { type: 'json_object' },
+        // Doubao (Volcano Ark) Seed 2.0 enables 深度思考 by default; combined with
+        // structured output it hangs past the timeout. Disable explicitly. Other
+        // vendors (OpenAI / DeepSeek) silently ignore this field.
+        thinking: { type: 'disabled' },
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

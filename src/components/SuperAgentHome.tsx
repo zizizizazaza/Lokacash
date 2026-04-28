@@ -552,23 +552,29 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const [roundtableQuota, setRoundtableQuota] = useState<RoundtableQuota | null>(null);
   const [fastQuota, setFastQuota] = useState<FastQuota | null>(null);
   useEffect(() => {
-    // Guests see Fast/Roundtable as locked (ModeSelector isGuest prop),
-    // so the quota badges are irrelevant for them — skip the auth-gated call.
-    if (!api.isAuthenticated) {
+    // Wait for Privy to resolve before deciding. Without this, the cold-load
+    // path runs once with `api.isAuthenticated === false` (token not yet
+    // injected) and never retries — quota badges stay empty even after login.
+    if (!ready) return;
+    if (!authenticated) {
       setRoundtableQuota(null);
       setFastQuota(null);
       return;
     }
+    let cancelled = false;
     api.getQuota()
       .then(q => {
+        if (cancelled) return;
         setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
         if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
       })
       .catch(() => {
+        if (cancelled) return;
         setRoundtableQuota({ used: 1, limit: 3 });
         setFastQuota({ used: 4, limit: 20 });
       });
-  }, []);
+    return () => { cancelled = true; };
+  }, [ready, authenticated]);
 
   useEffect(() => {
     return () => {

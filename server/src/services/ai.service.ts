@@ -355,6 +355,8 @@ ${userText || '(empty)'}`;
         max_tokens: 300,
         temperature: 0.1,
         response_format: { type: 'json_object' },
+        // Disable Doubao 深度思考 — see comment in requestRouterPlan above.
+        thinking: { type: 'disabled' },
       }),
       signal: AbortSignal.timeout(20000),
     });
@@ -636,6 +638,12 @@ ${query}`;
       };
 
       const requestRouterPlan = async (prompt: string, label: 'primary' | 'retry') => {
+        // Doubao (Volcano Ark) Seed 2.0 family enables 深度思考 by default. When that
+        // combines with `response_format: json_object`, the model runs a long reasoning
+        // chain before emitting the JSON and blows past the request timeout (silent hang,
+        // not an error). Per Volcano docs, structured-output use cases must explicitly
+        // disable thinking. OpenAI / DeepSeek silently ignore unknown fields, so this
+        // is safe across upstream vendors.
         const response = await fetch(this.baseUrl, {
           method: 'POST',
           headers: {
@@ -647,7 +655,8 @@ ${query}`;
             messages: [{ role: 'user', content: prompt }],
             max_tokens: 256,
             temperature: 0,
-            response_format: { type: "json_object" }
+            response_format: { type: 'json_object' },
+            thinking: { type: 'disabled' },
           }),
           signal: AbortSignal.timeout(25000),
         });
