@@ -3545,6 +3545,22 @@ Reserve granular data for follow-up — don't over-deliver on first pass.
         } | null = null;
         /** Full consensus result for DB persistence — restored on session history load */
         let savedConsensusResult: any = null;
+        /**
+         * Flat per-agent-per-round debate log captured from aegean's live SSE
+         * stream. We persist this alongside `consensusResult` because aegean's
+         * synchronous response (`discussion_rounds`) compresses the debate
+         * down to "agents who actually changed position", losing rounds where
+         * everyone held their stance. The live log preserves every round and
+         * every agent verbatim, so on history restore we can rebuild the
+         * complete rtRounds the user saw mid-conversation (18 turns) instead
+         * of the compressed structured result (often 9 turns).
+         */
+        let savedLiveDebateLog: Array<{
+          round: number;
+          agentId: string;
+          answer: string;
+          confidence: number;
+        }> | null = null;
 
         if (data.mode === 'roundtable') {
           // Phase 1: Initial draft is already generated silently (not streamed)
@@ -3701,7 +3717,28 @@ ${synFullContent || contextString}${langFooter}`;
               },
             );
             savedConsensusResult = consensusResult;
-            
+
+            // Flatten the per-agent-per-round map into a chronological array
+            // for DB persistence. This is the source-of-truth for the Debate
+            // tab's full message list — sorted by round, then by agent id so
+            // history restore is deterministic.
+            const flattened: Array<{ round: number; agentId: string; answer: string; confidence: number }> = [];
+            for (const [agentId, list] of perAgentRounds.entries()) {
+              for (const r of list) {
+                flattened.push({
+                  round: r.round,
+                  agentId,
+                  answer: r.answer,
+                  confidence: r.confidence,
+                });
+              }
+            }
+            flattened.sort((a, b) => (a.round - b.round) || a.agentId.localeCompare(b.agentId));
+            savedLiveDebateLog = flattened;
+            console.log(
+              `[agent:chat:rt-debate-log] captured ${flattened.length} live turns across ${new Set(flattened.map(t => t.round)).size} rounds (vs aegean structured discussion_rounds = ${consensusResult.consensus?.discussionRounds?.length ?? 0})`,
+            );
+
             const finalAnswerText = consensusResult.consensus?.finalAnswer || '';
 
             // Collect individual expert perspectives with structured debate context
@@ -4162,6 +4199,16 @@ ${synFullContent || contextString}${langFooter}`;
                   ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
                 },
                 consensusResult: savedConsensusResult ?? undefined,
+                // Live SSE debate log — every per-agent-per-round event
+                // captured during the run. On history restore the frontend
+                // prefers this over the structured discussionRounds because
+                // aegean's structured output frequently drops rounds where
+                // no one shifted position. Optional — old chat messages
+                // saved before this field existed will fall back to the
+                // legacy reconstruction path.
+                ...(savedLiveDebateLog && savedLiveDebateLog.length > 0
+                  ? { liveDebateLog: savedLiveDebateLog }
+                  : {}),
                 // Persist the roster separately from consensusResult so the
                 // session history page can replay AgentRoom / Debate Tab
                 // without re-parsing consensusResult.agentResponses.

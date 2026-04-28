@@ -604,6 +604,168 @@ const AGENT_COLORS: Record<string, string> = {
 };
 
 /* ── Demo RT fields — canonical 7-agent roundtable for history restoration ── */
+/**
+ * Reconstruct the round-by-round debate from a saved chat message's metadata.
+ *
+ * Priority order — pick the first source that has real data:
+ *   1. `meta.liveDebateLog` (added 2026-04 by the live-event capture path) —
+ *      a flat array of every per-agent-per-round event the SSE stream emitted.
+ *      This is the truth: 18 turns across 3 rounds for a typical 6-agent run.
+ *   2. `meta.consensusResult.consensus.discussionRounds` — aegean's structured
+ *      summary, often compressed (drops rounds where no one shifted position).
+ *   3. `meta.consensusResult.consensus.agentResponses` — final-round only,
+ *      good for at least painting the conclusion when the structured rounds
+ *      are missing entirely.
+ *
+ * Returns `null` when no real data is available — caller can decide to fall
+ * back to the demo fixture (preserves the historical empty-state behaviour).
+ */
+function reconstructRtFromMetadata(meta: any): {
+    selectedAgentIds: string[];
+    rtRounds: RtRoundData[];
+    rtConsensus?: RtConsensusResult;
+} | null {
+    if (!meta || typeof meta !== 'object') return null;
+
+    const agentNameMap: Record<string, string> = {
+        agent_0: 'Fundamental Analyst',
+        agent_1: 'Macro Strategist',
+        agent_2: 'Sentiment Engine',
+        agent_3: 'Quant Tracker',
+    };
+    const nameOf = (id: string) => agentNameMap[id] || id;
+
+    let rtRounds: RtRoundData[] = [];
+    const allAgentIds = new Set<string>();
+
+    // Source 1 — live debate log (preferred)
+    const live = Array.isArray(meta.liveDebateLog) ? meta.liveDebateLog : null;
+    if (live && live.length > 0) {
+        const byRound = new Map<number, RtAgentInference[]>();
+        for (const e of live) {
+            const r = Number(e.round);
+            const aid = String(e.agentId || '');
+            if (!Number.isFinite(r) || !aid) continue;
+            allAgentIds.add(aid);
+            if (!byRound.has(r)) byRound.set(r, []);
+            byRound.get(r)!.push({
+                agentId: aid,
+                agentName: nameOf(aid),
+                status: 'done',
+                verdict: parsePersonaVerdict(e.answer || ''),
+                confidence: Math.round((Number(e.confidence) || 0) * 100),
+                reasoning: e.answer || '',
+            });
+        }
+        for (const round of [...byRound.keys()].sort((a, b) => a - b)) {
+            rtRounds.push({ round, status: 'done', agents: byRound.get(round)! });
+        }
+        // Detect changedMind across rounds (R1 → Rn verdict diff)
+        if (rtRounds.length > 1) {
+            const initialByAgent = new Map<string, string>();
+            for (const a of rtRounds[0].agents) initialByAgent.set(a.agentId, a.verdict || '');
+            for (let r = 1; r < rtRounds.length; r++) {
+                for (const a of rtRounds[r].agents) {
+                    const init = initialByAgent.get(a.agentId);
+                    if (init && a.verdict && init !== a.verdict) {
+                        a.changedMind = true;
+                        a.previousVerdict = init;
+                    }
+                }
+            }
+        }
+    }
+
+    // Source 2 — aegean discussionRounds (fallback)
+    if (rtRounds.length === 0) {
+        const consensus = meta.consensusResult?.consensus;
+        const discussionRounds: any[] = consensus?.discussionRounds || [];
+        if (discussionRounds.length > 0) {
+            discussionRounds.forEach((dr: any, rIdx: number) => {
+                const map: Record<string, any> = dr.agent_responses || {};
+                const agents: RtAgentInference[] = [];
+                for (const [aid, resp] of Object.entries(map)) {
+                    allAgentIds.add(aid);
+                    const r = resp as any;
+                    agents.push({
+                        agentId: aid,
+                        agentName: nameOf(aid),
+                        status: 'done',
+                        verdict: r?.verdict || parsePersonaVerdict(r?.answer || ''),
+                        confidence: Math.round((Number(r?.confidence) || 0) * 100),
+                        reasoning: r?.answer || r?.reasoning || '',
+                    });
+                }
+                rtRounds.push({ round: rIdx + 1, status: 'done', agents });
+            });
+        }
+    }
+
+    // Source 3 — agentResponses (last-resort single round)
+    if (rtRounds.length === 0) {
+        const consensus = meta.consensusResult?.consensus;
+        const responses: any[] = consensus?.agentResponses || [];
+        if (responses.length > 0) {
+            const agents: RtAgentInference[] = responses.map((r: any) => {
+                allAgentIds.add(r.agentId);
+                return {
+                    agentId: r.agentId,
+                    agentName: nameOf(r.agentId),
+                    status: 'done',
+                    verdict: r.verdict || parsePersonaVerdict(r.answer || ''),
+                    confidence: Math.round((Number(r.confidence) || 0) * 100),
+                    reasoning: r.answer || r.reasoning || '',
+                };
+            });
+            rtRounds.push({ round: 1, status: 'done', agents });
+        }
+    }
+
+    if (rtRounds.length === 0) return null;
+
+    // Build rtConsensus from the same source. We mirror the live-emit logic:
+    // prefer aegean's confidence, fall back to mean of per-agent confidences.
+    const consensus = meta.consensusResult?.consensus;
+    const rawConf = Number(consensus?.confidence ?? 0);
+    let finalConfPct = Math.round(rawConf > 1 ? rawConf : rawConf * 100);
+    const lastRoundAgents = rtRounds[rtRounds.length - 1].agents;
+    if (finalConfPct <= 0 && lastRoundAgents.length > 0) {
+        const sum = lastRoundAgents.reduce((s, a) => s + (a.confidence || 0), 0);
+        finalConfPct = Math.round(sum / lastRoundAgents.length);
+    }
+    if (finalConfPct <= 0) finalConfPct = 50;
+
+    // Majority verdict across last-round agents
+    const tally: Record<string, number> = { Bullish: 0, Bearish: 0, Neutral: 0 };
+    const conclusions: { agentName: string; verdict: string; confidence: number }[] = [];
+    for (const a of lastRoundAgents) {
+        const v = (a.verdict || 'Neutral').toString();
+        const norm = /bull|long|看多/i.test(v) ? 'Bullish' : /bear|short|看空/i.test(v) ? 'Bearish' : 'Neutral';
+        tally[norm] = (tally[norm] || 0) + 1;
+        conclusions.push({ agentName: a.agentName || a.agentId, verdict: norm, confidence: a.confidence || 0 });
+    }
+    const finalVerdict = (Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] as string) || 'Neutral';
+    const majorityCount = tally[finalVerdict] || 0;
+    const conflictRate = lastRoundAgents.length > 0
+        ? Math.round(((lastRoundAgents.length - majorityCount) / lastRoundAgents.length) * 100)
+        : 0;
+
+    const rtConsensus: RtConsensusResult = {
+        status: 'done',
+        hasConsensus: consensus?.consensusReached !== false,
+        conflictRate,
+        agentConclusions: conclusions,
+        finalVerdict,
+        finalConfidence: finalConfPct,
+    };
+
+    return {
+        selectedAgentIds: Array.from(allAgentIds),
+        rtRounds,
+        rtConsensus,
+    };
+}
+
 function buildDemoRtFields() {
     const sys = SUMMON_POOL.filter(a => a.group === 'system');
     const extra = SUMMON_POOL.filter(a => ['buffett_style', 'dalio_style', 'sentiment_focus'].includes(a.id));
@@ -3961,9 +4123,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const resp: Array<{ agentId: string; answer: string; confidence: number }> =
                 result?.consensus?.agentResponses || [];
             const finalAnswer: string = result?.consensus?.finalAnswer || '';
-            const finalConfidencePct = Math.round(
-                ((result?.consensus?.confidence as number) || 0) * 100,
-            );
             const reached = result?.consensus?.consensusReached !== false;
 
             // Derive each persona's conclusion verdict/confidence from its raw answer.
@@ -3972,6 +4131,23 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 verdict: parsePersonaVerdict(r.answer),
                 confidence: Math.round((r.confidence || 0) * 100),
             }));
+
+            // ── Final confidence (live-emit path) ────────────────────────
+            // aegean's `consensus.confidence` is sometimes 0 the moment the
+            // committee finishes — the structured consensus metric hasn't
+            // been finalized yet. The DB-restore path falls back to 0.5
+            // (50%), which is why switching tabs makes the value "appear
+            // correct" even though both are guesses. Prefer a real value:
+            //   1. Use aegean's confidence if it's a sensible non-zero pct.
+            //   2. Otherwise mean of per-agent confidences (match what the
+            //      canonical expert table on the backend uses).
+            //   3. Last-resort 50%.
+            let finalConfidencePct = Math.round(((result?.consensus?.confidence as number) || 0) * 100);
+            if (finalConfidencePct <= 0 && conclusions.length > 0) {
+                const sum = conclusions.reduce((s, c) => s + (c.confidence || 0), 0);
+                finalConfidencePct = Math.round(sum / conclusions.length);
+            }
+            if (finalConfidencePct <= 0) finalConfidencePct = 50;
 
             // Majority signal across personas → surface as finalVerdict.
             const tally: Record<string, number> = { Bullish: 0, Bearish: 0, Neutral: 0 };
@@ -4542,13 +4718,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
                                     if (isRt) {
-                                        // Demo mode: always override with canonical 7-agent demo data
-                                        restoredThinking[idx] = {
-                                            ...meta.thinkingFlow,
-                                            isActive: false,
-                                            routedMode: 'roundtable',
-                                            ...buildDemoRtFields(),
-                                        };
+                                        // Try to reconstruct REAL debate from metadata first.
+                                        // Priority: liveDebateLog (full SSE capture) →
+                                        // consensusResult.discussionRounds → agentResponses.
+                                        // Only if all three are empty do we fall back to the
+                                        // demo fixture — and even then we keep its shape only
+                                        // as an empty-state placeholder.
+                                        const real = reconstructRtFromMetadata(meta);
+                                        if (real) {
+                                            restoredThinking[idx] = {
+                                                ...meta.thinkingFlow,
+                                                isActive: false,
+                                                routedMode: 'roundtable',
+                                                selectedAgentIds: real.selectedAgentIds,
+                                                rtPreparationStatus: 'done',
+                                                rtRounds: real.rtRounds,
+                                                rtConsensus: real.rtConsensus,
+                                                rtReportStatus: 'done',
+                                            };
+                                        } else {
+                                            // No real data — show the canonical 7-agent demo
+                                            // shape so the Roundtable UI doesn't crash empty.
+                                            restoredThinking[idx] = {
+                                                ...meta.thinkingFlow,
+                                                isActive: false,
+                                                routedMode: 'roundtable',
+                                                ...buildDemoRtFields(),
+                                            };
+                                        }
                                         hasRoundtableHistory = true;
                                     } else {
                                         restoredThinking[idx] = {
