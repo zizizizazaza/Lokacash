@@ -3792,11 +3792,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 // Guard: if this message is no longer streaming (previous run already finished
                 // or a new run already took over), ignore stale stream_done
                 if (!updated[msgIdx].isStreaming) return prev;
+                // Prefer server content as the source of truth on stream_done.
+                // The server may post-process the streamed text (e.g. substitute
+                // canonical tables that the LLM wasn't trusted to author —
+                // see EXPERT_TABLE_PLACEHOLDER on the backend). Falling back to
+                // streamed content keeps reconnect / partial-stream cases working.
+                const streamed = updated[msgIdx].content || '';
+                const server = data.content || '';
+                const finalContent = server || streamed;
                 updated[msgIdx] = {
                     ...updated[msgIdx],
-                    // Only use server content if we have nothing accumulated (e.g. reconnect)
-                    content: updated[msgIdx].content || data.content || '',
-                    isStreaming: false, 
+                    content: finalContent,
+                    isStreaming: false,
                     timestamp: new Date().toLocaleTimeString(),
                     sources: data.sources,
                 };

@@ -87,6 +87,8 @@ skills-lock.json
 
 # Private docs
 docs/NEED_FROM_YOU.md
+# Local test/run logs (re-generated each session, not for review)
+docs/log.md
 
 LamportID.pem
 **/.venv/

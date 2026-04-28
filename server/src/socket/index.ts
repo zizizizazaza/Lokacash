@@ -2948,12 +2948,25 @@ For each guru in the simulation data, create a detailed subsection. If the user 
       // finalDbContent still runs after synthesis completes.
       if (htmlReportEnabled && contextString.length > 200) {
         const mode = isDeepResearch ? 'roundtable' : 'standard';
-        console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
-        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
-        parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
-          console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
-          return '';
-        });
+        // ── Roundtable mode: skip parallel HTML ──
+        // Parallel HTML would launch BEFORE consensus runs, so its input
+        // (contextString) never contains the agent debate journey. The
+        // resulting HTML silently drops the Expert Debate Panel — section 7
+        // of the prompt is "MANDATORY when expert debate data is in the
+        // input", and that data only exists after consensus completes.
+        // For roundtable we wait for finalDbContent (which has the debate
+        // already woven in) and run HTML sequentially. Costs ~30s wall but
+        // doubles the HTML report's information density.
+        if (mode === 'roundtable') {
+          console.log('[agent:chat:html] Roundtable mode → skipping PARALLEL HTML, sequential pass will use finalDbContent (with debate journey)');
+        } else {
+          console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
+          emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
+          parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
+            console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
+            return '';
+          });
+        }
       }
 
       const buildLocalSynthesisFallback = (cause: string): string => {
@@ -3259,6 +3272,11 @@ ${synFullContent || contextString}${langFooter}`;
             // Track which (round, agentId) pairs we've already emitted so
             // duplicate refinement events don't fan out twice.
             const seenAgentRound = new Set<string>();
+            // Accumulate per-agent per-round answers so we can later surface
+            // each expert's STRONGEST stance across rounds, not just their
+            // post-convergence (often all-Neutral) final round. Aegean's
+            // consensusResult.agentResponses only carries the final round.
+            const perAgentRounds = new Map<string, Array<{ round: number; answer: string; confidence: number }>>();
             const consensusResult = await runConsensusEngine(
               userId,
               'roundtable',
@@ -3289,6 +3307,15 @@ ${synFullContent || contextString}${langFooter}`;
                     if (seenAgentRound.has(key)) return;
                     seenAgentRound.add(key);
                     const answer = evt.answer || '';
+                    // Track this round's answer for the post-debate
+                    // "strongest stance" picker.
+                    const list = perAgentRounds.get(evt.agent_id) || [];
+                    list.push({
+                      round: evt.round_number,
+                      answer,
+                      confidence: evt.confidence ?? 0,
+                    });
+                    perAgentRounds.set(evt.agent_id, list);
                     socket.emit('agent:chat:agent_responded', {
                       sessionId,
                       analystId: evt.agent_id,
@@ -3346,15 +3373,184 @@ ${synFullContent || contextString}${langFooter}`;
             // identical" bug. The streaming SSE fires one event per real
             // LLM completion, so the Debate Tab updates as agents finish.)
 
+            // Canonical expert verdict table — built deterministically from
+            // agentResponses, then injected into the deep-research prompt as a
+            // pre-rendered markdown block. The synthesis LLM is told to emit a
+            // placeholder marker; we substitute the real table after streaming
+            // ends. This guarantees the rendered "专家立场汇总" table always
+            // reflects the actual VERDICT / CONFIDENCE per agent — the LLM
+            // physically cannot drift them to "Neutral 65%" anymore because
+            // it never gets to write that table.
+            const EXPERT_TABLE_PLACEHOLDER = '<!--AEGEAN_EXPERT_VERDICT_TABLE-->';
+            let canonicalExpertTable = '';
             if (agentResponses.length > 0) {
-              // Parse the explicit SIGNAL line each persona emits in their
-              // answer schema. Without this, the synthesis LLM has to infer
-              // the verdict from prose and hedges everyone to "Neutral 65%".
+              // Robust verdict parser. Aegean personas don't all emit the same
+              // schema — some use "SIGNAL: bullish", some "VERDICT: …", others
+              // a markdown header "**Verdict:** …", a few rely on prose alone.
+              // The earlier single-regex implementation defaulted to Neutral
+              // whenever SIGNAL: was missing, silently dropping real Bearish /
+              // Bullish stances into the Neutral bucket and producing the
+              // "everyone is Neutral 80%" symptom in the Expert Summary table.
               const parseSignal = (answer: string): 'Bullish' | 'Bearish' | 'Neutral' => {
-                const m = (answer || '').match(/SIGNAL:\s*(bullish|bearish|neutral)/i);
-                const raw = m ? m[1].toLowerCase() : 'neutral';
-                return raw === 'bullish' ? 'Bullish' : raw === 'bearish' ? 'Bearish' : 'Neutral';
+                const text = answer || '';
+                const tagPatterns = [
+                  /SIGNAL\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /VERDICT\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /POSITION\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /STANCE\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /\*\*Verdict\*\*\s*[:：]?\s*(bullish|bearish|neutral)/i,
+                  /\*\*Signal\*\*\s*[:：]?\s*(bullish|bearish|neutral)/i,
+                  /\*\*Position\*\*\s*[:：]?\s*(bullish|bearish|neutral)/i,
+                  /^\s*(?:Verdict|Signal|Position|Stance)\b[^\n]*?\b(bullish|bearish|neutral)\b/im,
+                ];
+                for (const pat of tagPatterns) {
+                  const m = text.match(pat);
+                  if (m) {
+                    const raw = m[1].toLowerCase();
+                    return raw === 'bullish' ? 'Bullish' : raw === 'bearish' ? 'Bearish' : 'Neutral';
+                  }
+                }
+                // Fallback: keyword frequency. Asymmetric thresholds — only
+                // commit to Bullish/Bearish when one side is clearly dominant
+                // (>= 2 net mentions). Otherwise prose tone is mixed → Neutral.
+                const lower = text.toLowerCase();
+                const bullCount = (lower.match(/\b(bullish|long(?!\s*\/?\s*short)|squeeze|upside|breakout|accumulat|rally|reversal\s+up|short\s+covering|buy\b)\b/g) || []).length;
+                const bearCount = (lower.match(/\b(bearish|short(?!\s*\/?\s*long)|downside|breakdown|distribut|sell-?off|sell\b|crash|tail\s+risk|drawdown|liquidat)\b/g) || []).length;
+                if (bullCount >= bearCount + 2) return 'Bullish';
+                if (bearCount >= bullCount + 2) return 'Bearish';
+                return 'Neutral';
               };
+
+              // Confidence parser. PROSE TAKES PRIORITY over structured
+              // because aegean's `resp.confidence` is a post-consensus
+              // agreement metric (often a uniform 0.8 once agents converge),
+              // NOT each agent's self-reported certainty. The agent itself
+              // emits the real number in "CONFIDENCE: 0.65" inside its
+              // answer schema. Using the structured value would paint every
+              // expert at 80% even when their own prose says 65% / 70%.
+              const parseConfidence = (answer: string, structured: number | undefined | null): number => {
+                // Match both decimal (0.65) and percent (65 / 65%) forms.
+                const m = (answer || '').match(
+                  /(?:CONFIDENCE|信心|置信度)\s*[:：]?\s*(0?\.\d+|\d{1,3}(?:\.\d+)?)\s*%?/i,
+                );
+                if (m) {
+                  const val = parseFloat(m[1]);
+                  if (Number.isFinite(val)) {
+                    // 0.65 → 65, 65 → 65, 0.7 → 70
+                    const pct = val <= 1 ? val * 100 : val;
+                    return Math.max(0, Math.min(100, Math.round(pct)));
+                  }
+                }
+                // Fallback only when the answer didn't include the field at all.
+                if (typeof structured === 'number' && structured > 0) {
+                  return Math.max(0, Math.min(100, Math.round(structured * 100)));
+                }
+                return 50;
+              };
+
+              // ── Strongest-Stance Picker ────────────────────────────
+              // For each agent, walk all rounds we accumulated during the
+              // SSE stream and pick the answer with the strongest (most
+              // directional) verdict. Roundtable consensus tends to
+              // converge to Neutral by the final round, which makes the
+              // table look uniformly hedged — this preserves each
+              // expert's actual lean during the debate.
+              //
+              // Selection order:
+              //   1. Highest |Bullish - Bearish| score across rounds.
+              //      (Bullish/Bearish > Neutral; ties broken by confidence.)
+              //   2. If every round was Neutral, fall back to the final-
+              //      round answer (which is what agentResponses already has).
+              type RoundPick = { round: number; answer: string; confidence: number; verdict: 'Bullish' | 'Bearish' | 'Neutral' };
+              const pickStrongestStance = (agentId: string, fallback: { answer: string; confidence: number }): RoundPick => {
+                const rounds = perAgentRounds.get(agentId) || [];
+                let best: RoundPick | null = null;
+                for (const r of rounds) {
+                  const verdict = parseSignal(r.answer);
+                  const conf = parseConfidence(r.answer, r.confidence);
+                  // Score: 100 for non-Neutral, 0 for Neutral; tiebreaker is conf.
+                  const directional = verdict !== 'Neutral' ? 1 : 0;
+                  const candidate: RoundPick = { round: r.round, answer: r.answer, confidence: conf / 100, verdict };
+                  if (!best) { best = candidate; continue; }
+                  const bestDirectional = best.verdict !== 'Neutral' ? 1 : 0;
+                  if (directional > bestDirectional) { best = candidate; continue; }
+                  if (directional === bestDirectional && conf > Math.round((best.confidence || 0) * 100)) {
+                    best = candidate;
+                  }
+                }
+                if (!best) {
+                  // No streamed rounds (shouldn't happen but defensive) — use final answer.
+                  return {
+                    round: roundsUsed,
+                    answer: fallback.answer,
+                    confidence: fallback.confidence,
+                    verdict: parseSignal(fallback.answer),
+                  };
+                }
+                return best;
+              };
+
+              // Diagnostic: log final-round + strongest-stance per agent.
+              console.log('[agent:chat:rt-parse] expert verdicts/confidences (final | strongest)');
+              agentResponses.forEach((resp: any, idx: number) => {
+                const finalV = parseSignal(resp.answer);
+                const finalC = parseConfidence(resp.answer, resp.confidence);
+                const strongest = pickStrongestStance(resp.agentId, { answer: resp.answer, confidence: resp.confidence });
+                const strongestC = parseConfidence(strongest.answer, strongest.confidence);
+                const name = resolveAgentName(resp.agentId, idx);
+                console.log(`  [${idx}] ${name} → final=${finalV} ${finalC}%  |  strongest=R${strongest.round} ${strongest.verdict} ${strongestC}%`);
+              });
+
+              // Pull a 1-2 sentence "rationale" tagline from each answer.
+              // Prefer an explicit RATIONALE: section, fall back to the first
+              // non-trivial sentence; cap the length so the table stays compact.
+              const extractTagline = (answer: string): string => {
+                if (!answer) return '';
+                const m = answer.match(/RATIONALE:\s*([\s\S]+?)(?:\n[A-Z_]+:|\n\n|$)/i);
+                let raw = (m && m[1].trim()) ? m[1].trim() : answer.trim();
+                raw = raw.replace(/SIGNAL:\s*\w+/gi, '').replace(/CONFIDENCE:\s*[\d.]+%?/gi, '').trim();
+                // First sentence in latin or CJK
+                const firstSentence = raw.match(/^[^.。!?！？\n]{4,180}[.。!?！？]?/);
+                let snippet = firstSentence ? firstSentence[0].trim() : raw.split('\n')[0].trim();
+                snippet = snippet.replace(/\s+/g, ' ');
+                if (snippet.length > 120) snippet = snippet.slice(0, 117).replace(/[\s,。,]+$/, '') + '…';
+                return snippet || (isZhQuery ? '(无核心论据)' : '(no rationale)');
+              };
+
+              // Localized verdict label
+              const verdictLabel = (v: 'Bullish' | 'Bearish' | 'Neutral'): string => {
+                if (!isZhQuery) return v;
+                return v === 'Bullish' ? '看多' : v === 'Bearish' ? '看空' : '中性';
+              };
+
+              // Build the canonical markdown table that will replace the placeholder.
+              // The table now reflects each expert's STRONGEST stance (the round
+              // where they were most directional), not their post-convergence
+              // final position. Otherwise every expert ends up "Neutral 65%"
+              // after Aegean smooths the debate down — which throws away the
+              // most valuable signal: who was actually pushing what view.
+              const tableHeader = isZhQuery
+                ? '| 专家 | 核心观点 | 信心 | 核心论据 |\n|---|---|---|---|'
+                : '| Expert | Stance | Confidence | Key Rationale |\n|---|---|---|---|';
+              const tableRows = agentResponses.map((resp: any, idx: number) => {
+                const name = resolveAgentName(resp.agentId, idx);
+                const pick = pickStrongestStance(resp.agentId, { answer: resp.answer, confidence: resp.confidence });
+                const verdict = pick.verdict;
+                const conf = parseConfidence(pick.answer, pick.confidence);
+                const tagline = extractTagline(pick.answer)
+                  // Markdown-escape pipes so they don't break the table cell
+                  .replace(/\|/g, '\\|');
+                return `| ${name} | ${verdictLabel(verdict)} | ${conf}% | ${tagline} |`;
+              });
+              // Section title chosen to communicate the table's semantics —
+              // "辩论核心立场" makes clear it's the strongest debate stance,
+              // not necessarily the final consensus (which is shown separately).
+              const sectionTitle = isZhQuery ? '## 辩论核心立场' : '## Core Debate Positions';
+              const subtitle = isZhQuery
+                ? `*下表展示每位专家在辩论中给出的最具方向性立场;**最终共识结论**见上文 Verdict 段。*`
+                : `*Each row shows each expert's strongest directional stance during debate; the **final consensus verdict** is summarized above.*`;
+              canonicalExpertTable = `${sectionTitle}\n\n${subtitle}\n\n${tableHeader}\n${tableRows.join('\n')}\n`;
+
               expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
               expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
               expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
@@ -3369,21 +3565,43 @@ ${synFullContent || contextString}${langFooter}`;
               expertDebateContext += isZhQuery
                 ? `【命名规则】下方每一位专家的名字都必须在正文中原样引用(如"沃伦·巴菲特视角认为…"),禁止替换成"专家1/专家2"等匿名编号。\n\n`
                 : `[NAMING RULE] Each position below is labelled with a specific analyst name. Your report MUST reference them by these exact names when attributing views (e.g. "Warren Buffett's lens argues…"). Do NOT substitute with "Expert 1 / Analyst A / 专家1" or any numeric placeholder.\n\n`;
-              // CRITICAL — verdict + confidence are explicit numeric fields
-              // emitted PER expert below. The synthesis LLM (and the HTML
-              // expert table) MUST copy these values verbatim, NOT infer or
-              // default. Prior bug: every expert ended up "Neutral / 65%" in
-              // the rendered table because the LLM hedged when verdict was
-              // not explicitly provided in a key:value form.
+              // ── Hard rule: the expert verdict table is system-generated ────
               expertDebateContext += isZhQuery
-                ? `【数据规则】每位专家下方明确给出 VERDICT(立场)与 CONFIDENCE(信心 %),报告里的"核心观点"和"信心"两栏必须**原值复用**,不允许全部填"中性/65%",也不允许根据自己阅读后再推断。\n\n`
-                : `[DATA RULE] Each expert below has explicit VERDICT and CONFIDENCE values. The "Signal" and "Confidence" columns in your output MUST copy these values verbatim. Do NOT default everyone to "Neutral / 65%" and do NOT re-infer from prose.\n\n`;
-              expertDebateContext += `Individual Expert Positions:\n`;
+                ? `【表格规则·硬性】关于"专家立场汇总"这张表,请**不要自己写**任何 markdown 表格。系统已经渲染好了一份权威表(verdict + confidence + 核心论据 全部基于结构化数据)。在你需要插入此表的位置,**只输出这一行占位符**(单独一行,不带任何其他符号或说明):\n\n${EXPERT_TABLE_PLACEHOLDER}\n\n后处理会自动把这行替换为真表。如果你写了自己的表,系统会把它整段删掉,等于白写。\n\n`
+                : `[TABLE RULE — HARD] For the "Expert Position Summary" table, do NOT write a markdown table yourself. The system has pre-rendered an authoritative table (verdict + confidence + rationale all from structured data). Where you would insert that table, output ONLY this placeholder on its own line, no other text:\n\n${EXPERT_TABLE_PLACEHOLDER}\n\nPost-processing will substitute it with the real table. If you write your own table the system will strip it.\n\n`;
+              // CRITICAL — per-expert verdict + confidence still go into the
+              // prompt so the synthesis LLM can reference values in prose.
+              // (The table itself is no longer LLM-generated — see TABLE RULE.)
+              expertDebateContext += isZhQuery
+                ? `【数据参考】每位专家下方明确给出 VERDICT(立场)与 CONFIDENCE(信心 %),正文引用专家观点时请用这些数值,不要自己重新推断。\n\n`
+                : `[DATA REFERENCE] Each expert below has explicit VERDICT and CONFIDENCE values. When citing them in prose, use these values verbatim — do not re-infer from the rationale.\n\n`;
+              // ── Per-expert "debate journey" ─────────────────────────
+              // For each expert, surface BOTH (a) their initial / strongest
+              // directional stance AND (b) their final (often converged)
+              // stance, so the synthesis LLM can write a proper "they
+              // started here, debated, ended there" narrative instead of
+              // the boring "everyone agrees Neutral" summary.
+              expertDebateContext += isZhQuery
+                ? `【辩论旅程】下方为每位专家的"最强立场"和"最终立场"对比。请在分析里讲清楚:谁起初看多/看空、被什么论据说服、最终收敛到哪 —— 这才是圆桌辩论的真正价值。\n\n`
+                : `[DEBATE JOURNEY] Each expert below is shown with their STRONGEST stance during debate and their FINAL stance after consensus. Use this to narrate who started where, what convinced whom, and where positions converged — that journey is what makes a roundtable analysis valuable.\n\n`;
+              expertDebateContext += `Individual Expert Journey:\n`;
               agentResponses.forEach((resp: any, idx: number) => {
                 const name = resolveAgentName(resp.agentId, idx);
-                const conf = Math.round((resp.confidence || 0) * 100);
-                const verdict = parseSignal(resp.answer);
-                expertDebateContext += `--- ${name} | VERDICT: ${verdict} | CONFIDENCE: ${conf}% ---\n${resp.answer}\n\n`;
+                const finalConf = parseConfidence(resp.answer, resp.confidence);
+                const finalVerdict = parseSignal(resp.answer);
+                const strongest = pickStrongestStance(resp.agentId, { answer: resp.answer, confidence: resp.confidence });
+                const strongestConf = parseConfidence(strongest.answer, strongest.confidence);
+                expertDebateContext += `=== ${name} ===\n`;
+                if (strongest.verdict !== finalVerdict || strongest.round !== roundsUsed) {
+                  expertDebateContext += `[Round ${strongest.round} STRONGEST stance] VERDICT: ${strongest.verdict} | CONFIDENCE: ${strongestConf}%\n`;
+                  expertDebateContext += `${strongest.answer}\n\n`;
+                  expertDebateContext += `[Round ${roundsUsed} FINAL stance after debate] VERDICT: ${finalVerdict} | CONFIDENCE: ${finalConf}%\n`;
+                  expertDebateContext += `${resp.answer}\n\n`;
+                } else {
+                  // Stance didn't change across rounds — only show one block.
+                  expertDebateContext += `[Stance held across all rounds] VERDICT: ${finalVerdict} | CONFIDENCE: ${finalConf}%\n`;
+                  expertDebateContext += `${resp.answer}\n\n`;
+                }
               });
             }
 
@@ -3422,6 +3640,23 @@ ${synFullContent || contextString}${langFooter}`;
               ? `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`
               : `Raw Research Data:\n${contextString}${expertDebateContext}`;
             const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
+
+            // ── Roundtable: kick off HTML generation NOW (in parallel with
+            // deep research second pass). Earlier we deliberately skipped
+            // `parallelHtmlPromise` for roundtable because contextString
+            // alone misses the debate journey. But we now have the full
+            // expertDebateContext baked into deepResearchInput, so HTML can
+            // run with the same rich material AND overlap the ~90s deep
+            // research streaming. Net wall-time saving: ~60-80s vs the pure
+            // sequential HTML fallback. Awaited at the existing emit site.
+            if (htmlReportEnabled && isDeepResearch && !parallelHtmlPromise) {
+              console.log('[agent:chat:html] Roundtable: starting HTML in parallel with deep research, input length=', deepResearchInput.length);
+              emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
+              parallelHtmlPromise = runHtmlGeneration(deepResearchInput).catch(err => {
+                console.error('[agent:chat:html] ❌ Roundtable parallel HTML failed:', err.message);
+                return '';
+              });
+            }
 
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
             const deepSecondPassStartedAt = Date.now();
@@ -3466,6 +3701,43 @@ ${synFullContent || contextString}${langFooter}`;
                     streamToChat(delta);
                   }
                 } catch (e) { }
+              }
+            }
+
+            // Force-substitute the canonical expert verdict table.
+            // The LLM was told to emit `EXPERT_TABLE_PLACEHOLDER` in place of
+            // a hand-written "专家立场汇总" table. We do three layers here:
+            //   1) replace the placeholder with the canonical table verbatim;
+            //   2) if the LLM ignored the placeholder rule and wrote its own
+            //      table anyway, strip that rogue table and inject ours;
+            //   3) if neither happened (LLM forgot the section entirely),
+            //      append the canonical table near the end so the data is
+            //      never lost.
+            if (canonicalExpertTable) {
+              if (deepFullContent.includes(EXPERT_TABLE_PLACEHOLDER)) {
+                deepFullContent = deepFullContent.split(EXPERT_TABLE_PLACEHOLDER).join(canonicalExpertTable);
+              } else {
+                // Find a markdown table whose header row contains both 专家|Expert
+                // and 核心观点|Verdict (or 信心|Confidence). This catches LLM-authored
+                // expert tables in both languages without nuking unrelated tables.
+                const rogueTable = deepFullContent.match(
+                  /(?:^|\n)(?:#{1,4}\s+[^\n]*(?:专家立场|专家观点|辩论核心立场|核心立场|Expert\s+Position|Expert\s+Summary|Core\s+Debate\s+Positions?|Debate\s+Positions?)[^\n]*\n+)?(\|[^\n]*(?:专家|Expert)[^\n]*\|[^\n]*(?:核心观点|信心|Verdict|Stance|Confidence)[^\n]*\|\s*\n\|[\s\-:|]+\|\s*\n(?:\|[^\n]*\|\s*\n?)+)/i,
+                );
+                if (rogueTable && rogueTable.index != null) {
+                  const before = deepFullContent.slice(0, rogueTable.index);
+                  const after = deepFullContent.slice(rogueTable.index + rogueTable[0].length);
+                  deepFullContent = `${before}\n\n${canonicalExpertTable}\n\n${after}`.replace(/\n{3,}/g, '\n\n');
+                  console.log('[agent:chat:rt-table] LLM ignored placeholder, replaced rogue expert table with canonical');
+                } else {
+                  // No table at all — append before any "## 风险" or final closing section
+                  const insertBefore = deepFullContent.search(/\n#{1,3}\s+(?:风险|Risk|结论|Conclusion|附录|Appendix)/i);
+                  if (insertBefore > 0) {
+                    deepFullContent = deepFullContent.slice(0, insertBefore) + `\n\n${canonicalExpertTable}\n` + deepFullContent.slice(insertBefore);
+                  } else {
+                    deepFullContent = deepFullContent.trimEnd() + `\n\n${canonicalExpertTable}\n`;
+                  }
+                  console.log('[agent:chat:rt-table] LLM omitted expert section entirely, appended canonical table');
+                }
               }
             }
 
