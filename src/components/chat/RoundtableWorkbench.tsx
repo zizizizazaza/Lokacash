@@ -235,6 +235,12 @@ export const buildKnowledgeGraph = (): KnowledgeGraphData => STATIC_KG_DATA;
 function buildRealKnowledgeGraph(
     thinking: ThinkingFlow | undefined,
     topicLabel: string = 'Research Topic',
+    // 'final' (default) renders the last-round agents + the consensus node.
+    // A round number (1, 2, 3, …) renders only that round's positions, hides
+    // the conclusion node, and adds `challenges` edges between agents whose
+    // verdicts directly oppose each other in that round. Lets the user
+    // scrub through the debate timeline R1 → R2 → R3 → Final.
+    selectedRound: number | 'final' = 'final',
 ): KnowledgeGraphData {
     const nodes: KGNode[] = [];
     const edges: KGEdge[] = [];
@@ -244,15 +250,67 @@ function buildRealKnowledgeGraph(
     const consensus = thinking?.rtConsensus;
     const modules = thinking?.modules || [];
 
-    // 1. Topic node — always present
-    const topicDisplay = topicLabel.length > 26 ? topicLabel.slice(0, 24) + '…' : topicLabel;
+    // Pick the agent snapshot for the requested round. 'final' falls back to
+    // the most recent round so we still render something even if the
+    // committee has only completed R1.
+    const lastIdx = Math.max(0, rounds.length - 1);
+    const focusRoundIdx = selectedRound === 'final' ? lastIdx : Math.max(0, Math.min(rounds.length - 1, selectedRound - 1));
+    const focusRoundAgents = rounds[focusRoundIdx]?.agents || [];
+    const showConclusion = selectedRound === 'final';
+
+    // 1. Center "topic" node — prefer the actual asset symbol when one was
+    //    resolved (PENGU, BTC, NVDA, etc.) so the graph reads as
+    //    "[asset] ← analysts ← knowledge sources" instead of dumping the
+    //    user's full question as the centerpiece. Falls back to the query
+    //    text when no asset was identified (research-style questions like
+    //    "南美咖啡产业前景").
+    //
+    //    Detection chain (first hit wins):
+    //      a. Web3 OKX snapshot baseCcy → "PENGU" / "BTC"
+    //      b. Stock analysis tickers → "NVDA"
+    //      c. $TICKER pattern in the query text → "$NVDA"
+    //      d. Generic query trim
+    let assetLabel = '';
+    let assetSummary = '';
+    const web3Mod = modules.find((m) => m.type === 'web3');
+    const web3Data = web3Mod?.data as { okx?: Array<{ baseCcy?: string }>; assets?: number } | undefined;
+    const firstOkxBase = web3Data?.okx?.find((s) => s?.baseCcy)?.baseCcy;
+    if (firstOkxBase) {
+        assetLabel = firstOkxBase.toUpperCase();
+        assetSummary = `Crypto asset under analysis: ${assetLabel}`;
+    }
+    if (!assetLabel) {
+        const analysisMod = modules.find((m) => m.type === 'analysis');
+        const analysisData = analysisMod?.data as { tickers?: string[] } | undefined;
+        const firstTicker = analysisData?.tickers?.[0];
+        if (firstTicker && /^[A-Z][A-Z0-9.-]{0,8}$/.test(firstTicker)) {
+            assetLabel = firstTicker;
+            assetSummary = `Equity under analysis: ${assetLabel}`;
+        }
+    }
+    if (!assetLabel) {
+        // Cheap regex on the topic — catches "$NVDA", "buying NVDA", "BTC vs ETH".
+        // Whitelist 2-6 uppercase letters to dodge false hits like "I" or "AI".
+        const m = (topicLabel || '').match(/\$([A-Z]{2,8})|\b([A-Z]{2,6})\b(?=\s|$|[,.!?])/);
+        const guess = (m?.[1] || m?.[2] || '').trim();
+        // Skip common English words that match the regex but aren't tickers.
+        const STOP = new Set(['THE', 'AND', 'FOR', 'WITH', 'NOT', 'YOU', 'NEW', 'NOW', 'WHO', 'WHY', 'HOW', 'CAN', 'BUY', 'SELL']);
+        if (guess && !STOP.has(guess)) {
+            assetLabel = guess;
+            assetSummary = `Asset extracted from query: ${assetLabel}`;
+        }
+    }
+
+    const centerLabel = assetLabel
+        || (topicLabel.length > 26 ? topicLabel.slice(0, 24) + '…' : topicLabel)
+        || 'Research Topic';
     nodes.push({
         id: 'topic_main',
         type: 'asset',
-        label: topicDisplay || 'Research Topic',
+        label: centerLabel,
         group: 'center',
         x: 0, y: 0,
-        data: { summary: topicLabel || 'Pending research topic' },
+        data: { summary: assetSummary || topicLabel || 'Pending research topic' },
     });
 
     // 2. Knowledge source nodes — hub + source children.
@@ -345,18 +403,19 @@ function buildRealKnowledgeGraph(
 
     // 3. Agent role nodes — from selectedAgentIds. Pending until the
     //    backend emits a per-agent response, then filled in progressively.
+    //    `firstRoundAgents` always = round 1; `focusRoundAgents` is the round
+    //    the user selected via the timeline (or the latest round if "Final").
     const firstRoundAgents = rounds[0]?.agents || [];
-    const lastRoundAgents = rounds[rounds.length - 1]?.agents || [];
 
     for (const agentId of agentIds) {
         const meta = SUMMON_POOL.find(a => a.id === agentId);
         if (!meta) continue;
         const first = firstRoundAgents.find(a => a.agentId === agentId);
-        const last = lastRoundAgents.find(a => a.agentId === agentId);
+        const focus = focusRoundAgents.find(a => a.agentId === agentId);
         const initial = (first?.verdict || '').toLowerCase();
-        const final = (last?.verdict || initial || '').toLowerCase();
-        const confidence = ((last?.confidence ?? first?.confidence ?? 0) as number) / 100;
-        const summary = last?.reasoning || first?.reasoning || meta.role;
+        const final = (focus?.verdict || initial || '').toLowerCase();
+        const confidence = ((focus?.confidence ?? first?.confidence ?? 0) as number) / 100;
+        const summary = focus?.reasoning || first?.reasoning || meta.role;
         const changed = !!initial && !!final && initial !== final;
         const roleId = `role_${agentId}`;
         nodes.push({
@@ -387,10 +446,11 @@ function buildRealKnowledgeGraph(
         }
     }
 
-    // 4. Evidence nodes — one per agent who has reached a verdict. The
-    //    evidence label compresses the agent's stance into a short phrase
-    //    and polarity is inferred from bullish/bearish/buy/sell keywords.
-    const strongAgents = lastRoundAgents.filter(a => a.status === 'done' && a.verdict);
+    // 4. Evidence nodes — one per agent who has reached a verdict in the
+    //    currently-focused round. The evidence label compresses the
+    //    agent's stance into a short phrase; polarity is inferred from
+    //    bullish/bearish/buy/sell keywords.
+    const strongAgents = focusRoundAgents.filter(a => a.status === 'done' && a.verdict);
     for (const a of strongAgents) {
         const meta = SUMMON_POOL.find(s => s.id === a.agentId);
         if (!meta) continue;
@@ -400,7 +460,17 @@ function buildRealKnowledgeGraph(
             : /bear|sell|short|看空|看跌|做空|卖出/.test(verdict) ? 'negative'
             : 'neutral';
         const eid = `evidence_${a.agentId}`;
-        const label = `${meta.name} · ${a.verdict}`;
+        // Show ONLY the verdict, not the persona name. Otherwise the graph
+        // looks like the same analyst is duplicated (one with avatar, one
+        // without) — confuses users into thinking it's a render bug. The
+        // edge from `role_${agentId} -> evidence_${agentId}` already
+        // attributes the vote to the right analyst when you hover or follow
+        // the connection. Including confidence in the label gives the small
+        // node enough information density to stand on its own.
+        const confPct = typeof a.confidence === 'number'
+            ? Math.max(0, Math.min(100, Math.round(a.confidence)))
+            : null;
+        const label = confPct != null ? `${a.verdict} · ${confPct}%` : a.verdict;
         nodes.push({
             id: eid, type: 'evidence',
             label,
@@ -414,6 +484,13 @@ function buildRealKnowledgeGraph(
                 category: 'stance',
                 detail: a.reasoning || '',
                 cited_by: [meta.name],
+                // Persona attribution: kept on the data payload so the
+                // renderer can outline the evidence node with the same color
+                // as the analyst's persona ring. This visually pairs each
+                // small vote bubble with its big avatar without depending on
+                // the user actually tracing the edge between them.
+                personaColor: meta.color,
+                personaId: meta.id,
             },
         });
         edges.push({
@@ -423,10 +500,12 @@ function buildRealKnowledgeGraph(
         });
     }
 
-    // 5. Conclusion node + converges/challenges edges — only after
-    //    consensus is reached.
+    // 5. Conclusion node + converges edges — only on the "Final" view AFTER
+    //    consensus is reached. When the user is scrubbing through R1 / R2 /
+    //    R3 we hide the conclusion (it doesn't exist yet at that point in the
+    //    debate) and instead emphasise the round's challenges edges.
     const hasConclusion = consensus && (consensus.status === 'done' || !!consensus.finalVerdict);
-    if (hasConclusion) {
+    if (showConclusion && hasConclusion) {
         const finalVerdict = (consensus!.finalVerdict || 'HOLD').toUpperCase();
         const finalConf = Math.round(consensus!.finalConfidence ?? 50);
         const conflict = Math.round(consensus!.conflictRate ?? 0);
@@ -445,7 +524,7 @@ function buildRealKnowledgeGraph(
         for (const agentId of agentIds) {
             const roleId = `role_${agentId}`;
             if (!nodes.find(n => n.id === roleId)) continue;
-            const last = lastRoundAgents.find(a => a.agentId === agentId);
+            const last = focusRoundAgents.find(a => a.agentId === agentId);
             const vlow = (last?.verdict || '').toLowerCase();
             edges.push({
                 id: `edge_${roleId}_final`,
@@ -464,20 +543,27 @@ function buildRealKnowledgeGraph(
                 type: 'supports', label: 'supports',
             });
         }
-        // Pairwise disagreement between roles (drawn once per pair)
-        for (let i = 0; i < agentIds.length; i++) {
-            for (let j = i + 1; j < agentIds.length; j++) {
-                const a = lastRoundAgents.find(x => x.agentId === agentIds[i]);
-                const b = lastRoundAgents.find(x => x.agentId === agentIds[j]);
-                const av = (a?.verdict || '').toLowerCase();
-                const bv = (b?.verdict || '').toLowerCase();
-                if (av && bv && av !== bv) {
-                    edges.push({
-                        id: `edge_challenge_${agentIds[i]}_${agentIds[j]}`,
-                        source: `role_${agentIds[i]}`, target: `role_${agentIds[j]}`,
-                        type: 'challenges', label: 'disagrees',
-                    });
-                }
+    }
+
+    // 6. Challenges edges — pairwise disagreements within the focused round.
+    //    Drawn whether or not the round is "final" so the user can replay
+    //    where the most contention lived in the debate.
+    for (let i = 0; i < agentIds.length; i++) {
+        for (let j = i + 1; j < agentIds.length; j++) {
+            const a = focusRoundAgents.find(x => x.agentId === agentIds[i]);
+            const b = focusRoundAgents.find(x => x.agentId === agentIds[j]);
+            const av = (a?.verdict || '').toLowerCase();
+            const bv = (b?.verdict || '').toLowerCase();
+            // Only flag a meaningful disagreement: bullish vs bearish (skip
+            // bull-vs-neutral noise which would clutter the graph).
+            const aPol = /bull|buy|long|看多|加多/.test(av) ? 'bull' : /bear|sell|short|看空/.test(av) ? 'bear' : 'neutral';
+            const bPol = /bull|buy|long|看多|加多/.test(bv) ? 'bull' : /bear|sell|short|看空/.test(bv) ? 'bear' : 'neutral';
+            if (aPol !== bPol && (aPol === 'bull' || bPol === 'bull') && (aPol === 'bear' || bPol === 'bear')) {
+                edges.push({
+                    id: `edge_challenge_${agentIds[i]}_${agentIds[j]}`,
+                    source: `role_${agentIds[i]}`, target: `role_${agentIds[j]}`,
+                    type: 'challenges', label: 'disagrees',
+                });
             }
         }
     }
@@ -485,7 +571,16 @@ function buildRealKnowledgeGraph(
     return { nodes, edges };
 }
 
-export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: boolean }> = ({ data, animate = false }) => {
+export const KnowledgeGraphView: React.FC<{
+    data: KnowledgeGraphData;
+    animate?: boolean;
+    /** Total number of rounds available; controls how many R1/R2/… buttons render. */
+    roundsAvailable?: number;
+    /** Currently-selected round (1-indexed) or 'final'. Controlled-component pattern. */
+    selectedRound?: number | 'final';
+    /** Fired when user clicks a round button. */
+    onRoundChange?: (round: number | 'final') => void;
+}> = ({ data, animate = false, roundsAvailable = 0, selectedRound = 'final', onRoundChange }) => {
     const svgRef = useRef<SVGSVGElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [hoverNode, setHoverNode] = useState<{ node: any; x: number; y: number } | null>(null);
@@ -508,20 +603,47 @@ export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: 
         task:       { ...NEUTRAL, r: 14 },
         stance:     { ...NEUTRAL, r: 14 },
     };
-    // Evidence colored only by polarity: green = 共识点, red = 分歧点, else neutral
+    // Evidence node:
+    //   • fill = polarity color (light green / red / gray) — encodes the VOTE
+    //   • stroke = persona color (or polarity color when persona unknown)
+    //     — encodes the VOTER, so the small bubble is colored to match the
+    //       analyst's avatar ring even without tracing the cites edge.
     const getNodeStyle = (n: any) => {
         const base = NODE_STYLE[n.type] || NODE_STYLE.evidence;
         if (n.type === 'evidence') {
             const polarity = n.data?.polarity;
-            if (polarity === 'positive') return { fill: '#dcfce7', stroke: '#16a34a', text: '#14532d', r: 14 };
-            if (polarity === 'negative') return { fill: '#fee2e2', stroke: '#dc2626', text: '#991b1b', r: 14 };
+            const personaColor: string | undefined = n.data?.personaColor;
+            if (polarity === 'positive') return { fill: '#dcfce7', stroke: personaColor || '#16a34a', text: '#14532d', r: 14 };
+            if (polarity === 'negative') return { fill: '#fee2e2', stroke: personaColor || '#dc2626', text: '#991b1b', r: 14 };
+            return { fill: '#f1f5f9', stroke: personaColor || '#94a3b8', text: '#475569', r: 14 };
         }
         return base;
     };
 
-    // Unified edge styling: single light-gray stroke, no labels, no per-type color
-    const EDGE_STYLE_DEFAULT = { stroke: '#cbd5e1', width: 1.2, marker: 'arrow-gray' };
-    const getEdgeStyle = (_e: any) => EDGE_STYLE_DEFAULT;
+    // Edge styling colored by relationship type so the graph reads as a flow:
+    //   informs (knowledge → role/topic)        — light gray, thin   (data inputs)
+    //   analyzes (role → asset)                 — purple, medium     (the question)
+    //   cites    (role → evidence)              — gray, thin         (vote attribution)
+    //   converges_to / supports_* (→ conclusion) — emerald green, bold (consensus)
+    //   challenges (role → role)                — red, dashed        (conflict)
+    type EdgeStyle = { stroke: string; width: number; marker: string; dash: string | null };
+    const EDGE_STYLES: Record<string, EdgeStyle> = {
+        informs:      { stroke: '#cbd5e1', width: 1.1, marker: 'arrow-gray',   dash: null },
+        analyzes:     { stroke: '#a78bfa', width: 1.6, marker: 'arrow-purple', dash: null },
+        cites:        { stroke: '#94a3b8', width: 1.3, marker: 'arrow-gray',   dash: null },
+        converges_to: { stroke: '#10b981', width: 1.8, marker: 'arrow-green',  dash: null },
+        challenges:   { stroke: '#ef4444', width: 1.5, marker: 'arrow-red',    dash: '5,3' },
+        default:      { stroke: '#cbd5e1', width: 1.2, marker: 'arrow-gray',   dash: null },
+    };
+    const getEdgeStyle = (e: any): EdgeStyle => {
+        const t = String(e?.type || '');
+        if (t === 'analyzes') return EDGE_STYLES.analyzes;
+        if (t === 'cites') return EDGE_STYLES.cites;
+        if (t === 'challenges') return EDGE_STYLES.challenges;
+        if (t === 'converges_to' || t.startsWith('supports')) return EDGE_STYLES.converges_to;
+        if (t === 'informs') return EDGE_STYLES.informs;
+        return EDGE_STYLES.default;
+    };
 
     useEffect(() => {
         if (!svgRef.current || !data.nodes.length) return;
@@ -542,10 +664,14 @@ export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: 
 
         const g = svg.append('g');
 
-        // Define one arrow marker per stroke color
+        // Define one arrow marker per stroke color so each edge type has a
+        // matching colored arrowhead (otherwise SVG defaults to black).
         const defs = svg.append('defs');
         const markers: { id: string; fill: string }[] = [
             { id: 'arrow-gray',   fill: '#cbd5e1' },
+            { id: 'arrow-purple', fill: '#a78bfa' },
+            { id: 'arrow-green',  fill: '#10b981' },
+            { id: 'arrow-red',    fill: '#ef4444' },
         ];
         markers.forEach(m => {
             defs.append('marker')
@@ -604,20 +730,35 @@ export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: 
             e._stage = st;
         });
 
+        // Layered layout: pin each node type to its own horizontal band so
+        // the graph reads top-to-bottom as the debate process:
+        //   knowledge sources → asset → analysts → individual votes → consensus
+        // Strength balances "rigid layers" (high) vs "natural force" (low).
+        // 0.35 is enough to keep layers visually distinct while still letting
+        // link tension space neighbours apart horizontally.
+        const layerY = (d: any): number => {
+            if (d.type === 'knowledge') return height * 0.14;   // top — data inputs
+            if (d.type === 'asset')     return height * 0.30;   // upper-middle — the question
+            if (d.type === 'role')      return height * 0.55;   // middle — analysts
+            if (d.type === 'evidence')  return height * 0.78;   // lower — votes
+            if (d.type === 'conclusion') return height * 0.92;  // bottom — final verdict
+            return height * 0.5;
+        };
+
         const simulation = d3.forceSimulation(nodes as any)
             .force('link', d3.forceLink(edges).id((d: any) => d.id).distance((d: any) => {
                 // Longer links by relationship semantics — spreads the graph
                 if (d.type === 'analyzes') return 180;
-                if (d.type === 'cites') return 170;
+                if (d.type === 'cites') return 140;
                 if (d.type === 'supports' || d.type === 'converges_to') return 210;
                 if (d.type === 'challenges') return 150;
                 if (d.type === 'informs') return 160;
                 return 180;
             }).strength(0.35))
-            .force('charge', d3.forceManyBody().strength(-1100).distanceMin(30).distanceMax(width))
-            .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('x', d3.forceX(width / 2).strength(0.04))
-            .force('y', d3.forceY(height / 2).strength(0.04))
+            .force('charge', d3.forceManyBody().strength(-900).distanceMin(30).distanceMax(width))
+            // Centering & x-spreading kept gentle so layered y dominates.
+            .force('x', d3.forceX(width / 2).strength(0.05))
+            .force('y', d3.forceY((d: any) => layerY(d)).strength(0.35))
             .force('collide', d3.forceCollide().radius((d: any) => (getNodeStyle(d).r + 32)).strength(0.9));
 
         const link = g.append('g')
@@ -627,6 +768,7 @@ export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: 
             .attr('stroke', (d: any) => getEdgeStyle(d).stroke)
             .attr('stroke-opacity', 0)
             .attr('stroke-width', (d: any) => getEdgeStyle(d).width)
+            .attr('stroke-dasharray', (d: any) => getEdgeStyle(d).dash || null)
             .attr('marker-end', (d: any) => `url(#${getEdgeStyle(d).marker})`);
 
         const drag = d3.drag<SVGGElement, any>()
@@ -674,6 +816,30 @@ export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: 
             .attr('height', (d: any) => 2 * (getNodeStyle(d).r - 3))
             .attr('clip-path', (d: any) => `url(#clip-${d.id})`)
             .attr('preserveAspectRatio', 'xMidYMid slice');
+
+        // Glyph for knowledge nodes — picks an emoji icon based on the
+        // knowledge node's label/kind so users can tell News from On-chain
+        // from Stock fundamentals at a glance (instead of empty circles).
+        // Emoji is a portable, zero-asset way to ship icons; the colored
+        // ring still encodes the node type / status.
+        const knowledgeIcon = (d: any): string => {
+            const label = String(d.label || '').toLowerCase();
+            const kind = String(d.data?.knowledge_type || '').toLowerCase();
+            if (kind === 'source') return '🔗';
+            if (label.includes('news') || label.includes('sentiment') || kind === 'news_feed') return '📰';
+            if (label.includes('on-chain') || label.includes('chain')) return '⛓';
+            if (label.includes('exchange') || label.includes('market')) return '💱';
+            if (label.includes('coingecko') || label.includes('rest api') || kind === 'data_feed') return '📊';
+            if (label.includes('fundamentals') || label.includes('stock')) return '📈';
+            return '📡';
+        };
+        node.filter((d: any) => d.type === 'knowledge')
+            .append('text')
+            .text((d: any) => knowledgeIcon(d))
+            .attr('y', 5)
+            .attr('font-size', '14px')
+            .attr('text-anchor', 'middle')
+            .attr('pointer-events', 'none');
 
         // Short label (inside circle) only for asset — role now shows avatar instead
         node.append('text')
@@ -834,15 +1000,60 @@ export const KnowledgeGraphView: React.FC<{ data: KnowledgeGraphData; animate?: 
     return (
         <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white" style={{ backgroundImage: 'radial-gradient(#e5e7eb 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
             <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
-            <div className="absolute bottom-4 left-4 flex flex-wrap gap-x-3 gap-y-1.5 z-10 max-w-[calc(100%-2rem)]">
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f8fafc] border border-[#94a3b8]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">News / Knowledge</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#dcfce7] border border-[#16a34a]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Consensus</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#fee2e2] border border-[#dc2626]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Divergence</span></div>
-                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#dcfce7] border border-[#16a34a]" style={{ borderWidth: 2 }}></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Conclusion</span></div>
+            <div className="absolute bottom-4 left-4 flex flex-col gap-1.5 z-10 max-w-[calc(100%-2rem)]">
+                {/* Node legend — what the differently-styled circles mean */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#f8fafc] border border-[#94a3b8]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Knowledge</span></div>
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#dcfce7] border border-[#16a34a]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Bullish</span></div>
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#fee2e2] border border-[#dc2626]"></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Bearish</span></div>
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-[#dcfce7] border border-[#16a34a]" style={{ borderWidth: 2 }}></div><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Final</span></div>
+                </div>
+                {/* Edge legend — what colored lines mean */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <div className="flex items-center gap-1.5"><div className="w-4 h-[2px] bg-[#a78bfa]" /><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Analyzes</span></div>
+                    <div className="flex items-center gap-1.5"><div className="w-4 h-[1.5px] bg-[#cbd5e1]" /><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Informs</span></div>
+                    <div className="flex items-center gap-1.5"><div className="w-4 h-[2px] bg-[#10b981]" /><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Converges</span></div>
+                    <div className="flex items-center gap-1.5"><div className="w-4 h-[2px] bg-[#ef4444]" style={{ borderTop: '2px dashed #ef4444', height: 0, background: 'transparent' }} /><span className="text-[10px] text-gray-500 uppercase font-mono tracking-wider">Challenges</span></div>
+                </div>
             </div>
             <div className="absolute top-4 right-4 text-[10px] text-gray-500 font-mono text-right pointer-events-none">
                 scroll to zoom<br/>drag to pan
             </div>
+            {/* Round timeline — only shown when there are at least 2 rounds
+                of debate data to scrub between (otherwise just one snapshot). */}
+            {roundsAvailable >= 2 && (
+                <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-white/90 backdrop-blur-sm border border-gray-200 rounded-full px-1.5 py-1 shadow-sm">
+                    {Array.from({ length: roundsAvailable }, (_, i) => i + 1).map((r) => {
+                        const active = selectedRound === r;
+                        return (
+                            <button
+                                key={`r${r}`}
+                                onClick={() => onRoundChange?.(r)}
+                                className={`px-3 py-1 text-[11px] font-semibold rounded-full transition-colors ${
+                                    active
+                                        ? 'bg-purple-600 text-white shadow-sm'
+                                        : 'text-gray-600 hover:bg-gray-100'
+                                }`}
+                                title={`Round ${r} stances + conflicts`}
+                            >
+                                R{r}
+                            </button>
+                        );
+                    })}
+                    <div className="w-px h-4 bg-gray-200 mx-0.5" />
+                    <button
+                        onClick={() => onRoundChange?.('final')}
+                        className={`px-3 py-1 text-[11px] font-semibold rounded-full transition-colors ${
+                            selectedRound === 'final'
+                                ? 'bg-emerald-600 text-white shadow-sm'
+                                : 'text-gray-600 hover:bg-gray-100'
+                        }`}
+                        title="Final consensus + supporting votes"
+                    >
+                        Final
+                    </button>
+                </div>
+            )}
             {hoverNode && (() => {
                 const n = hoverNode.node;
                 const d = n.data || {};
@@ -1303,6 +1514,10 @@ export const RoundtableWorkbench: React.FC<{
     const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
     const [fullscreen, setFullscreen] = useState(false);
     const debateScrollRef = useRef<HTMLDivElement | null>(null);
+    // Round timeline scrubber for the Graph tab. 'final' = last round +
+    // consensus node visible; 1/2/3 = isolate that round's stances and
+    // surface its disagreements as challenges edges.
+    const [selectedRound, setSelectedRound] = useState<number | 'final'>('final');
 
     // Close fullscreen on ESC
     useEffect(() => {
@@ -1342,11 +1557,11 @@ export const RoundtableWorkbench: React.FC<{
                 return `${m.type}:${m.status}:${sources}:${sections}`;
             })
             .join(';');
-        return `${agents}#${roundsKey}#${consensusKey}#${modulesKey}#${topicLabel}`;
-    }, [thinking, topicLabel]);
+        return `${agents}#${roundsKey}#${consensusKey}#${modulesKey}#${topicLabel}#round=${selectedRound}`;
+    }, [thinking, topicLabel, selectedRound]);
 
     const graphData = useMemo(
-        () => buildRealKnowledgeGraph(thinking, topicLabel),
+        () => buildRealKnowledgeGraph(thinking, topicLabel, selectedRound),
         // Intentionally skip `thinking` reference — we key off the
         // derived structure snapshot so content-only updates don't thrash.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1490,6 +1705,9 @@ export const RoundtableWorkbench: React.FC<{
                             <KnowledgeGraphView
                                 data={graphData}
                                 animate={isLive}
+                                roundsAvailable={rounds.length}
+                                selectedRound={selectedRound}
+                                onRoundChange={setSelectedRound}
                             />
                         </div>
                     ) : tab === 'log' ? (
