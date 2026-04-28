@@ -306,14 +306,18 @@ Lists:
 4. Data Visualization: two-col layout with bar charts (.bar-mini) and tables (.seg-table)
 5. Scenario Analysis: 3-4 scenario cards (.scenario-grid with .sc-bull/.sc-base/.sc-flat/.sc-bear)
 6. Risk Matrix: table with probability/impact pills (.pill-low/.pill-mid/.pill-high)
-7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert's core view, confidence, and key argument using expert-row components. Include:
-   - Expert cards: each expert with name, signal (bullish/bearish/neutral), confidence bar, and 1-2 sentence core argument
-   - **HARD DATA RULE — every expert section in the input is labelled like \`--- {Name} | VERDICT: Bullish | CONFIDENCE: 78% ---\`. The Signal column / signal pill MUST copy the VERDICT value verbatim (Bullish / Bearish / Neutral). The Confidence bar / value MUST copy the CONFIDENCE percentage verbatim. NEVER default every expert to "Neutral / 65%". NEVER re-infer the signal by re-reading the prose — the explicit VERDICT field is authoritative.**
-   - Points of Agreement: where experts converged
-   - Points of Contention: where experts disagreed and what data would resolve it
-   - Synthesis: how the debate shaped the final thesis
-8. Key Monitoring: monitor-list with current values and triggers
-9. Action Strategy: trade-box with entry/stop/target cards
+7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert's debate journey + core arguments. Include:
+   - **COVERAGE RULE — render an expert card for EVERY SINGLE expert that appears in the input. If the input has 6 experts, your output MUST have 6 expert cards. NEVER pick a subset, NEVER merge two experts into one card, NEVER skip an expert because their view "looks similar" to another's. The user wants to see every voice represented.**
+   - Expert cards: each expert with name, **strongest directional stance during debate** (bullish/bearish/neutral), confidence bar, and 2-3 sentence core argument (NOT 1 sentence — give each persona room to make their case).
+   - **HARD DATA RULE — the input organizes each expert under \`=== {Name} ===\` with a \`[Round N STRONGEST stance]\` block (verdict + confidence + reasoning) and a \`[Round M FINAL stance after debate]\` block. For the Signal column / signal pill use the STRONGEST stance VERDICT verbatim. For the Confidence bar use the STRONGEST stance CONFIDENCE verbatim. NEVER default every expert to "Neutral / 65%". NEVER re-infer the signal — the explicit VERDICT field is authoritative.**
+   - **NARRATIVE RULE — when the strongest and final stances differ, your prose MUST narrate the journey. Example pattern: "X's lens initially called this Bearish (Round 1), but conceded to Neutral after Y's argument about [specific data]." Don't just list opinions — show how minds moved.**
+   - Points of Agreement: where experts converged in the final round
+   - Points of Contention: where experts had divergent strongest stances; what data would have resolved it
+   - Synthesis: how the debate journey shaped the final consensus
+8. Key Monitoring: monitor-list with current values and triggers.
+   - **COVERAGE RULE — render a monitor-item for EVERY metric / indicator that appears in the input's "Key Monitoring Indicators" or equivalent section. NEVER pick a "top 3" or skip metrics you consider less important. The user is monitoring all of them.**
+9. Action Strategy: trade-box with entry/stop/target cards.
+   - **COVERAGE RULE — if the input describes a long-entry plan, a short-entry plan, AND a range-bound alternative, render all three as separate trade-box rows. Do NOT compress them into one summary box. Each plan should keep its full detail (entry condition + stop + target + position size) — these are the actionable instructions and must NOT be paraphrased away.**
 10. The report ENDS here after Action Strategy. Do NOT add a Related Questions section — the frontend renders that separately.
 
 === CRITICAL RULES ===
@@ -325,7 +329,7 @@ Lists:
 6. Canvas elements MUST have unique IDs.
 7. Use semantic colors in inline styles when needed: green (#3B6D11/#639922) for positive, red (#A32D2D/#E24B4A) for negative, blue (#378ADD/#185FA5) for neutral/info.
 8. For non-stock topics, adapt the template — skip stock-specific widgets, add relevant ones using the available classes.
-9. Keep the design minimal, data-dense, and professional. No decorative elements.
+9. Be data-dense AND comprehensive. When the input is rich (long markdown, multi-section, multi-expert debate), render every section the input contains — do NOT summarize for the sake of brevity. The Bloomberg/Apple aesthetic means dense and structured, not minimal. If the input has 6 experts, 7 monitoring metrics, and 3 trade strategies, your output MUST have 6 expert cards, 7 monitoring items, 3 trade-box rows. Token budget is 16K — use it.
 10. Do NOT use markdown syntax anywhere: no **bold**, no *italic*, no -- dashes for lists. All text must be plain HTML (<strong>, <em>, <ul>/<li>).
 11. Section titles and headings must be plain text inside HTML tags. Never wrap titles in ** asterisks.
 12. The report ends after Action Strategy / Key Monitoring. Do NOT add a Related Questions section, "Data Sources" footnote, or any extra text — the frontend renders those separately.
@@ -451,11 +455,18 @@ export async function runHtmlGeneration(params: RunHtmlGenerationParams): Promis
     : buildWebReportPrompt(userContent, contextString);
   const cssBlock = isGuru ? GURU_COUNCIL_CSS : WEB_REPORT_CSS;
 
+  // 16384 token output budget. The earlier 8192 cap was the main reason the
+  // HTML report looked "thin" next to the markdown Docs view: every Bloomberg-
+  // style template section (KPI / scenario / risks / experts / monitoring /
+  // strategy) ate into a small shared budget, so the LLM compressed expert
+  // debate down to 2 cards, monitoring down to 3 metrics, etc. Doubling the
+  // ceiling lets the structured panels carry roughly the same content density
+  // as the markdown report. DeepSeek-v3 / Claude both support 16K+ outputs.
   const htmlStream = await aiService.chatStream(
     [{ role: 'user', content: htmlPrompt }],
     'superagent',
     undefined,
-    8192,
+    16384,
   );
 
   // Parse OpenAI-style SSE stream → plain text
