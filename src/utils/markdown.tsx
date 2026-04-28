@@ -1298,6 +1298,89 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       i++;
       continue;
     }
+    // ── HTML5 <details><summary>…</summary>…</details> collapsible block ──
+    // The crypto-analysis prompt instructs the LLM to wrap raw tables / long
+    // detail in <details> so the headline report stays scannable. Our hand-
+    // written renderer doesn't process HTML, so without this branch the tags
+    // leak as literal text. We:
+    //   1. Capture everything from the opening <details ...> to the matching
+    //      </details> (supports nesting via a depth counter).
+    //   2. Extract the <summary>…</summary> as the disclosure label.
+    //   3. Recursively run the inner body through `renderMarkdownContent`
+    //      so embedded markdown (tables, lists, **bold**) still renders.
+    if (/<details(\s[^>]*)?>/i.test(line)) {
+      // Re-join the remaining text so a multi-line block is one searchable
+      // string. The LLM commonly puts <details><summary>…</summary> all on
+      // one line, then the body on subsequent lines, so per-line matching
+      // alone is not enough.
+      const remainder = lines.slice(i).join('\n');
+      const openMatch = remainder.match(/<details(\s[^>]*)?>/i);
+      if (openMatch && openMatch.index != null) {
+        const openIdx = openMatch.index;
+        // Walk forward tracking <details> depth so nested blocks pair correctly.
+        const tagRe = /<\/?details(\s[^>]*)?>/gi;
+        tagRe.lastIndex = openIdx;
+        let depth = 0;
+        let closeEnd = -1;
+        let m: RegExpExecArray | null;
+        while ((m = tagRe.exec(remainder)) !== null) {
+          if (m[0].startsWith('</')) {
+            depth--;
+            if (depth === 0) { closeEnd = m.index + m[0].length; break; }
+          } else {
+            depth++;
+          }
+        }
+        if (closeEnd > 0) {
+          const block = remainder.slice(openIdx, closeEnd);
+          const inside = block
+            .replace(/^<details(\s[^>]*)?>\s*/i, '')
+            .replace(/\s*<\/details>\s*$/i, '');
+          const summaryMatch = inside.match(/<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary>/i);
+          const summaryText = summaryMatch ? summaryMatch[1].trim() : 'Details';
+          const bodyText = summaryMatch
+            ? inside.replace(summaryMatch[0], '').replace(/^\s*\n+/, '')
+            : inside;
+
+          // Anything before <details> on the same chunk is a stray paragraph
+          // that should still render. Rare but possible.
+          const before = remainder.slice(0, openIdx).trim();
+          if (before) {
+            elements.push(
+              <p key={`pre-${i}`} className="text-[14px] text-gray-700 leading-[1.55] my-2.5">
+                {parseLine(before)}
+              </p>,
+            );
+          }
+          elements.push(
+            <details
+              key={`det-${i}`}
+              className="my-3 group rounded-lg border border-gray-200 bg-gray-50/40 [&[open]]:bg-white [&[open]]:shadow-[0_1px_3px_rgba(0,0,0,0.04)] transition-all"
+            >
+              <summary className="cursor-pointer select-none px-3.5 py-2 text-[13px] font-semibold text-gray-700 hover:text-gray-900 flex items-center gap-1.5 list-none [&::-webkit-details-marker]:hidden">
+                <svg className="w-3 h-3 text-gray-400 shrink-0 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+                </svg>
+                {parseLine(summaryText.replace(/\*\*/g, ''))}
+              </summary>
+              <div className="px-3.5 pb-3 pt-1 border-t border-gray-100">
+                {renderMarkdownContent(bodyText, msgIdx)}
+              </div>
+            </details>,
+          );
+
+          // Advance i past the line that contains the </details> by counting
+          // newlines we just consumed.
+          const consumed = remainder.slice(0, closeEnd);
+          const newlines = (consumed.match(/\n/g) || []).length;
+          i += newlines + 1;
+          continue;
+        }
+      }
+      // Open tag without matching close — fall through and let the line
+      // render via the normal paragraph path below (still imperfect, but
+      // better than swallowing the entire rest of the document).
+    }
     if (/^#{3}\s/.test(line)) {
       const hText = line.replace(/^#{3}\s/, '');
       const slugId = prefix + headingSlug(stripCitationsFromHeading(hText.replace(/\*\*/g, '')));

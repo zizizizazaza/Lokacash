@@ -341,119 +341,37 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
     //
     // We dedupe stable / wrapped names because they're noise on a
     // "what's hot" feed.
-    const STABLE_OR_WRAPPED = /^(USDT|USDC|DAI|TUSD|FDUSD|USDE|PYUSD|BUSD|USDD|FRAX|LUSD|GUSD|WBTC|WETH|STETH|WSTETH|WEETH|CBBTC|CBETH|RETH|TBTC)$/;
-
+    // All CoinGecko traffic is proxied through our own backend endpoint
+    // (`/api/skill/v1/crypto/pulse-trending`) — that endpoint runs the same
+    // dedupe / sparkline-resample / mover-interleave logic this component
+    // used to do client-side. Keeping it server-side means: (a) browsers
+    // that can't reach api.coingecko.com directly (e.g. China without a
+    // system proxy) still get live data, (b) we share the optional
+    // CoinGecko Pro key + 60s server-side cache across all visitors,
+    // (c) one less direct CG dependency on the frontend.
     const pullAll = async () => {
       try {
-        const [trendingRaw, gainersRaw, losersRaw] = await Promise.all([
-          fetch('https://api.coingecko.com/api/v3/search/trending', { cache: 'no-store' })
-            .then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
-          fetch(
-            'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=price_change_percentage_24h_desc&per_page=20&page=1&price_change_percentage=24h',
-            { cache: 'no-store' },
-          ).then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
-          fetch(
-            'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=price_change_percentage_24h_asc&per_page=20&page=1&price_change_percentage=24h',
-            { cache: 'no-store' },
-          ).then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
-        ]);
-        if (cancelled) return;
-
-        // ── Grid: trending hotlist ──
-        // /search/trending returns up to 15. We take the first 6
-        // (excluding stables; rare, but possible) and ask CoinGecko for
-        // sparklines + canonical icons in a follow-up call so the
-        // visual matches /coins/markets style.
-        const trendingItems: any[] = (trendingRaw?.coins || [])
-          .map((w: any) => w?.item)
-          .filter((it: any) => it && it.id);
-
-        const pickedIds: string[] = [];
-        const pickedItems: any[] = [];
-        for (const it of trendingItems) {
-          const sym = String(it.symbol || '').toUpperCase();
-          if (!sym || STABLE_OR_WRAPPED.test(sym)) continue;
-          pickedIds.push(it.id);
-          pickedItems.push(it);
-          if (pickedIds.length >= 6) break;
-        }
-
-        let sparklineMap: Record<string, { spark: number[]; price: number; chg: number; image: string; name: string }> = {};
-        if (pickedIds.length > 0) {
-          try {
-            const detailRes = await fetch(
-              `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${pickedIds.join(',')}&sparkline=true&price_change_percentage=24h`,
-              { cache: 'no-store' },
-            );
-            if (detailRes.ok) {
-              const detail = (await detailRes.json()) as any[];
-              for (const d of detail) {
-                sparklineMap[d.id] = {
-                  spark: resampleSpark(d.sparkline_in_7d?.price || [], 24),
-                  price: Number(d.current_price) || 0,
-                  chg: Number(d.price_change_percentage_24h) || 0,
-                  image: d.image || '',
-                  name: d.name || '',
-                };
-              }
-            }
-          } catch { /* sparkline is best-effort; we still have the trending row's price */ }
-        }
-
-        const nextCoins: PulseCoin[] = pickedItems
-          .map((it: any): PulseCoin => {
-            const detail = sparklineMap[it.id];
-            return {
-              sym: String(it.symbol || '').toUpperCase(),
-              name: detail?.name || it.name || '',
-              price: detail?.price || Number(it?.data?.price) || 0,
-              chg: detail?.chg ?? Number(it?.data?.price_change_percentage_24h?.usd) ?? 0,
-              spark: detail?.spark || [],
-              icon: detail?.image || it.thumb || it.small || it.large || '',
-            };
-          })
-          .filter((c) => c.sym && c.price > 0)
-          .slice(0, 6);
-
-        // ── Marquee: top movers (gainers + losers, interleaved) ──
-        // Pull 5 from each side, drop dust (price < $0.0001 to avoid
-        // wild meme-coin shitshow), interleave so the strip mixes
-        // green and red.
-        const formatMover = (x: any): { sym: string; chg: number; name: string } | null => {
-          const sym = String(x.symbol || '').toUpperCase();
-          const chg = Number(x.price_change_percentage_24h);
-          const price = Number(x.current_price);
-          const name = String(x.name || sym);
-          if (!sym || STABLE_OR_WRAPPED.test(sym) || !Number.isFinite(chg) || chg === 0) return null;
-          if (!Number.isFinite(price) || price < 0.0001) return null;
-          return { sym, chg, name };
+        const r = await fetch('/api/skill/v1/crypto/pulse-trending', { cache: 'no-store' });
+        if (!r.ok) throw new Error(`pulse-trending HTTP ${r.status}`);
+        const body = (await r.json()) as {
+          ok?: boolean;
+          data?: { coins?: PulseCoin[]; trending?: { sym: string; chg: number; name: string }[]; asOf?: number };
         };
-        const gainers = (gainersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number; name: string }[];
-        const losers = (losersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number; name: string }[];
-        const interleaved: { sym: string; chg: number; name: string }[] = [];
-        for (let i = 0; i < 12; i++) {
-          if (gainers[i]) interleaved.push(gainers[i]);
-          if (losers[i]) interleaved.push(losers[i]);
-        }
-        // Dedup by symbol so the strip doesn't show e.g. BTC twice when
-        // the same coin appears in both halves of the underlying API call.
-        const seenSym = new Set<string>();
-        const nextTrending = interleaved.filter((m) => {
-          if (seenSym.has(m.sym)) return false;
-          seenSym.add(m.sym);
-          return true;
-        }).slice(0, 20);
-
         if (cancelled) return;
+        const nextCoins = Array.isArray(body?.data?.coins) ? body.data.coins : [];
+        const nextTrending = Array.isArray(body?.data?.trending) ? body.data.trending : [];
+
         if (nextCoins.length) setCoins(nextCoins);
         if (nextTrending.length) setTrending(nextTrending);
         writePulseCache({
           coins: nextCoins.length ? nextCoins : coins,
           trending: nextTrending.length ? nextTrending : trending,
         });
-        setUpdatedAt(Date.now());
+        // Use the backend's asOf when available so refresh time matches the
+        // server cache; fall back to client clock if the field is missing.
+        setUpdatedAt(typeof body?.data?.asOf === 'number' ? body.data.asOf : Date.now());
       } catch {
-        /* keep last good values */
+        /* keep last good values, leave updatedAt alone so the UI shows the prior timestamp */
       }
     };
 

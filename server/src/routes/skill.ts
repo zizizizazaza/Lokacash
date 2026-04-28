@@ -509,6 +509,180 @@ router.get('/v1/crypto/pulse-meta', async (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /skill/v1/crypto/pulse-trending
+ *
+ * Web3 home banner data — trending hotlist (6 cards with sparklines) +
+ * 24h gainers/losers strip. Previously the frontend fetched these three
+ * CoinGecko endpoints directly from the browser, which fails in markets
+ * where the browser cannot reach api.coingecko.com (China / corporate
+ * networks). Server-side we already have HTTPS_PROXY support and an
+ * optional Pro API key, so this proxy gives every browser the same data.
+ *
+ * Cached 60s server-side. The header label updates each cache miss.
+ */
+const CG_PUBLIC_REST = 'https://api.coingecko.com/api/v3';
+const CG_PRO_REST = 'https://pro-api.coingecko.com/api/v3';
+function pulseTrendingCgHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  const pro = (process.env.COINGECKO_PRO_API_KEY || '').trim();
+  const demo = (process.env.COINGECKO_DEMO_API_KEY || '').trim();
+  if (pro) headers['x-cg-pro-api-key'] = pro;
+  else if (demo) headers['x-cg-demo-api-key'] = demo;
+  return headers;
+}
+function pulseTrendingCgBase(): string {
+  return (process.env.COINGECKO_PRO_API_KEY || '').trim() ? CG_PRO_REST : CG_PUBLIC_REST;
+}
+
+const STABLE_OR_WRAPPED = /^(USDT|USDC|DAI|TUSD|FDUSD|USDE|PYUSD|BUSD|USDD|FRAX|LUSD|GUSD|WBTC|WETH|STETH|WSTETH|WEETH|CBBTC|CBETH|RETH|TBTC)$/;
+
+type PulseTrendingCoin = {
+  sym: string;
+  name: string;
+  price: number;
+  chg: number;
+  spark: number[];
+  icon: string;
+};
+type PulseTrendingMover = { sym: string; chg: number; name: string };
+type PulseTrending = {
+  coins: PulseTrendingCoin[];
+  trending: PulseTrendingMover[];
+  asOf: number;
+};
+
+let pulseTrendingCache: PulseTrending | null = null;
+let pulseTrendingCachedAt = 0;
+const PULSE_TRENDING_TTL_MS = 60_000;
+
+// Down-sample a 7d hourly sparkline (~168 points) to ~24 points for a
+// compact mini-chart. Mirrors the resampleSpark helper on the frontend.
+function resampleSpark(prices: number[], target = 24): number[] {
+  if (!Array.isArray(prices) || prices.length === 0) return [];
+  if (prices.length <= target) return prices.slice();
+  const step = prices.length / target;
+  const out: number[] = [];
+  for (let i = 0; i < target; i++) out.push(prices[Math.min(prices.length - 1, Math.floor(i * step))]);
+  return out;
+}
+
+async function fetchPulseTrendingBundle(): Promise<PulseTrending> {
+  const base = pulseTrendingCgBase();
+  const headers = pulseTrendingCgHeaders();
+
+  const [trendingRaw, gainersRaw, losersRaw] = await Promise.all([
+    fetch(`${base}/search/trending`, { headers, signal: AbortSignal.timeout(8_000) })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`trending HTTP ${r.status}`)))),
+    fetch(
+      `${base}/coins/markets?vs_currency=usd&order=price_change_percentage_24h_desc&per_page=20&page=1&price_change_percentage=24h`,
+      { headers, signal: AbortSignal.timeout(8_000) },
+    ).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`gainers HTTP ${r.status}`)))),
+    fetch(
+      `${base}/coins/markets?vs_currency=usd&order=price_change_percentage_24h_asc&per_page=20&page=1&price_change_percentage=24h`,
+      { headers, signal: AbortSignal.timeout(8_000) },
+    ).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`losers HTTP ${r.status}`)))),
+  ]);
+
+  // ── Hotlist: take first 6 non-stable coins from /search/trending,
+  //    then re-fetch their detail with sparkline=true to render mini-charts.
+  const trendingItems: any[] = (trendingRaw?.coins || [])
+    .map((w: any) => w?.item)
+    .filter((it: any) => it && it.id);
+  const pickedIds: string[] = [];
+  const pickedItems: any[] = [];
+  for (const it of trendingItems) {
+    const sym = String(it.symbol || '').toUpperCase();
+    if (!sym || STABLE_OR_WRAPPED.test(sym)) continue;
+    pickedIds.push(it.id);
+    pickedItems.push(it);
+    if (pickedIds.length >= 6) break;
+  }
+  let sparklineMap: Record<string, { spark: number[]; price: number; chg: number; image: string; name: string }> = {};
+  if (pickedIds.length > 0) {
+    try {
+      const detailRes = await fetch(
+        `${base}/coins/markets?vs_currency=usd&ids=${pickedIds.join(',')}&sparkline=true&price_change_percentage=24h`,
+        { headers, signal: AbortSignal.timeout(8_000) },
+      );
+      if (detailRes.ok) {
+        const detail = (await detailRes.json()) as any[];
+        for (const d of detail) {
+          sparklineMap[d.id] = {
+            spark: resampleSpark(d.sparkline_in_7d?.price || [], 24),
+            price: Number(d.current_price) || 0,
+            chg: Number(d.price_change_percentage_24h) || 0,
+            image: d.image || '',
+            name: d.name || '',
+          };
+        }
+      }
+    } catch {
+      /* sparkline best-effort; trending row already has price */
+    }
+  }
+  const coins: PulseTrendingCoin[] = pickedItems
+    .map((it: any): PulseTrendingCoin => {
+      const detail = sparklineMap[it.id];
+      return {
+        sym: String(it.symbol || '').toUpperCase(),
+        name: detail?.name || it.name || '',
+        price: detail?.price || Number(it?.data?.price) || 0,
+        chg: detail?.chg ?? Number(it?.data?.price_change_percentage_24h?.usd) ?? 0,
+        spark: detail?.spark || [],
+        icon: detail?.image || it.thumb || it.small || it.large || '',
+      };
+    })
+    .filter((c) => c.sym && c.price > 0)
+    .slice(0, 6);
+
+  // ── Marquee: top movers (gainers + losers, interleaved) ──
+  const formatMover = (x: any): PulseTrendingMover | null => {
+    const sym = String(x.symbol || '').toUpperCase();
+    const chg = Number(x.price_change_percentage_24h);
+    const price = Number(x.current_price);
+    const name = String(x.name || sym);
+    if (!sym || STABLE_OR_WRAPPED.test(sym) || !Number.isFinite(chg) || chg === 0) return null;
+    if (!Number.isFinite(price) || price < 0.0001) return null;
+    return { sym, chg, name };
+  };
+  const gainers = (gainersRaw as any[]).map(formatMover).filter(Boolean) as PulseTrendingMover[];
+  const losers = (losersRaw as any[]).map(formatMover).filter(Boolean) as PulseTrendingMover[];
+  const interleaved: PulseTrendingMover[] = [];
+  for (let i = 0; i < 12; i++) {
+    if (gainers[i]) interleaved.push(gainers[i]);
+    if (losers[i]) interleaved.push(losers[i]);
+  }
+  const seen = new Set<string>();
+  const trending = interleaved.filter((m) => {
+    if (seen.has(m.sym)) return false;
+    seen.add(m.sym);
+    return true;
+  }).slice(0, 20);
+
+  return { coins, trending, asOf: Date.now() };
+}
+
+router.get('/v1/crypto/pulse-trending', async (_req: Request, res: Response) => {
+  const now = Date.now();
+  if (pulseTrendingCache && now - pulseTrendingCachedAt < PULSE_TRENDING_TTL_MS) {
+    return res.json({ ok: true, data: pulseTrendingCache, cached: true });
+  }
+  try {
+    const data = await fetchPulseTrendingBundle();
+    pulseTrendingCache = data;
+    pulseTrendingCachedAt = now;
+    res.json({ ok: true, data, cached: false });
+  } catch (err) {
+    // If we have a stale cache, serve it instead of failing the UI completely.
+    if (pulseTrendingCache) {
+      console.warn('[pulse-trending] upstream failed, serving stale:', (err as Error).message);
+      return res.json({ ok: true, data: pulseTrendingCache, cached: true, stale: true });
+    }
+    return errorResponse(res, 502, 'pulse_trending_failed', (err as Error).message);
+  }
+});
+
+/**
  * GET /skill/v1/info
  * Self-describing endpoint for skill discovery.
  */

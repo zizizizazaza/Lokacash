@@ -1653,7 +1653,7 @@ async function runAgentLoop(query: string): Promise<Web3CliResult> {
   if (resolvedId) {
     try {
       const detail = await fetchCoinDetail(resolvedId);
-      tokenSnapshot = buildTokenSnapshot(detail, getCachedSpotRow(resolvedId));
+      tokenSnapshot = buildTokenSnapshot(detail, getCachedSpotRow(resolvedId) ?? undefined);
     } catch {
       /* best-effort */
     }

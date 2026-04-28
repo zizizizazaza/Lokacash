@@ -4129,7 +4129,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             if (data.sessionId !== sessionId) return;
             setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
-            setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
+            // Note: we deliberately do NOT auto-switch the view mode to 'web' here.
+            // Auto-jumping the user from the markdown answer they're reading into
+            // the HTML report card is jarring and loses their place. The default
+            // is 'docs', and the Docs/Web toggle in the actions bar lets the user
+            // opt in when they want the Bloomberg-style HTML view.
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
@@ -4540,7 +4544,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 }
                                 if (meta.htmlReport) {
                                     restoredHtml[idx] = meta.htmlReport;
-                                    restoredViewModes[idx] = 'web';
+                                    // Deliberately do NOT default the view mode to 'web' on history
+                                    // restore. Older sessions persist `htmlReport` in metadata
+                                    // regardless of which tab the user last looked at, and
+                                    // auto-jumping every restored message into the HTML card hides
+                                    // the markdown answer they actually came back to read. Default
+                                    // is 'docs' (set by the useState initializer); they can opt
+                                    // into the HTML view via the Docs/Web toggle when they want it.
                                 }
                             } catch {
                                 /* ignore */
@@ -5450,6 +5460,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                     </a>
                                                                 );
                                                             })()}
+                                                            {/* Crypto token card (Web3 queries) — live CoinGecko snapshot.
+                                                                Rendered FIRST so the reader sees the token-identity lens (logo /
+                                                                project name / FDV / supply / socials / exchanges) before the
+                                                                trader-oriented Market Signals panel below. */}
+                                                            {tokenCards[i] && <TokenCard token={tokenCards[i]} lang={/[一-鿿]/.test(msg.content || '') ? 'zh' : 'en'} />}
                                                             {/* OKX standalone fallback when no QuoteCard renders — reuses the same
                                                                 OkxQuoteDerivatives + OkxQuoteNews as the merged path, wrapped in a
                                                                 header. Surfaces derivatives AND news, bilingual label. */}
@@ -5478,8 +5493,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                     </div>
                                                                 );
                                                             })()}
-                                                            {/* Crypto token card (Web3 queries) \u2014 live CoinGecko snapshot */}
-                                                            {tokenCards[i] && <TokenCard token={tokenCards[i]} lang={/[\u4e00-\u9fff]/.test(msg.content || '') ? 'zh' : 'en'} />}
                                                             {showWebView ? (
                                                                 <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
                                                             ) : showWebSkeleton ? (
