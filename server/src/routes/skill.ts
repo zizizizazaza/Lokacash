@@ -570,18 +570,37 @@ async function fetchPulseTrendingBundle(): Promise<PulseTrending> {
   const base = pulseTrendingCgBase();
   const headers = pulseTrendingCgHeaders();
 
-  const [trendingRaw, gainersRaw, losersRaw] = await Promise.all([
-    fetch(`${base}/search/trending`, { headers, signal: AbortSignal.timeout(8_000) })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`trending HTTP ${r.status}`)))),
-    fetch(
-      `${base}/coins/markets?vs_currency=usd&order=price_change_percentage_24h_desc&per_page=20&page=1&price_change_percentage=24h`,
-      { headers, signal: AbortSignal.timeout(8_000) },
-    ).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`gainers HTTP ${r.status}`)))),
-    fetch(
-      `${base}/coins/markets?vs_currency=usd&order=price_change_percentage_24h_asc&per_page=20&page=1&price_change_percentage=24h`,
-      { headers, signal: AbortSignal.timeout(8_000) },
-    ).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`losers HTTP ${r.status}`)))),
-  ]);
+  // CoinGecko response shapes — minimal typing so TS lets us read the
+  // fields we actually use without `any` everywhere downstream.
+  type CgTrendingResponse = { coins?: Array<{ item?: any }> };
+  type CgMarketRow = {
+    id?: string; symbol?: string; name?: string;
+    current_price?: number; price_change_percentage_24h?: number;
+    image?: string; sparkline_in_7d?: { price?: number[] };
+  };
+
+  // `Promise.all` mixed-tuple inference fights us here, so cast each
+  // response individually and let destructure types fall out naturally.
+  const trendingPromise = fetch(`${base}/search/trending`, { headers, signal: AbortSignal.timeout(8_000) })
+    .then(async (r): Promise<CgTrendingResponse> => {
+      if (!r.ok) throw new Error(`trending HTTP ${r.status}`);
+      return (await r.json()) as CgTrendingResponse;
+    });
+  const gainersPromise = fetch(
+    `${base}/coins/markets?vs_currency=usd&order=price_change_percentage_24h_desc&per_page=20&page=1&price_change_percentage=24h`,
+    { headers, signal: AbortSignal.timeout(8_000) },
+  ).then(async (r): Promise<CgMarketRow[]> => {
+    if (!r.ok) throw new Error(`gainers HTTP ${r.status}`);
+    return (await r.json()) as CgMarketRow[];
+  });
+  const losersPromise = fetch(
+    `${base}/coins/markets?vs_currency=usd&order=price_change_percentage_24h_asc&per_page=20&page=1&price_change_percentage=24h`,
+    { headers, signal: AbortSignal.timeout(8_000) },
+  ).then(async (r): Promise<CgMarketRow[]> => {
+    if (!r.ok) throw new Error(`losers HTTP ${r.status}`);
+    return (await r.json()) as CgMarketRow[];
+  });
+  const [trendingRaw, gainersRaw, losersRaw] = await Promise.all([trendingPromise, gainersPromise, losersPromise]);
 
   // ── Hotlist: take first 6 non-stable coins from /search/trending,
   //    then re-fetch their detail with sparkline=true to render mini-charts.
