@@ -8,7 +8,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, extractHeadings, SourcesProvider } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, TokenCard, type TokenSnapshotData, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 import { I } from './Icons';
@@ -3416,6 +3416,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
     // X profile cards keyed by message index
     const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }>>({});
+    // Token snapshot cards keyed by message index (live CoinGecko data injected via agent:chat:token)
+    const [tokenCards, setTokenCards] = useState<Record<number, TokenSnapshotData>>({});
     const currentConsensus = (() => {
         // First try the active message's consensus
         if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
@@ -4116,6 +4118,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
         };
 
+        const onToken = (data: { sessionId: string; token: TokenSnapshotData }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0 || !data.token?.id) return;
+            setTokenCards(prev => ({ ...prev, [msgIdx]: data.token }));
+        };
+
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
             setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
@@ -4141,6 +4150,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
         socket.on('agent:chat:quote', onQuote);
+        socket.on('agent:chat:token', onToken);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
         // New Roundtable persona events (log-only in Stage 4)
@@ -4163,6 +4173,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
             socket.off('agent:chat:quote', onQuote);
+            socket.off('agent:chat:token', onToken);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
             socket.off('agent:chat:analysts_selected', onAnalystsSelected);
@@ -4491,6 +4502,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
+                    const restoredTokens: Record<number, TokenSnapshotData> = {};
                     const restoredHtml: Record<number, string> = {};
                     const restoredViewModes: Record<number, 'docs' | 'web'> = {};
                     let hasRoundtableHistory = false;
@@ -4498,7 +4510,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; tokenCard?: TokenSnapshotData; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
                                     if (isRt) {
@@ -4522,6 +4534,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 }
                                 if (meta.quoteCard) {
                                     restoredQuotes[idx] = meta.quoteCard;
+                                }
+                                if (meta.tokenCard && meta.tokenCard.id) {
+                                    restoredTokens[idx] = meta.tokenCard;
                                 }
                                 if (meta.htmlReport) {
                                     restoredHtml[idx] = meta.htmlReport;
@@ -4572,6 +4587,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     }
                     if (Object.keys(restoredQuotes).length > 0) {
                         setQuoteCards(prev => ({ ...prev, ...restoredQuotes }));
+                    }
+                    if (Object.keys(restoredTokens).length > 0) {
+                        setTokenCards(prev => ({ ...prev, ...restoredTokens }));
                     }
                     if (Object.keys(restoredHtml).length > 0) {
                         setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
@@ -5460,6 +5478,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                     </div>
                                                                 );
                                                             })()}
+                                                            {/* Crypto token card (Web3 queries) \u2014 live CoinGecko snapshot */}
+                                                            {tokenCards[i] && <TokenCard token={tokenCards[i]} lang={/[\u4e00-\u9fff]/.test(msg.content || '') ? 'zh' : 'en'} />}
                                                             {showWebView ? (
                                                                 <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
                                                             ) : showWebSkeleton ? (

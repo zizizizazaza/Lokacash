@@ -383,6 +383,132 @@ router.get('/v1/stock/analysis/:ticker', async (req: Request, res: Response) => 
 // ════════════════════════════════════════════════════════════════════
 
 /**
+ * GET /skill/v1/crypto/pulse-meta
+ *
+ * Live "vibe" metrics for the home banner — Fear & Greed index +
+ * Ethereum gas price. Cached server-side for 30s so a refresh storm
+ * from many tabs doesn't pound the upstream APIs.
+ *
+ * Sources (no API key needed):
+ *   - alternative.me  → Crypto Fear & Greed Index
+ *   - ethgas.watch    → ETH gas oracle (fast/standard/slow gwei)
+ *
+ * Both are free, public, and well-known. We swallow individual
+ * failures so a flaky upstream just leaves that field null instead
+ * of breaking the whole banner.
+ */
+type PulseMeta = {
+  fearGreed: { value: number; label: string; updatedAt: number } | null;
+  ethGas: { fastGwei: number; standardGwei: number; slowGwei: number; updatedAt: number } | null;
+  asOf: number;
+};
+let pulseMetaCache: PulseMeta | null = null;
+let pulseMetaCachedAt = 0;
+const PULSE_META_TTL_MS = 30_000;
+
+async function fetchFearGreed(): Promise<PulseMeta['fearGreed']> {
+  try {
+    const r = await fetch('https://api.alternative.me/fng/?limit=1', {
+      signal: AbortSignal.timeout(5_000),
+      headers: { Accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const j = (await r.json()) as { data?: Array<{ value: string; value_classification: string; timestamp: string }> };
+    const item = j?.data?.[0];
+    if (!item) return null;
+    const v = Number(item.value);
+    if (!Number.isFinite(v)) return null;
+    return {
+      value: Math.round(v),
+      label: item.value_classification || '',
+      updatedAt: Number(item.timestamp) ? Number(item.timestamp) * 1000 : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchEthGas(): Promise<PulseMeta['ethGas']> {
+  // Strategy: try Blocknative's free public block-prices endpoint first
+  // (no API key, returns confidence-tiered estimates), then fall back to
+  // ethgas.watch. Most public eth_gasPrice RPCs are now gated behind keys.
+  try {
+    const r = await fetch('https://api.blocknative.com/gasprices/blockprices', {
+      signal: AbortSignal.timeout(5_000),
+      headers: { Accept: 'application/json' },
+    });
+    if (r.ok) {
+      const j = (await r.json()) as {
+        blockPrices?: Array<{
+          baseFeePerGas?: number;
+          estimatedPrices?: Array<{ confidence?: number; price?: number }>;
+        }>;
+      };
+      const prices = j?.blockPrices?.[0]?.estimatedPrices;
+      if (Array.isArray(prices) && prices.length > 0) {
+        const byConfidence = (c: number) => prices.find((p) => p.confidence === c)?.price;
+        // Confidence 99 = fast (most likely to be included next block).
+        // 90 = standard. 70 = slow / cost-saving.
+        const fast = Number(byConfidence(99) ?? prices[0]?.price);
+        const standard = Number(byConfidence(90) ?? byConfidence(95) ?? prices[1]?.price ?? fast);
+        const slow = Number(byConfidence(70) ?? prices[prices.length - 1]?.price ?? standard);
+        if ([fast, standard, slow].every((v) => Number.isFinite(v) && v > 0)) {
+          return {
+            fastGwei: Math.max(1, Math.round(fast)),
+            standardGwei: Math.max(1, Math.round(standard)),
+            slowGwei: Math.max(1, Math.round(slow)),
+            updatedAt: Date.now(),
+          };
+        }
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+
+  // Fallback: ethgas.watch (occasionally flaky but fine when up).
+  try {
+    const r = await fetch('https://www.ethgas.watch/api/gas', {
+      signal: AbortSignal.timeout(4_000),
+      headers: { Accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const j = (await r.json()) as {
+      fast?: { gwei?: number };
+      normal?: { gwei?: number };
+      slow?: { gwei?: number };
+    };
+    const fast = Number(j?.fast?.gwei);
+    const normal = Number(j?.normal?.gwei);
+    const slow = Number(j?.slow?.gwei);
+    if (![fast, normal, slow].every(Number.isFinite)) return null;
+    return {
+      fastGwei: Math.round(fast),
+      standardGwei: Math.round(normal),
+      slowGwei: Math.round(slow),
+      updatedAt: Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+router.get('/v1/crypto/pulse-meta', async (_req: Request, res: Response) => {
+  const now = Date.now();
+  if (pulseMetaCache && now - pulseMetaCachedAt < PULSE_META_TTL_MS) {
+    return res.json({ ok: true, data: pulseMetaCache, cached: true });
+  }
+  try {
+    const [fearGreed, ethGas] = await Promise.all([fetchFearGreed(), fetchEthGas()]);
+    pulseMetaCache = { fearGreed, ethGas, asOf: now };
+    pulseMetaCachedAt = now;
+    res.json({ ok: true, data: pulseMetaCache, cached: false });
+  } catch (err) {
+    return errorResponse(res, 500, 'pulse_meta_failed', (err as Error).message);
+  }
+});
+
+/**
  * GET /skill/v1/info
  * Self-describing endpoint for skill discovery.
  */

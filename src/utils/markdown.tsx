@@ -543,6 +543,342 @@ export function QuoteCard({
   );
 }
 
+// ─── Token Snapshot Card (crypto) ───────────────────────────────
+
+export interface TokenSnapshotData {
+  id: string;
+  symbol: string;
+  name: string;
+  imageUrl?: string;
+  rank?: number;
+  categories?: string[];
+  description?: string;
+  homepage?: string;
+  whitepaper?: string;
+  twitter?: string;
+  telegram?: string;
+  reddit?: string;
+  github?: string;
+  contract?: { chain: string; address: string };
+  market: {
+    priceUsd?: number;
+    change24hPct?: number;
+    change7dPct?: number;
+    change30dPct?: number;
+    change1yPct?: number;
+    marketCapUsd?: number;
+    fdvUsd?: number;
+    fdvOverMcap?: number;
+    volume24hUsd?: number;
+    high24hUsd?: number;
+    low24hUsd?: number;
+    athUsd?: number;
+    athChangePct?: number;
+    athDate?: string;
+    atlUsd?: number;
+    atlChangePct?: number;
+    atlDate?: string;
+    circulatingSupply?: number;
+    totalSupply?: number;
+    maxSupply?: number;
+    circulatingPctOfMax?: number;
+  };
+  community: {
+    twitterFollowers?: number;
+    redditSubscribers?: number;
+    telegramUsers?: number;
+    sentimentUpPct?: number;
+    sentimentDownPct?: number;
+  };
+  developer: {
+    githubStars?: number;
+    githubForks?: number;
+    commits4w?: number;
+    contributors?: number;
+    pullRequestsMerged?: number;
+    issuesOpenPct?: number;
+  };
+  topExchanges?: Array<{
+    name: string;
+    pair: string;
+    volumeUsd?: number;
+    trustScore?: string;
+    spreadPct?: number;
+  }>;
+}
+
+function fmtUsdCompact(v?: number): string | undefined {
+  if (v == null || !Number.isFinite(v)) return undefined;
+  const a = Math.abs(v);
+  if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+  if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `$${(v / 1e3).toFixed(2)}K`;
+  return `$${v.toFixed(2)}`;
+}
+
+function fmtCount(v?: number): string | undefined {
+  if (v == null || !Number.isFinite(v)) return undefined;
+  const a = Math.abs(v);
+  if (a >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+  return String(Math.round(v));
+}
+
+function fmtPriceUsd(v?: number): string | undefined {
+  if (v == null || !Number.isFinite(v)) return undefined;
+  const a = Math.abs(v);
+  if (a >= 1000) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  if (a >= 1) return `$${v.toFixed(3)}`;
+  if (a >= 0.01) return `$${v.toFixed(4)}`;
+  return `$${v.toPrecision(3)}`;
+}
+
+function fmtPct(v?: number): string | undefined {
+  if (v == null || !Number.isFinite(v)) return undefined;
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+}
+
+function pctColor(v?: number): string {
+  if (v == null) return 'text-gray-500';
+  if (v > 0) return 'text-emerald-600';
+  if (v < 0) return 'text-red-500';
+  return 'text-gray-500';
+}
+
+const TWITTER_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+);
+const GITHUB_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.92.58.1.79-.25.79-.56 0-.27-.01-1.16-.02-2.1-3.2.7-3.88-1.36-3.88-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11 11 0 015.78 0c2.21-1.5 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.27 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.56C20.21 21.39 23.5 17.07 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+);
+const LINK_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 7h3a5 5 0 010 10h-3M10 17H7A5 5 0 017 7h3M8 12h8"/></svg>
+);
+const DOC_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z M14 2v6h6 M9 13h6 M9 17h6 M9 9h2"/></svg>
+);
+const TG_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.7L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>
+);
+const REDDIT_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M22 12c0-1.1-.9-2-2-2-.5 0-1 .2-1.4.6C16.9 9.4 14.5 8.6 12 8.5l1-4.5 3.1.7c0 .8.7 1.5 1.5 1.5s1.5-.7 1.5-1.5S18.4 3 17.6 3c-.6 0-1 .3-1.3.8l-3.5-.8c-.2 0-.4.1-.4.3l-1.1 5.1C8.7 8.6 6.3 9.4 4.4 10.6 4 10.2 3.5 10 3 10c-1.1 0-2 .9-2 2 0 .8.5 1.5 1.2 1.8-.1.4-.1.7-.1 1.1 0 3.6 4 6.6 9 6.6s9-3 9-6.6c0-.4 0-.8-.1-1.1.7-.3 1.2-1 1.2-1.8M7 13.5c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5S9.3 15 8.5 15 7 14.3 7 13.5m8.5 4.6c-1 .6-2.3.9-3.5.9s-2.5-.3-3.5-.9c-.2-.1-.2-.4-.1-.5.1-.2.4-.2.5-.1.8.5 1.9.7 3.1.7s2.3-.2 3.1-.7c.2-.1.4-.1.5.1.1.1.1.4-.1.5m.1-3.1c-.8 0-1.5-.7-1.5-1.5s.7-1.5 1.5-1.5 1.5.7 1.5 1.5-.7 1.5-1.5 1.5z"/></svg>
+);
+
+function ExtLink({ href, icon, label, title }: { href: string; icon: React.ReactNode; label?: string; title: string }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={title}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10.5px] font-medium text-gray-500 bg-gray-50 hover:bg-gray-100 hover:text-gray-700 border border-gray-200/60 transition"
+    >
+      {icon}
+      {label && <span className="leading-none">{label}</span>}
+    </a>
+  );
+}
+
+function StatBlock({ label, value, hint, color }: { label: string; value?: string; hint?: string; color?: string }) {
+  if (!value) return null;
+  return (
+    <div className="min-w-0">
+      <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{label}</p>
+      <p className={`text-[13px] font-semibold tabular-nums truncate leading-none ${color || 'text-gray-800'}`}>{value}</p>
+      {hint && <p className="text-[9.5px] text-gray-400 mt-0.5 truncate leading-none">{hint}</p>}
+    </div>
+  );
+}
+
+/** Renders a crypto token card from a TokenSnapshot. */
+export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: string }) {
+  const isZh = (lang || 'zh') === 'zh';
+  const L = isZh
+    ? {
+        rank: '排名', mcap: '市值', fdv: 'FDV', fdvMcap: 'FDV/MC', vol24: '24h 量', high24: '24h 高', low24: '24h 低',
+        ch24: '24h', ch7: '7d', ch30: '30d', ch1y: '1y',
+        circ: '流通', total: '总量', max: '上限', circPct: '流通%',
+        ath: '历史最高', atl: '历史最低',
+        twitter: '推特', reddit: 'Reddit', telegram: 'TG', github: 'GitHub',
+        commits4w: '4周提交', stars: 'Stars', forks: 'Forks', contributors: '贡献者',
+        sentimentUp: '看涨投票', sentimentDown: '看跌投票',
+        topExch: '主要交易所',
+        details: '详细数据',
+      }
+    : {
+        rank: 'Rank', mcap: 'Mkt Cap', fdv: 'FDV', fdvMcap: 'FDV/MC', vol24: '24h Vol', high24: '24h High', low24: '24h Low',
+        ch24: '24h', ch7: '7d', ch30: '30d', ch1y: '1y',
+        circ: 'Circ', total: 'Total', max: 'Max', circPct: 'Circ %',
+        ath: 'ATH', atl: 'ATL',
+        twitter: 'Twitter', reddit: 'Reddit', telegram: 'TG', github: 'GitHub',
+        commits4w: '4w commits', stars: 'Stars', forks: 'Forks', contributors: 'Contributors',
+        sentimentUp: 'Bullish votes', sentimentDown: 'Bearish votes',
+        topExch: 'Top exchanges',
+        details: 'Show details',
+      };
+
+  const m = token.market;
+  const c = token.community;
+  const d = token.developer;
+
+  const ch24 = m.change24hPct;
+  const isUp = ch24 != null && ch24 > 0;
+  const isDown = ch24 != null && ch24 < 0;
+
+  const cardBg = isUp
+    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
+    : isDown
+    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
+    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
+  const changeBg = isUp
+    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20 text-emerald-600'
+    : isDown
+    ? 'bg-red-500/8 ring-1 ring-red-500/20 text-red-500'
+    : 'bg-gray-100 ring-1 ring-gray-200/60 text-gray-500';
+
+  // Row 1: market basics
+  const row1: { label: string; value?: string; hint?: string; color?: string }[] = [
+    { label: L.mcap, value: fmtUsdCompact(m.marketCapUsd), hint: token.rank ? `#${token.rank}` : undefined },
+    { label: L.fdv, value: fmtUsdCompact(m.fdvUsd), hint: m.fdvOverMcap ? `${L.fdvMcap} ${m.fdvOverMcap.toFixed(2)}×` : undefined },
+    { label: L.vol24, value: fmtUsdCompact(m.volume24hUsd) },
+    { label: L.high24, value: fmtPriceUsd(m.high24hUsd) },
+    { label: L.low24, value: fmtPriceUsd(m.low24hUsd) },
+  ];
+
+  // Row 2: returns + supply pressure
+  const row2: { label: string; value?: string; hint?: string; color?: string }[] = [
+    { label: L.ch7, value: fmtPct(m.change7dPct), color: pctColor(m.change7dPct) },
+    { label: L.ch30, value: fmtPct(m.change30dPct), color: pctColor(m.change30dPct) },
+    { label: L.ch1y, value: fmtPct(m.change1yPct), color: pctColor(m.change1yPct) },
+    {
+      label: L.circ,
+      value: fmtCount(m.circulatingSupply),
+      hint: m.circulatingPctOfMax != null ? `${m.circulatingPctOfMax.toFixed(1)}% ${L.max}` : (m.maxSupply ? `/ ${fmtCount(m.maxSupply)}` : undefined),
+    },
+    {
+      label: L.ath,
+      value: fmtPriceUsd(m.athUsd),
+      hint: m.athChangePct != null ? fmtPct(m.athChangePct) : undefined,
+      color: 'text-gray-700',
+    },
+  ];
+
+  // Row 3: community + developer
+  const row3: { label: string; value?: string; hint?: string; color?: string }[] = [
+    { label: L.twitter, value: fmtCount(c.twitterFollowers) },
+    { label: L.reddit, value: fmtCount(c.redditSubscribers) },
+    { label: L.telegram, value: fmtCount(c.telegramUsers) },
+    { label: L.commits4w, value: d.commits4w != null ? String(d.commits4w) : undefined, hint: d.contributors != null ? `${d.contributors} ${L.contributors}` : undefined },
+    { label: L.stars, value: fmtCount(d.githubStars), hint: d.githubForks != null ? `${fmtCount(d.githubForks)} ${L.forks}` : undefined },
+  ];
+
+  const hasAnyRow1 = row1.some((s) => s.value);
+  const hasAnyRow2 = row2.some((s) => s.value);
+  const hasAnyRow3 = row3.some((s) => s.value);
+
+  const topEx = (token.topExchanges || []).slice(0, 5);
+
+  return (
+    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
+        <div className="min-w-0 flex items-start gap-3">
+          {token.imageUrl && (
+            <img
+              src={token.imageUrl}
+              alt={token.symbol}
+              className="w-10 h-10 rounded-full ring-1 ring-black/[0.06] shrink-0 mt-0.5"
+              loading="lazy"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+          )}
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{token.symbol}</span>
+              {token.rank != null && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-600 tracking-wide">#{token.rank}</span>
+              )}
+              {(token.categories || []).slice(0, 2).map((cat) => (
+                <span key={cat} className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-500/8 text-gray-600 tracking-wide truncate max-w-[10rem]">{cat}</span>
+              ))}
+            </div>
+            <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide truncate max-w-[20rem]">{token.name}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {token.homepage && <ExtLink href={token.homepage} icon={LINK_ICON} title={token.homepage} />}
+              {token.whitepaper && <ExtLink href={token.whitepaper} icon={DOC_ICON} title={token.whitepaper} label="WP" />}
+              {token.twitter && <ExtLink href={`https://x.com/${token.twitter}`} icon={TWITTER_ICON} title={`@${token.twitter}`} label={c.twitterFollowers != null ? fmtCount(c.twitterFollowers) : undefined} />}
+              {token.github && <ExtLink href={token.github} icon={GITHUB_ICON} title={token.github} label={d.githubStars != null ? fmtCount(d.githubStars) : undefined} />}
+              {token.telegram && <ExtLink href={`https://t.me/${token.telegram}`} icon={TG_ICON} title={`Telegram`} />}
+              {token.reddit && <ExtLink href={token.reddit} icon={REDDIT_ICON} title={token.reddit} />}
+            </div>
+          </div>
+        </div>
+        {m.priceUsd != null && (
+          <div className="text-right shrink-0 flex flex-col items-end">
+            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{fmtPriceUsd(m.priceUsd)}</p>
+            {ch24 != null && (
+              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg tabular-nums ${changeBg}`}>
+                {isUp && <span className="mr-0.5">▲</span>}
+                {isDown && <span className="mr-0.5">▼</span>}
+                {fmtPct(ch24)}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Stats rows */}
+      {(hasAnyRow1 || hasAnyRow2 || hasAnyRow3) && (
+        <>
+          <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
+          <div className="px-5 py-3.5 space-y-3.5">
+            {hasAnyRow1 && (
+              <div className="grid grid-cols-5 gap-x-4 gap-y-3">
+                {row1.map((s) => <StatBlock key={s.label} {...s} />)}
+              </div>
+            )}
+            {hasAnyRow2 && (
+              <div className="grid grid-cols-5 gap-x-4 gap-y-3">
+                {row2.map((s) => <StatBlock key={s.label} {...s} />)}
+              </div>
+            )}
+            {hasAnyRow3 && (
+              <div className="grid grid-cols-5 gap-x-4 gap-y-3">
+                {row3.map((s) => <StatBlock key={s.label} {...s} />)}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Top exchanges */}
+      {topEx.length > 0 && (
+        <>
+          <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
+          <div className="px-5 py-3">
+            <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-2">{L.topExch}</p>
+            <div className="flex flex-wrap gap-1.5">
+              {topEx.map((ex, i) => (
+                <span
+                  key={`${ex.name}-${ex.pair}-${i}`}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-gray-600 bg-gray-50 border border-gray-200/60"
+                  title={ex.spreadPct != null ? `spread ${ex.spreadPct.toFixed(3)}%` : undefined}
+                >
+                  <span className="font-semibold text-gray-700">{ex.name}</span>
+                  <span className="text-gray-400">{ex.pair}</span>
+                  {ex.volumeUsd != null && <span className="text-gray-500 tabular-nums">{fmtUsdCompact(ex.volumeUsd)}</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Markdown Rendering ─────────────────────────────────────────
 
 /** Citation tag style — small inline badge with source name */

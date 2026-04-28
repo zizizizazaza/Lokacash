@@ -250,8 +250,8 @@ const PULSE_FALLBACK_TRENDING: { sym: string; chg: number }[] = [
   { sym: 'PYTH', chg: 3.9 },
 ];
 
-const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v3';
-const PULSE_CACHE_TTL = 30 * 60 * 1000; // 30 min
+const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v4';
+const PULSE_CACHE_TTL = 5 * 60 * 1000; // 5 min — banners need to feel current
 
 type PulseCache = { at: number; coins: PulseCoin[]; trending: { sym: string; chg: number }[] };
 
@@ -301,80 +301,246 @@ const fmtPrice = (n: number) => {
 };
 
 const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) => {
-  // Live data from CoinGecko's free public API, cached 30 min.
+  // ── 1. Trending coin grid + movers marquee ───────────────────────
+  // Grid: CoinGecko /search/trending — the actual top-searched coins
+  //       right now (askSurf-style hotlist). Real ranking, not a
+  //       static list.
+  // Marquee: top 24h gainers + losers from /coins/markets — the hot
+  //          movers, refreshed in lockstep with the grid.
+  // Cached for 5 min. Background refresh (below) re-pulls every 5 min
+  // while the user lingers.
   const [coins, setCoins] = useState<PulseCoin[]>(() => readPulseCache()?.coins ?? PULSE_FALLBACK_COINS);
   const [trending, setTrending] = useState<{ sym: string; chg: number }[]>(() => readPulseCache()?.trending ?? PULSE_FALLBACK_TRENDING);
   const [updatedAt, setUpdatedAt] = useState<number>(() => readPulseCache()?.at ?? 0);
 
+  // ── 2. Live "vibe" metrics (gas + Fear & Greed) ──────────────────
+  // Backend `/api/skill/v1/crypto/pulse-meta` proxies alternative.me
+  // (F&G) and Blocknative (gas) so we get real numbers, not sin-wave
+  // theatre. Polled every 30 s while the home screen is mounted.
+  type Vibe = {
+    fearGreed: { value: number; label: string } | null;
+    ethGas: { fastGwei: number; standardGwei: number; slowGwei: number } | null;
+  };
+  const [vibe, setVibe] = useState<Vibe>({ fearGreed: null, ethGas: null });
+
+  // ── 3. Live spot prices for the 6 visible coins ──────────────────
+  // /coins/markets gives us the snapshot; for "feels alive" we then
+  // re-poll a tiny `simple/price` call every 20 s so the prices tick.
+  // Real movement, no jitter.
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+
   useEffect(() => {
-    const cache = readPulseCache();
-    if (cache) return; // fresh enough
-
     let cancelled = false;
-    (async () => {
+    const cached = readPulseCache();
+    const skipFirstFetch = cached && Date.now() - cached.at < 60_000; // <1 min old → don't refetch immediately
+
+    // CoinGecko free endpoints — all keyless, all dynamic.
+    //   /search/trending                            → searched-most-right-now (rotates every few min)
+    //   /coins/markets?order=price_change_*_desc    → today's gainers / losers
+    //   /coins/markets?ids=...&sparkline=true       → 7d sparklines for the trending coins
+    //
+    // We dedupe stable / wrapped names because they're noise on a
+    // "what's hot" feed.
+    const STABLE_OR_WRAPPED = /^(USDT|USDC|DAI|TUSD|FDUSD|USDE|PYUSD|BUSD|USDD|FRAX|LUSD|GUSD|WBTC|WETH|STETH|WSTETH|WEETH|CBBTC|CBETH|RETH|TBTC)$/;
+
+    const pullAll = async () => {
       try {
-        // Ask for 15 rows so we can filter out stablecoins + wrapped assets
-        // and still end up with 6 real, interesting names.
-        const marketsUrl = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=15&page=1&sparkline=true&price_change_percentage=24h';
-        const trendingUrl = 'https://api.coingecko.com/api/v3/search/trending';
-
-        const [mRes, tRes] = await Promise.all([
-          fetch(marketsUrl).then(r => r.ok ? r.json() : Promise.reject(r.status)),
-          fetch(trendingUrl).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+        const [trendingRaw, gainersRaw, losersRaw] = await Promise.all([
+          fetch('https://api.coingecko.com/api/v3/search/trending', { cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
+          fetch(
+            'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=price_change_percentage_24h_desc&per_page=20&page=1&price_change_percentage=24h',
+            { cache: 'no-store' },
+          ).then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
+          fetch(
+            'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=price_change_percentage_24h_asc&per_page=20&page=1&price_change_percentage=24h',
+            { cache: 'no-store' },
+          ).then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
         ]);
-
         if (cancelled) return;
 
-        // Drop stablecoins (USDT, USDC, DAI, …) and wrapped / staked majors
-        // (WBTC, WETH, STETH, WSTETH, WEETH) — they dilute the signal and
-        // always hover near 0% or mirror BTC/ETH.
-        const STABLE_OR_WRAPPED = /^(USDT|USDC|DAI|TUSD|FDUSD|USDE|PYUSD|BUSD|USDD|FRAX|LUSD|GUSD|WBTC|WETH|STETH|WSTETH|WEETH|CBBTC|CBETH|RETH|TBTC)$/;
+        // ── Grid: trending hotlist ──
+        // /search/trending returns up to 15. We take the first 6
+        // (excluding stables; rare, but possible) and ask CoinGecko for
+        // sparklines + canonical icons in a follow-up call so the
+        // visual matches /coins/markets style.
+        const trendingItems: any[] = (trendingRaw?.coins || [])
+          .map((w: any) => w?.item)
+          .filter((it: any) => it && it.id);
 
-        const nextCoins: PulseCoin[] = (mRes as any[])
-          .map((x): PulseCoin => ({
-            sym: String(x.symbol || '').toUpperCase(),
-            name: x.name,
-            price: Number(x.current_price) || 0,
-            chg: Number(x.price_change_percentage_24h) || 0,
-            spark: resampleSpark(x.sparkline_in_7d?.price || [], 24),
-            icon: x.image,
-          }))
-          .filter(c => c.sym && c.price > 0 && !STABLE_OR_WRAPPED.test(c.sym))
+        const pickedIds: string[] = [];
+        const pickedItems: any[] = [];
+        for (const it of trendingItems) {
+          const sym = String(it.symbol || '').toUpperCase();
+          if (!sym || STABLE_OR_WRAPPED.test(sym)) continue;
+          pickedIds.push(it.id);
+          pickedItems.push(it);
+          if (pickedIds.length >= 6) break;
+        }
+
+        let sparklineMap: Record<string, { spark: number[]; price: number; chg: number; image: string; name: string }> = {};
+        if (pickedIds.length > 0) {
+          try {
+            const detailRes = await fetch(
+              `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${pickedIds.join(',')}&sparkline=true&price_change_percentage=24h`,
+              { cache: 'no-store' },
+            );
+            if (detailRes.ok) {
+              const detail = (await detailRes.json()) as any[];
+              for (const d of detail) {
+                sparklineMap[d.id] = {
+                  spark: resampleSpark(d.sparkline_in_7d?.price || [], 24),
+                  price: Number(d.current_price) || 0,
+                  chg: Number(d.price_change_percentage_24h) || 0,
+                  image: d.image || '',
+                  name: d.name || '',
+                };
+              }
+            }
+          } catch { /* sparkline is best-effort; we still have the trending row's price */ }
+        }
+
+        const nextCoins: PulseCoin[] = pickedItems
+          .map((it: any): PulseCoin => {
+            const detail = sparklineMap[it.id];
+            return {
+              sym: String(it.symbol || '').toUpperCase(),
+              name: detail?.name || it.name || '',
+              price: detail?.price || Number(it?.data?.price) || 0,
+              chg: detail?.chg ?? Number(it?.data?.price_change_percentage_24h?.usd) ?? 0,
+              spark: detail?.spark || [],
+              icon: detail?.image || it.thumb || it.small || it.large || '',
+            };
+          })
+          .filter((c) => c.sym && c.price > 0)
           .slice(0, 6);
 
-        const nextTrending: { sym: string; chg: number }[] = ((tRes as any)?.coins || [])
-          .slice(0, 10)
-          .map((w: any) => ({
-            sym: String(w?.item?.symbol || '').toUpperCase(),
-            chg: Number(w?.item?.data?.price_change_percentage_24h?.usd) || 0,
-          }))
-          .filter((t: { sym: string }) => t.sym);
+        // ── Marquee: top movers (gainers + losers, interleaved) ──
+        // Pull 5 from each side, drop dust (price < $0.0001 to avoid
+        // wild meme-coin shitshow), interleave so the strip mixes
+        // green and red.
+        const formatMover = (x: any): { sym: string; chg: number } | null => {
+          const sym = String(x.symbol || '').toUpperCase();
+          const chg = Number(x.price_change_percentage_24h);
+          const price = Number(x.current_price);
+          if (!sym || STABLE_OR_WRAPPED.test(sym) || !Number.isFinite(chg) || chg === 0) return null;
+          if (!Number.isFinite(price) || price < 0.0001) return null;
+          return { sym, chg };
+        };
+        const gainers = (gainersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number }[];
+        const losers = (losersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number }[];
+        const interleaved: { sym: string; chg: number }[] = [];
+        for (let i = 0; i < 6; i++) {
+          if (gainers[i]) interleaved.push(gainers[i]);
+          if (losers[i]) interleaved.push(losers[i]);
+        }
+        const nextTrending = interleaved.slice(0, 12);
 
+        if (cancelled) return;
         if (nextCoins.length) setCoins(nextCoins);
         if (nextTrending.length) setTrending(nextTrending);
-        writePulseCache({ coins: nextCoins.length ? nextCoins : coins, trending: nextTrending.length ? nextTrending : trending });
+        writePulseCache({
+          coins: nextCoins.length ? nextCoins : coins,
+          trending: nextTrending.length ? nextTrending : trending,
+        });
         setUpdatedAt(Date.now());
       } catch {
-        /* keep fallbacks */
+        /* keep last good values */
       }
-    })();
-    return () => { cancelled = true; };
+    };
+
+    if (!skipFirstFetch) void pullAll();
+    // Refresh every 5 min while mounted so a long-lingering tab
+    // sees the trending board and movers actually rotate.
+    const id = setInterval(pullAll, 5 * 60_000);
+    return () => { cancelled = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Cosmetic drift (±0.2%) + live gas/F&G so the banner feels alive.
-  const [tick, setTick] = useState(0);
+  // ── Real "vibe" poll ────────────────────────────────────────────
+  // Pulls Fear & Greed + ETH gas every 30 s from our backend proxy.
+  // First fetch is fired on mount; subsequent ones keep the values
+  // honest while the user lingers on the page.
   useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 2600);
-    return () => clearInterval(id);
+    let cancelled = false;
+    const pull = async () => {
+      try {
+        const r = await fetch('/api/skill/v1/crypto/pulse-meta', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        const data = j?.data;
+        if (cancelled || !data) return;
+        setVibe({
+          fearGreed: data.fearGreed ? { value: data.fearGreed.value, label: data.fearGreed.label } : null,
+          ethGas: data.ethGas
+            ? {
+                fastGwei: data.ethGas.fastGwei,
+                standardGwei: data.ethGas.standardGwei,
+                slowGwei: data.ethGas.slowGwei,
+              }
+            : null,
+        });
+      } catch {
+        /* swallow — header just stays on last good values */
+      }
+    };
+    pull();
+    const id = setInterval(pull, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
-  const jitter = (seed: number) => ((Math.sin(seed * 12.9898 + tick * 0.7) + 1) / 2 - 0.5) * 0.004;
-  const gasGwei = 14 + Math.round(((Math.sin(tick * 0.9) + 1) / 2) * 6);
-  const fgIdx   = 62 + Math.round(((Math.sin(tick * 0.45) + 1) / 2) * 6);
-  const fgLabel = fgIdx < 25 ? 'Extreme Fear' : fgIdx < 45 ? 'Fear' : fgIdx < 55 ? 'Neutral' : fgIdx < 75 ? 'Greed' : 'Extreme Greed';
+
+  // ── Real spot-price poll ─────────────────────────────────────────
+  // Re-pulls just the visible 6 coins every 20 s via CoinGecko's free
+  // /simple/price (no key, no auth). Replaces the synthetic jitter.
+  // We deliberately don't refetch sparkline / icon / 24h%, only price.
+  useEffect(() => {
+    if (!coins.length) return;
+    let cancelled = false;
+    // Extract CoinGecko slug from each coin's icon URL since /coins/markets
+    // returned the icons (slug ≠ symbol — e.g. matic-network ≠ MATIC).
+    const symBySlug: Record<string, string> = {};
+    for (const c of coins.slice(0, 6)) {
+      const m = c.icon?.match(/\/small\/([a-z0-9-]+)\.[a-z]+/);
+      if (m?.[1]) symBySlug[m[1]] = c.sym;
+    }
+    const slugs = Object.keys(symBySlug);
+    if (slugs.length === 0) return; // nothing reliable to query
+
+    const pull = async () => {
+      try {
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${slugs.join(',')}&vs_currencies=usd`;
+        const r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = (await r.json()) as Record<string, { usd?: number }>;
+        if (cancelled) return;
+        const next: Record<string, number> = {};
+        for (const slug of Object.keys(j)) {
+          const sym = symBySlug[slug];
+          const usd = Number(j[slug]?.usd);
+          if (sym && Number.isFinite(usd)) next[sym] = usd;
+        }
+        if (Object.keys(next).length) setLivePrices((prev) => ({ ...prev, ...next }));
+      } catch {
+        /* swallow — keep last known prices */
+      }
+    };
+    pull();
+    const id = setInterval(pull, 20_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [coins]);
+
+  const fgIdx = vibe.fearGreed?.value ?? null;
+  const fgLabel = vibe.fearGreed?.label ?? '—';
+  const fgColorClass =
+    fgIdx == null ? 'text-gray-500' :
+    fgIdx < 25 ? 'text-rose-600' :
+    fgIdx < 45 ? 'text-orange-500' :
+    fgIdx < 55 ? 'text-gray-700' :
+    fgIdx < 75 ? 'text-emerald-600' : 'text-emerald-700';
+  const gasGwei = vibe.ethGas?.standardGwei ?? null;
   const updatedLabel = updatedAt
     ? `Updated ${new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-    : 'Sample data';
+    : 'Loading…';
 
   return (
     <div className="w3p-banner w-full max-w-[860px] mx-auto mt-2 mb-2 rounded-2xl border border-gray-200/70 bg-white text-gray-900 overflow-hidden">
@@ -385,21 +551,29 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400/70 opacity-60" />
             <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
           </span>
-          <span className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-gray-400">On-Chain Pulse</span>
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-gray-400">Trending Now</span>
           <span className="hidden sm:inline text-[10px] text-gray-300">·</span>
-          <span className="hidden sm:inline text-[10px] text-gray-400">{updatedLabel}</span>
+          <span className="hidden sm:inline text-[10px] text-gray-400">CoinGecko · {updatedLabel}</span>
         </div>
         <div className="flex items-center gap-3 text-[11px] text-gray-500">
-          <span><span className="text-gray-400">Gas</span> <span className="text-gray-800 font-semibold">{gasGwei}</span><span className="text-gray-400"> gwei</span></span>
+          <span>
+            <span className="text-gray-400">Gas</span>{' '}
+            <span className="text-gray-800 font-semibold tabular-nums">{gasGwei != null ? gasGwei : '—'}</span>
+            <span className="text-gray-400"> gwei</span>
+          </span>
           <span className="w-px h-3 bg-gray-200" />
-          <span><span className="text-gray-400">F&amp;G</span> <span className="text-emerald-600 font-semibold">{fgIdx}</span> <span className="text-gray-400">{fgLabel}</span></span>
+          <span>
+            <span className="text-gray-400">F&amp;G</span>{' '}
+            <span className={`font-semibold tabular-nums ${fgColorClass}`}>{fgIdx != null ? fgIdx : '—'}</span>{' '}
+            <span className="text-gray-400">{fgLabel}</span>
+          </span>
         </div>
       </div>
 
       {/* Hot coins grid — 2×3 on desktop, 2 cols on mobile */}
       <div className="grid grid-cols-2 sm:grid-cols-3">
         {coins.slice(0, 6).map((c, i) => {
-          const live = c.price * (1 + jitter(i + 1));
+          const live = livePrices[c.sym] ?? c.price;
           const up = c.chg >= 0;
           const col = i % 3, row = Math.floor(i / 3);
           return (
@@ -459,7 +633,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
       {/* Trending marquee */}
       <div className="relative overflow-hidden border-t border-gray-100 bg-gray-50/60">
         <div className="flex items-center gap-6 px-5 sm:px-6 py-2.5 w3p-marquee">
-          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">Trending 24h</span>
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">Top Movers 24h</span>
           {[...trending, ...trending].map((t, i) => (
             <span key={`${t.sym}-${i}`} className="shrink-0 inline-flex items-center gap-1.5 text-[11.5px]">
               <span className="font-semibold text-gray-700 tracking-wide">{t.sym}</span>

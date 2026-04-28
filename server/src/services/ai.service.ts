@@ -98,7 +98,16 @@ export interface AssetContext {
   description?: string;
 }
 
-function buildSystemPrompt(assetContext?: AssetContext): string {
+function buildSystemPrompt(assetContext?: AssetContext, agentId?: string): string {
+  // SuperAgent pipeline calls (synthesis, HTML generation, consensus, etc.)
+  // carry their own self-contained prompts that demand markdown / long-form
+  // output. The Loka chat system prompt forces plain text + concise style and
+  // would override them, truncating replies. Skip it for those callers and
+  // only inject minimal time context.
+  if (agentId === 'superagent') {
+    return getGlobalTimeContext();
+  }
+
   const basePrompt = getGlobalTimeContext() + LOKA_SYSTEM_PROMPT;
 
   if (!assetContext) {
@@ -128,7 +137,7 @@ function toApiContent(message: ChatMessage): string | OpenAIContentBlock[] {
 }
 
 
-export type QueryType = 'investment-analysis' | 'research' | 'market-brief' | 'guru-council' | 'general';
+export type QueryType = 'investment-analysis' | 'crypto-analysis' | 'research' | 'market-brief' | 'guru-council' | 'general';
 
 export interface OrchestratorPlan {
   isSimpleChat: boolean;
@@ -397,7 +406,7 @@ ${userText || '(empty)'}`;
 
     // Build message array with dynamic system prompt
     const apiMessages = [
-      { role: 'system', content: buildSystemPrompt(assetContext) },
+      { role: 'system', content: buildSystemPrompt(assetContext, agentId) },
       ...messages.map(m => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: toApiContent(m),
@@ -452,7 +461,7 @@ ${userText || '(empty)'}`;
     }
 
     const apiMessages = [
-      { role: 'system', content: buildSystemPrompt(assetContext) },
+      { role: 'system', content: buildSystemPrompt(assetContext, agentId) },
       ...messages.map(m => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: toApiContent(m),

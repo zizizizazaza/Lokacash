@@ -68,6 +68,73 @@ export type Web3OkxNewsBundle = {
   sentiment: Web3OkxSentiment | null;
 };
 
+/**
+ * Compact, card-ready snapshot for the primary token of a crypto query.
+ * Mirrors what the web3 CLI emits in `tokenSnapshot`.
+ * Used by the TokenCard UI and as inline data context in the crypto-analysis prompt.
+ */
+export type Web3TokenSnapshot = {
+  id: string;
+  symbol: string;
+  name: string;
+  imageUrl?: string;
+  rank?: number;
+  categories?: string[];
+  description?: string;
+  homepage?: string;
+  whitepaper?: string;
+  twitter?: string;
+  telegram?: string;
+  reddit?: string;
+  github?: string;
+  contract?: { chain: string; address: string };
+  market: {
+    priceUsd?: number;
+    change24hPct?: number;
+    change7dPct?: number;
+    change30dPct?: number;
+    change1yPct?: number;
+    marketCapUsd?: number;
+    fdvUsd?: number;
+    fdvOverMcap?: number;
+    volume24hUsd?: number;
+    high24hUsd?: number;
+    low24hUsd?: number;
+    athUsd?: number;
+    athChangePct?: number;
+    athDate?: string;
+    atlUsd?: number;
+    atlChangePct?: number;
+    atlDate?: string;
+    circulatingSupply?: number;
+    totalSupply?: number;
+    maxSupply?: number;
+    circulatingPctOfMax?: number;
+  };
+  community: {
+    twitterFollowers?: number;
+    redditSubscribers?: number;
+    telegramUsers?: number;
+    sentimentUpPct?: number;
+    sentimentDownPct?: number;
+  };
+  developer: {
+    githubStars?: number;
+    githubForks?: number;
+    commits4w?: number;
+    contributors?: number;
+    pullRequestsMerged?: number;
+    issuesOpenPct?: number;
+  };
+  topExchanges?: Array<{
+    name: string;
+    pair: string;
+    volumeUsd?: number;
+    trustScore?: string;
+    spreadPct?: number;
+  }>;
+};
+
 export type Web3ResearchResult = {
   report: string;
   raw: {
@@ -86,6 +153,8 @@ export type Web3ResearchResult = {
     okx?: Web3OkxSnapshot[];
     okxNews?: Web3OkxNewsBundle[];
     providers?: Array<'coingecko' | 'okx-market' | 'okx-news'>;
+    /** Card-ready snapshot for primary token (single-asset intents). */
+    tokenSnapshot?: Web3TokenSnapshot;
   };
 };
 
@@ -254,6 +323,7 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
           nft?: Record<string, unknown>;
           logs?: string[];
           missingData?: string[];
+          tokenSnapshot?: Web3TokenSnapshot;
         };
         if (!parsed.ok) {
           console.warn(
@@ -293,6 +363,7 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
             nft: parsed.nft || {},
             logs: parsed.logs || [],
             missingData: parsed.missingData || [],
+            tokenSnapshot: parsed.tokenSnapshot,
           },
         });
         setCachedResult(q, {
@@ -310,6 +381,7 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
             nft: parsed.nft || {},
             logs: parsed.logs || [],
             missingData: parsed.missingData || [],
+            tokenSnapshot: parsed.tokenSnapshot,
           },
         });
       } catch (e) {

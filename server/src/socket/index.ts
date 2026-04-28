@@ -315,6 +315,191 @@ function web3FocusTokens(raw: Web3ResearchResult['raw'] | undefined): string[] {
   return Array.from(tokens).filter((t) => /^[a-z0-9][a-z0-9\s_-]{1,30}$/.test(t));
 }
 
+/**
+ * Local crypto fallback report — used when the LLM synthesis fails (e.g. quota
+ * exhausted) but we already have a real `tokenSnapshot` from CoinGecko.
+ *
+ * Pure formatting, no LLM call. Every number comes from `snap.market`. This
+ * is NOT a substitute for the real cryptoMemoPrompt output — it's a
+ * deterministic skeleton so the user can verify the end-to-end flow
+ * (TokenCard render + adaptive markdown + <details> blocks + risk bullets)
+ * without an AI provider being available.
+ */
+function buildLocalCryptoFallback(
+  snap: any,
+  userQuery: string,
+  isZh: boolean,
+  cause: string,
+): string {
+  const m = snap.market || {};
+  const c = snap.community || {};
+  const d = snap.developer || {};
+  const sym = String(snap.symbol || '').toUpperCase();
+  const name = String(snap.name || sym);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const fUsd = (v?: number): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    const a = Math.abs(v);
+    if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+    if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+    if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+    if (a >= 1e3) return `$${(v / 1e3).toFixed(2)}K`;
+    if (a >= 1) return `$${v.toFixed(3)}`;
+    return `$${v.toPrecision(3)}`;
+  };
+  const fNum = (v?: number): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    const a = Math.abs(v);
+    if (a >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+    if (a >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+    if (a >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+    return String(Math.round(v));
+  };
+  const fPct = (v?: number): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  };
+  const sign = (v?: number): '偏多' | '偏空' | '中性' | 'bullish' | 'bearish' | 'neutral' => {
+    if (v == null) return isZh ? '中性' : 'neutral';
+    if (isZh) return v > 2 ? '偏多' : v < -2 ? '偏空' : '中性';
+    return v > 2 ? 'bullish' : v < -2 ? 'bearish' : 'neutral';
+  };
+
+  const ch24 = m.change24hPct;
+  const ch7 = m.change7dPct;
+  const ch30 = m.change30dPct;
+  const fdvMc = m.fdvOverMcap;
+  const circPct = m.circulatingPctOfMax;
+
+  const supplyAngleEn = circPct != null && circPct < 50
+    ? `Only ${circPct.toFixed(1)}% of max supply is in circulation — the remaining ${(100 - circPct).toFixed(1)}% is real overhang.`
+    : 'No major supply pressure inferred from circulating data.';
+  const supplyAngleZh = circPct != null && circPct < 50
+    ? `仅 ${circPct.toFixed(1)}% 流通，剩余 ${(100 - circPct).toFixed(1)}% 是真实抛压。`
+    : '从流通数据看暂无明显供应压力。';
+
+  const fdvAngleEn = fdvMc != null && fdvMc > 2
+    ? `FDV/MC ${fdvMc.toFixed(2)}× — material dilution risk vs sector median (~1.5×).`
+    : fdvMc != null
+      ? `FDV/MC ${fdvMc.toFixed(2)}× — within healthy range.`
+      : 'FDV/MC ratio unavailable.';
+  const fdvAngleZh = fdvMc != null && fdvMc > 2
+    ? `FDV/MC ${fdvMc.toFixed(2)}×，相对板块中位（~1.5×）存在显著稀释风险。`
+    : fdvMc != null
+      ? `FDV/MC ${fdvMc.toFixed(2)}×，处合理区间。`
+      : 'FDV/MC 数据缺失。';
+
+  const exchanges = (snap.topExchanges || []).slice(0, 5);
+
+  // Stop-loss heuristic: 5% below 24h low, target = 24h high
+  const stopUsd = m.low24hUsd != null ? m.low24hUsd * 0.95 : undefined;
+  const targetUsd = m.high24hUsd;
+
+  const banner = isZh
+    ? `> ⚠️ **降级输出**：实时 LLM 暂时不可用（${cause.slice(0, 80)}）。下面这份报告由后端基于 CoinGecko 实时数据本地生成，结构与正常 crypto-analysis prompt 一致，但**没有调用 AI**——所以缺少叙事性分析。换上有效 AI key 后即恢复完整 LLM 输出。\n`
+    : `> ⚠️ **Degraded output**: live LLM unavailable (${cause.slice(0, 80)}). This report was assembled locally from CoinGecko data with the same structure as the normal crypto-analysis prompt, but **no AI was called** — narrative analysis is missing. Restore a valid AI key to get the full LLM output.\n`;
+
+  if (isZh) {
+    return [
+      banner,
+      `**立场** ${sign(ch24)} / **建议** 等待 AI 恢复后获取可执行结论 / **置信度** 中（数据完整但缺叙事） / **关键触发** 24h 涨跌穿越 ${fPct(ch24)}`,
+      '',
+      `${name}（${sym}）当前 ${fUsd(m.priceUsd)}，24h ${fPct(ch24)}（CoinGecko ${today}）。7 天 ${fPct(ch7)}、30 天 ${fPct(ch30)}。${supplyAngleZh}${fdvAngleZh}`,
+      '',
+      '## 真实数据快照',
+      '',
+      '| 指标 | 数值 | 来源 |',
+      '|---|---|---|',
+      `| 现价 | ${fUsd(m.priceUsd)} | CoinGecko ${today} |`,
+      `| 市值 | ${fUsd(m.marketCapUsd)}（#${snap.rank ?? 'n/a'}） | CoinGecko |`,
+      `| FDV | ${fUsd(m.fdvUsd)}（FDV/MC ${fdvMc != null ? fdvMc.toFixed(2) + '×' : 'n/a'}） | CoinGecko |`,
+      `| 24h 量 | ${fUsd(m.volume24hUsd)} | CoinGecko |`,
+      `| 24h 高/低 | ${fUsd(m.high24hUsd)} / ${fUsd(m.low24hUsd)} | CoinGecko |`,
+      `| 7d / 30d / 1y | ${fPct(ch7)} / ${fPct(ch30)} / ${fPct(m.change1yPct)} | CoinGecko |`,
+      `| 流通 / 上限 | ${fNum(m.circulatingSupply)} / ${fNum(m.maxSupply)}（${circPct != null ? circPct.toFixed(1) + '%' : 'n/a'}） | CoinGecko |`,
+      `| ATH | ${fUsd(m.athUsd)}（${fPct(m.athChangePct)}） | CoinGecko |`,
+      '',
+      '## 社区与开发活跃度',
+      '',
+      `Twitter ${fNum(c.twitterFollowers)} 粉 · Reddit ${fNum(c.redditSubscribers)} · Telegram ${fNum(c.telegramUsers)}（CoinGecko ${today}）。GitHub 4 周提交 ${d.commits4w ?? 'n/a'} 次，${d.contributors ?? 'n/a'} 位贡献者，star ${fNum(d.githubStars)}。`,
+      '',
+      '<details><summary>详细数据：主要交易所 / 链接</summary>',
+      '',
+      exchanges.length
+        ? '| 交易所 | 交易对 | 24h 量 (USD) | Trust |\n|---|---|---|---|\n' +
+          exchanges.map((e: any) => `| ${e.name} | ${e.pair} | ${fUsd(e.volumeUsd)} | ${e.trustScore || '-'} |`).join('\n')
+        : '_暂无交易所数据_',
+      '',
+      `链接：${snap.homepage ? `[官网](${snap.homepage}) · ` : ''}${snap.twitter ? `[Twitter](https://x.com/${snap.twitter}) · ` : ''}${snap.github ? `[GitHub](${snap.github}) · ` : ''}${snap.whitepaper ? `[白皮书](${snap.whitepaper})` : ''}`,
+      '</details>',
+      '',
+      '## Risks / Kill-switch',
+      '',
+      `- 跌破 24h 低 ${fUsd(m.low24hUsd)} → 短线结构破坏，止损线建议 ${fUsd(stopUsd)}`,
+      `- 突破 24h 高 ${fUsd(targetUsd)} → 上行结构确认，可考虑加仓 / 止盈`,
+      `- BTC dominance 上行 + 山寨同步下挫 → 资金离场板块，全平观望`,
+      '',
+      '## Tags',
+      `**重要性**：中 · **分类**：${(snap.categories || []).slice(0, 3).join(' / ') || 'crypto'}`,
+      '',
+      '**值得关注的问题：**',
+      `- 24h 量 ${fUsd(m.volume24hUsd)} 是否能延续到下一个交易日？`,
+      `- ${fdvMc != null && fdvMc > 2 ? '剩余 ' + (100 - (circPct ?? 0)).toFixed(1) + '% 锁仓何时进入解锁窗口？' : '社区热度 (Twitter ' + fNum(c.twitterFollowers) + ' 粉) 是否有持续增长？'}`,
+      `- 交易所深度（top exchanges 总量）能否承接潜在 1% 流通量的卖盘？`,
+    ].join('\n');
+  }
+
+  // English version
+  return [
+    banner,
+    `**Bias** ${sign(ch24)} / **Action** Wait for AI to come back online for an actionable verdict / **Confidence** Medium (data complete, narrative missing) / **Trigger** 24h move crosses ${fPct(ch24)}`,
+    '',
+    `${name} (${sym}) is at ${fUsd(m.priceUsd)}, 24h ${fPct(ch24)} (CoinGecko ${today}). 7d ${fPct(ch7)}, 30d ${fPct(ch30)}. ${supplyAngleEn} ${fdvAngleEn}`,
+    '',
+    '## Real-data snapshot',
+    '',
+    '| Metric | Value | Source |',
+    '|---|---|---|',
+    `| Price | ${fUsd(m.priceUsd)} | CoinGecko ${today} |`,
+    `| Market cap | ${fUsd(m.marketCapUsd)} (#${snap.rank ?? 'n/a'}) | CoinGecko |`,
+    `| FDV | ${fUsd(m.fdvUsd)} (FDV/MC ${fdvMc != null ? fdvMc.toFixed(2) + '×' : 'n/a'}) | CoinGecko |`,
+    `| 24h volume | ${fUsd(m.volume24hUsd)} | CoinGecko |`,
+    `| 24h high/low | ${fUsd(m.high24hUsd)} / ${fUsd(m.low24hUsd)} | CoinGecko |`,
+    `| 7d / 30d / 1y | ${fPct(ch7)} / ${fPct(ch30)} / ${fPct(m.change1yPct)} | CoinGecko |`,
+    `| Circulating / Max | ${fNum(m.circulatingSupply)} / ${fNum(m.maxSupply)} (${circPct != null ? circPct.toFixed(1) + '%' : 'n/a'}) | CoinGecko |`,
+    `| ATH | ${fUsd(m.athUsd)} (${fPct(m.athChangePct)}) | CoinGecko |`,
+    '',
+    '## Community & developer activity',
+    '',
+    `Twitter ${fNum(c.twitterFollowers)} followers · Reddit ${fNum(c.redditSubscribers)} · Telegram ${fNum(c.telegramUsers)} (CoinGecko ${today}). GitHub: ${d.commits4w ?? 'n/a'} commits in last 4w, ${d.contributors ?? 'n/a'} contributors, ${fNum(d.githubStars)} stars.`,
+    '',
+    '<details><summary>Details: top exchanges / links</summary>',
+    '',
+    exchanges.length
+      ? '| Exchange | Pair | 24h Vol (USD) | Trust |\n|---|---|---|---|\n' +
+        exchanges.map((e: any) => `| ${e.name} | ${e.pair} | ${fUsd(e.volumeUsd)} | ${e.trustScore || '-'} |`).join('\n')
+      : '_No exchange data._',
+    '',
+    `Links: ${snap.homepage ? `[Site](${snap.homepage}) · ` : ''}${snap.twitter ? `[Twitter](https://x.com/${snap.twitter}) · ` : ''}${snap.github ? `[GitHub](${snap.github}) · ` : ''}${snap.whitepaper ? `[Whitepaper](${snap.whitepaper})` : ''}`,
+    '</details>',
+    '',
+    '## Risks / Kill-switch',
+    '',
+    `- Break below 24h low ${fUsd(m.low24hUsd)} → short-term structure broken, suggested stop ${fUsd(stopUsd)}`,
+    `- Break above 24h high ${fUsd(targetUsd)} → upside confirmed, scale in / take profit`,
+    `- BTC dominance up + alts down → capital rotating out, flatten`,
+    '',
+    '## Tags',
+    `**Importance**: Medium · **Categories**: ${(snap.categories || []).slice(0, 3).join(' / ') || 'crypto'}`,
+    '',
+    '**Questions to watch:**',
+    `- Will the 24h volume of ${fUsd(m.volume24hUsd)} carry into the next session?`,
+    `- ${fdvMc != null && fdvMc > 2 ? 'When does the remaining ' + (100 - (circPct ?? 0)).toFixed(1) + '% locked supply enter unlock windows?' : 'Is community engagement (Twitter ' + fNum(c.twitterFollowers) + ' followers) trending up?'}`,
+    `- Can top-exchange depth absorb a 1%-of-float sell?`,
+  ].join('\n');
+}
+
 function xAuthorFromSource(source: SignalSearchSource): string {
   const url = (source.url || '').trim();
   const m = url.match(/^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]{1,15})\//i);
@@ -1451,8 +1636,12 @@ Text: "${query}"`;
               }
             }
           } catch (err) {
-            console.error('[agent:chat] Auto quota cascade failed, allowing through as simple:', (err as Error).message);
-            consumedTier = null; // fail-open degrades to simple
+            // Fail-open: if the quota/subscription tables aren't ready
+            // (e.g. Prisma migrations not yet applied in dev), let the
+            // request run the full Fast pipeline instead of silently
+            // degrading to a tiny simple-chat reply.
+            console.error('[agent:chat] Auto quota cascade failed, falling through as fast:', (err as Error).message);
+            consumedTier = 'fast';
           }
 
           if (consumedTier === 'roundtable') {
@@ -1791,6 +1980,61 @@ Text: "${query}"`;
           emitter.emitStreamDone(fullContent);
         } catch (streamErr: any) {
           console.error('[agent:chat] simple chat stream failed:', streamErr.message);
+
+          // ── Crypto rescue path ───────────────────────────────────────────
+          // The LLM is unreachable (e.g. quota 403). If the user's query
+          // looks crypto-related, try to salvage the request by hitting
+          // CoinGecko directly and emitting a deterministic local report
+          // built from real market data — same path used when the
+          // advanced flow's synthesis fails.
+          const cryptoRegex = /\b(btc|bitcoin|eth|ethereum|sol|solana|usdt|usdc|bnb|xrp|ada|doge|dot|avax|matic|hype|sui|ton|trx|link|ltc|near|atom|apt|arb|op|inj|tia|sei|jto|wif|pepe|shib)\b|比特币|以太坊|以太币|加密货币|代币|tokenomics|defi|链上|altcoin|memecoin|stablecoin/i;
+          if (cryptoRegex.test(userContent)) {
+            console.log(`[agent:chat] simple chat crypto-rescue triggered sessionId=${sessionId}`);
+            try {
+              const web3Result = await web3RouterService.runQuery(userContent.trim());
+              const snap = web3Result.raw.tokenSnapshot;
+              if (snap && snap.id) {
+                emitToUser(userId, 'agent:chat:token', { sessionId, token: snap });
+                console.log(
+                  `[token_card] (rescue) emitted id=${snap.id} symbol=${snap.symbol} price=${snap.market.priceUsd ?? 'n/a'}`,
+                );
+                const isZh = /[\u4e00-\u9fff]/.test(userContent);
+                const fallbackMd = buildLocalCryptoFallback(
+                  snap,
+                  userContent,
+                  isZh,
+                  streamErr.message || 'AI provider unavailable',
+                );
+                streamToChat(fallbackMd);
+                emitter.emitModule('search', 'completed');
+                emitter.emitModule('done', 'completed', {});
+                if (!isGuest) {
+                  try {
+                    await prisma.chatMessage.create({
+                      data: {
+                        userId,
+                        sessionId,
+                        role: 'assistant',
+                        content: fallbackMd,
+                        agentId: 'superagent',
+                        metadata: JSON.stringify({ tokenCard: snap, degraded: true, cause: 'ai_unavailable' }),
+                      },
+                    });
+                  } catch (_) {}
+                }
+                emitter.emitStreamDone(fallbackMd);
+                activeChatSessions.delete(sessionId);
+                chatSessionStartTimes.delete(sessionId);
+                finishChatReplayBuffer(sessionId);
+                chatAbortControllers.delete(sessionId);
+                return;
+              }
+              console.warn('[agent:chat] crypto-rescue: web3 returned no tokenSnapshot');
+            } catch (rescueErr: any) {
+              console.warn('[agent:chat] crypto-rescue failed:', rescueErr?.message || rescueErr);
+            }
+          }
+
           emitter.emitModule('search', 'completed');
           emitter.emitModule('done', 'completed', {});
           emitToUser(userId, 'agent:chat:error', { sessionId, error: 'Connection failed, please try again.' });
@@ -1819,6 +2063,7 @@ Text: "${query}"`;
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
+      let savedTokenCard: any = null;
       let savedXProfileCard: Record<string, unknown> | null = null;
 
       if (plan.capabilities.search.needed) {
@@ -1972,6 +2217,17 @@ Text: "${query}"`;
               finalWeb3Assets = result.raw.assets;
               finalWeb3Via = result.raw.via;
               const focusTokens = web3FocusTokens(result.raw);
+
+              // ── Push TokenCard to client (single-asset crypto intents) ──
+              const snap = result.raw.tokenSnapshot;
+              if (snap && snap.id) {
+                savedTokenCard = snap;
+                emitToUser(userId, 'agent:chat:token', { sessionId, token: snap });
+                console.log(
+                  `[token_card] emitted id=${snap.id} symbol=${snap.symbol} price=${snap.market.priceUsd ?? 'n/a'} mcap=${snap.market.marketCapUsd ?? 'n/a'} fdv/mcap=${snap.market.fdvOverMcap?.toFixed(2) ?? 'n/a'}`,
+                );
+              }
+
               if (plan.capabilities.search.needed) {
                 const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
                   web3Intent: finalWeb3Intent,
@@ -2882,10 +3138,111 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
 `;
 
+      // ─── Crypto Analysis Prompt (adaptive, question-driven, data-backed) ───
+      // Used when web3 capability fired. Differs from traderMemoPrompt:
+      //  • No fixed section list — model picks 2-5 ## headings that fit the question.
+      //  • Every claim must inline a number from raw context (price/funding/OI/follower/etc).
+      //  • First-pass report stays tight; granular tables go inside <details> blocks.
+      //  • No Token Snapshot section in markdown — UI renders the TokenCard from metadata.
+      const cryptoMemoPrompt = getGlobalTimeContext() + `You are a senior crypto trader-analyst writing for an experienced trader who already knows the basics. Your edge is connecting on-chain + derivatives + tokenomics + sentiment to call out what the market is mispricing. NEVER write filler. NEVER write tutorials. NEVER fabricate numbers.
+
+=== INPUT ===
+User question: ${userContent}
+Context (raw research, may be partial — read carefully, every datum below is fair game):
+${contextString}
+
+=== ABSOLUTE RULES ===
+
+1. NO FABRICATION. Every number must come from the Context block. If a number isn't there, write "(no data)" or skip the claim. Do NOT guess prices, supplies, percentages, dates, holder counts, funding rates, or volume.
+
+2. EVERY CONCLUSION CARRIES A NUMBER. Format inline:
+   <claim> · <number> <unit> (<source>, <date if available>)
+   Example: "Funding overheated · +0.012%/8h ≈ 13% APR (OKX, ${new Date().toISOString().slice(0,10)})"
+   Bare assertions like "市场情绪偏多" are NOT acceptable — back them with a number.
+
+3. ANSWER THE QUESTION FIRST. Re-read the user question above. Make the dominant section answer THAT question:
+   • Question about tokenomics / unlock / supply → tokenomics-focused output.
+   • Question about price action / "should I long/short" → tape + positioning focused.
+   • Question about news / "what's happening" → news-impact + tape focused.
+   • Question comparing multiple tokens → comparison table dominant.
+   Do NOT pad with sections the user didn't ask about.
+
+4. NO FIXED HEADINGS. After the executive snapshot, pick 2-5 ## section headings that you invent based on the question. Each ## heading must be a sharp, specific angle — NOT a generic label.
+   Good: "## Funding 透支了 v2 利好"  /  "## FDV 3× 是真实抛压不是叙事"
+   Bad:  "## Market Analysis"  /  "## Technicals"  /  "## Conclusion"  /  "## 总结"
+
+5. LAYERED DETAIL. Default report = scannable conclusions + the key numbers. Long raw tables (full holder list, complete exchange listings, detailed candles, full vesting schedule beyond next 90 days) go INSIDE <details><summary>详细数据</summary>...</details> blocks so they don't bloat the main report. Use <details> liberally for anything beyond the headline numbers.
+
+6. NO Token Snapshot block. The UI renders the ticker card from structured metadata. Do NOT output a "## Token Snapshot" / "## 标的信息" / "## 资产快照" section in markdown. Do NOT echo basic metadata (name / symbol / contract / website / Twitter handle) — the card already shows those.
+
+7. LANGUAGE: Match the user's language end-to-end. Chinese question → all Chinese (headings, labels, table headers). English → all English. No mixing.
+
+8. CITATIONS: When you cite an external source (news, research note, exchange), put the link at the END of the paragraph as [Source Name](url). Do NOT inline mid-sentence. Do NOT list sources separately at the end.
+
+=== STRUCTURE (FLEXIBLE) ===
+
+A. Executive Snapshot (no heading — first thing in the output):
+   - Line 1: **Bias** / **Action** / **Confidence** / **Trigger** (one line, slash-separated, translate labels to user's language).
+   - Then 2-3 sentences: what's happening · what the market is mispricing · why now.
+   - Every sentence carries at least 1 datum from Context.
+
+B. Body (2-5 ## sections, headings YOU invent based on the user question):
+   Pick ONLY the angles that answer the question. Examples (DO NOT use as a checklist):
+   • Tape Read — price + volume + funding + OI vs 7d/30d
+   • Tokenomics & Supply Pressure — FDV/MC, unlocks, vesting, circulating %
+   • What the Market Missed — news vs price reaction
+   • Underwater Scenarios — 2-3 trigger → path → invalidation
+   • Holder Concentration / On-chain Flows
+   • Catalyst Calendar — upcoming dates
+   • Comparison vs peers (only if user asked to compare)
+   • Tradeable Levels — entry / stop / target
+
+C. Risks / Kill-switch (always, ## with your own creative heading):
+   3 bullets. Each bullet: an OBSERVABLE threshold that invalidates the thesis. Format: "<observable> → <action>". E.g. "BTC -8% intraday → close all longs".
+
+D. Tags + Questions to watch (always last, no heading after):
+   - **Tags** line: Importance: High/Medium/Low · Categories: 2-3 tags
+   - **Bold sub-heading** in user's language ("值得关注的问题：" / "Questions to watch:")
+   - 3-5 bullets, each one ONE standalone question only (single sentence ending in ? or ？). No follow-on prose. No links.
+   - This MUST be the very last block — nothing after it.
+
+=== HOW TO HANDLE SPARSE DATA ===
+
+If Context lacks a needed field (e.g. no holder data, no unlock schedule, no derivatives data because token isn't on OKX):
+- DO NOT guess. DO NOT pad with generic statements.
+- Write one short line in the relevant section: "数据缺口：暂无 X，无法判断 Y。需要 Z 接入。"
+- Then move on. A short, honest report is better than a long fabricated one.
+
+=== WORD BUDGET ===
+
+- Simple question (e.g. "BTC 今天怎么了") → 400-700 words.
+- Single-token deep angle (e.g. "HYPE tokenomics 有什么坑") → 700-1200 words main + <details> for raw tables.
+- Multi-token comparison or full DD → 1200-2000 words main + <details>.
+Reserve granular data for follow-up — don't over-deliver on first pass.
+
+=== HEADINGS ===
+
+- # for the report title (optional; only if it sharpens the takeaway). Format like "HYPE: 12-07 解锁前的真实抛压" — angle-driven, never generic.
+- ## for body sections (2-5 of them, YOU invent the wording).
+- **bold** for sub-points and key numbers within paragraphs.
+- NEVER use ###. NEVER number headings ("1.", "2.").
+`;
+
       // Route synthesis prompt by queryType
-      const queryType = plan.queryType || 'investment-analysis';
+      // Auto-promote to crypto-analysis when web3 fired: better quality output
+      // for crypto questions than the equity-shaped traderMemoPrompt.
+      let queryType = plan.queryType || 'investment-analysis';
+      if (
+        plan.capabilities.web3?.needed &&
+        (queryType === 'investment-analysis' || queryType === 'general' || queryType === 'research')
+      ) {
+        queryType = 'crypto-analysis';
+      }
       let synthesizePrompt: string;
       switch (queryType) {
+        case 'crypto-analysis':
+          synthesizePrompt = cryptoMemoPrompt;
+          break;
         case 'research':
           synthesizePrompt = researchPrompt;
           break;
@@ -2934,7 +3291,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
       // Input is `contextString` (research data) instead of waiting for synthesis output.
       // The resulting promise is awaited AFTER synthesis completes, so HTML is ready
       // immediately (or near-immediately) rather than starting a fresh 148s round trip.
-      const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+      const htmlEligible = queryType === 'investment-analysis' || queryType === 'crypto-analysis' || queryType === 'guru-council' || isDeepResearch;
       const htmlReportEnabled = htmlEligible && !config.superAgentDisableHtmlReport;
       if (htmlEligible && config.superAgentDisableHtmlReport) {
         console.log('[agent:chat:html] Skipped (SUPERAGENT_DISABLE_HTML_REPORT is set)');
@@ -2971,6 +3328,14 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 
       const buildLocalSynthesisFallback = (cause: string): string => {
         const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+        // ── Crypto fallback: when AI is down but we have a TokenCard,
+        //    produce a real-data report so the user can still validate the
+        //    end-to-end flow (TokenCard + adaptive crypto markdown).
+        //    Every number below comes from savedTokenCard.market — no AI,
+        //    no fabrication.
+        if (savedTokenCard && (queryType === 'crypto-analysis' || plan.capabilities.web3?.needed)) {
+          return buildLocalCryptoFallback(savedTokenCard, userContent, isZh, cause);
+        }
         // Count useful data fetched so the user knows their quota wasn't wasted,
         // WITHOUT leaking the raw prompt / conversation history / raw post bodies.
         const sourceCount = finalSocialSources?.length || 0;
@@ -3800,6 +4165,7 @@ ${synFullContent || contextString}${langFooter}`;
                   ? { analystIds: data.analystIds }
                   : {}),
                 quoteCard: savedQuoteCard ?? undefined,
+                tokenCard: savedTokenCard ?? undefined,
                 xProfileCard: savedXProfileCard ?? undefined,
                 sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
               })
@@ -3904,6 +4270,7 @@ ${synFullContent || contextString}${langFooter}`;
                   route: 'Super Agent Orchestrator',
                 },
                 quoteCard: savedQuoteCard ?? undefined,
+                tokenCard: savedTokenCard ?? undefined,
                 xProfileCard: savedXProfileCard ?? undefined,
                 degraded: true,
                 degradedReason: errMsg,

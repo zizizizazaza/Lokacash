@@ -72,6 +72,7 @@ type CoinDetail = {
   id?: string;
   symbol?: string;
   name?: string;
+  image?: { thumb?: string; small?: string; large?: string };
   market_cap_rank?: number | null;
   categories?: string[];
   asset_platform_id?: string | null;
@@ -83,8 +84,10 @@ type CoinDetail = {
   description?: { en?: string };
   links?: {
     homepage?: string[];
+    whitepaper?: string;
     twitter_screen_name?: string;
     subreddit_url?: string;
+    telegram_channel_identifier?: string;
     repos_url?: { github?: string[] };
   };
   platforms?: Record<string, string>;
@@ -96,6 +99,115 @@ type CoinDetail = {
       geckoterminal_url?: string;
     }
   >;
+  market_data?: {
+    current_price?: { usd?: number };
+    market_cap?: { usd?: number };
+    fully_diluted_valuation?: { usd?: number };
+    total_volume?: { usd?: number };
+    high_24h?: { usd?: number };
+    low_24h?: { usd?: number };
+    price_change_percentage_24h?: number;
+    price_change_percentage_7d?: number;
+    price_change_percentage_30d?: number;
+    price_change_percentage_1y?: number;
+    ath?: { usd?: number };
+    ath_change_percentage?: { usd?: number };
+    ath_date?: { usd?: string };
+    atl?: { usd?: number };
+    atl_change_percentage?: { usd?: number };
+    atl_date?: { usd?: string };
+    circulating_supply?: number;
+    total_supply?: number | null;
+    max_supply?: number | null;
+  };
+  community_data?: {
+    twitter_followers?: number | null;
+    reddit_subscribers?: number | null;
+    reddit_average_posts_48h?: number | null;
+    reddit_average_comments_48h?: number | null;
+    telegram_channel_user_count?: number | null;
+  };
+  developer_data?: {
+    forks?: number | null;
+    stars?: number | null;
+    subscribers?: number | null;
+    total_issues?: number | null;
+    closed_issues?: number | null;
+    pull_requests_merged?: number | null;
+    pull_request_contributors?: number | null;
+    commit_count_4_weeks?: number | null;
+  };
+  tickers?: Array<{
+    base?: string;
+    target?: string;
+    market?: { name?: string; identifier?: string };
+    converted_volume?: { usd?: number };
+    trust_score?: string;
+    bid_ask_spread_percentage?: number;
+  }>;
+};
+
+/** Compact, card-ready snapshot extracted from CoinDetail + market row. */
+type TokenSnapshot = {
+  id: string;
+  symbol: string;
+  name: string;
+  imageUrl?: string;
+  rank?: number;
+  categories?: string[];
+  description?: string;
+  homepage?: string;
+  whitepaper?: string;
+  twitter?: string;
+  telegram?: string;
+  reddit?: string;
+  github?: string;
+  contract?: { chain: string; address: string };
+  market: {
+    priceUsd?: number;
+    change24hPct?: number;
+    change7dPct?: number;
+    change30dPct?: number;
+    change1yPct?: number;
+    marketCapUsd?: number;
+    fdvUsd?: number;
+    fdvOverMcap?: number;
+    volume24hUsd?: number;
+    high24hUsd?: number;
+    low24hUsd?: number;
+    athUsd?: number;
+    athChangePct?: number;
+    athDate?: string;
+    atlUsd?: number;
+    atlChangePct?: number;
+    atlDate?: string;
+    circulatingSupply?: number;
+    totalSupply?: number;
+    maxSupply?: number;
+    circulatingPctOfMax?: number;
+  };
+  community: {
+    twitterFollowers?: number;
+    redditSubscribers?: number;
+    telegramUsers?: number;
+    sentimentUpPct?: number;
+    sentimentDownPct?: number;
+  };
+  developer: {
+    githubStars?: number;
+    githubForks?: number;
+    commits4w?: number;
+    contributors?: number;
+    pullRequestsMerged?: number;
+    issuesOpenPct?: number;
+  };
+  topExchanges?: Array<{
+    name: string;
+    pair: string;
+    volumeUsd?: number;
+    trustScore?: string;
+    spreadPct?: number;
+  }>;
 };
 
 type ResolvedAsset = {
@@ -129,6 +241,8 @@ type Web3CliResult = {
   nft: Record<string, unknown>;
   logs: string[];
   missingData: string[];
+  /** Compact card-ready snapshot for the primary token (single-token intents). */
+  tokenSnapshot?: TokenSnapshot;
 };
 
 type SpotCacheEntry = {
@@ -766,11 +880,143 @@ async function fetchCoinDetail(geckoId: string): Promise<CoinDetail | null> {
     return (await fetchRestJson(
       `/coins/${encodeURIComponent(
         geckoId,
-      )}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false`,
+      )}?localization=false&tickers=true&market_data=true&community_data=true&developer_data=true&sparkline=false`,
     )) as CoinDetail;
   } catch {
     return null;
   }
+}
+
+/** Pick the primary contract address (Ethereum-first, fall back to first available). */
+function pickPrimaryContract(detail: CoinDetail | null): { chain: string; address: string } | undefined {
+  if (!detail?.platforms) return undefined;
+  const entries = Object.entries(detail.platforms).filter(([k, v]) => k && v);
+  if (!entries.length) return undefined;
+  const preferOrder = ['ethereum', 'solana', 'binance-smart-chain', 'arbitrum-one', 'base', 'polygon-pos'];
+  for (const pref of preferOrder) {
+    const hit = entries.find(([k]) => k === pref);
+    if (hit) return { chain: hit[0], address: hit[1] };
+  }
+  return { chain: entries[0][0], address: entries[0][1] };
+}
+
+/** Build a compact, card-ready snapshot from CoinDetail (+ optional spot row). */
+function buildTokenSnapshot(detail: CoinDetail | null, fallbackRow?: CoinMarketsRow): TokenSnapshot | undefined {
+  if (!detail || !detail.id) {
+    if (!fallbackRow?.id) return undefined;
+    return {
+      id: fallbackRow.id,
+      symbol: (fallbackRow.symbol || '').toUpperCase(),
+      name: fallbackRow.name || fallbackRow.id,
+      imageUrl: fallbackRow.image,
+      rank: fallbackRow.market_cap_rank,
+      market: {
+        priceUsd: fallbackRow.current_price,
+        change24hPct: fallbackRow.price_change_percentage_24h ?? undefined,
+        marketCapUsd: fallbackRow.market_cap,
+        fdvUsd: fallbackRow.fully_diluted_valuation ?? undefined,
+        volume24hUsd: fallbackRow.total_volume,
+        high24hUsd: fallbackRow.high_24h,
+        low24hUsd: fallbackRow.low_24h,
+        athUsd: fallbackRow.ath,
+        atlUsd: fallbackRow.atl,
+        circulatingSupply: fallbackRow.circulating_supply,
+        totalSupply: fallbackRow.total_supply ?? undefined,
+        maxSupply: fallbackRow.max_supply ?? undefined,
+      },
+      community: {},
+      developer: {},
+    };
+  }
+
+  const md = detail.market_data || {};
+  const cd = detail.community_data || {};
+  const dd = detail.developer_data || {};
+  const links = detail.links || {};
+
+  const mcap = md.market_cap?.usd ?? fallbackRow?.market_cap;
+  const fdv = md.fully_diluted_valuation?.usd ?? fallbackRow?.fully_diluted_valuation ?? undefined;
+  const fdvOverMcap = fdv && mcap ? fdv / mcap : undefined;
+  const circ = md.circulating_supply ?? fallbackRow?.circulating_supply;
+  const max = md.max_supply ?? fallbackRow?.max_supply ?? undefined;
+  const circPct = circ != null && max ? (circ / max) * 100 : undefined;
+
+  const desc = (detail.description?.en || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const tickersTop = (detail.tickers || [])
+    .filter((t) => t.converted_volume?.usd != null)
+    .sort((a, b) => (b.converted_volume?.usd || 0) - (a.converted_volume?.usd || 0))
+    .slice(0, 5)
+    .map((t) => ({
+      name: t.market?.name || t.market?.identifier || 'unknown',
+      pair: `${(t.base || '').toUpperCase()}/${(t.target || '').toUpperCase()}`,
+      volumeUsd: t.converted_volume?.usd,
+      trustScore: t.trust_score,
+      spreadPct: t.bid_ask_spread_percentage,
+    }));
+
+  const totalIssues = dd.total_issues ?? undefined;
+  const closedIssues = dd.closed_issues ?? undefined;
+  const issuesOpenPct =
+    totalIssues != null && totalIssues > 0 && closedIssues != null
+      ? ((totalIssues - closedIssues) / totalIssues) * 100
+      : undefined;
+
+  return {
+    id: detail.id,
+    symbol: (detail.symbol || '').toUpperCase(),
+    name: detail.name || detail.id,
+    imageUrl: detail.image?.large || detail.image?.small || detail.image?.thumb || fallbackRow?.image,
+    rank: detail.market_cap_rank ?? fallbackRow?.market_cap_rank ?? undefined,
+    categories: (detail.categories || []).filter(Boolean).slice(0, 6),
+    description: desc ? desc.slice(0, 500) : undefined,
+    homepage: (links.homepage || []).find((u) => u && u.trim()) || undefined,
+    whitepaper: links.whitepaper || undefined,
+    twitter: links.twitter_screen_name || undefined,
+    telegram: links.telegram_channel_identifier || undefined,
+    reddit: links.subreddit_url || undefined,
+    github: (links.repos_url?.github || []).find((u) => u && u.trim()) || undefined,
+    contract: pickPrimaryContract(detail),
+    market: {
+      priceUsd: md.current_price?.usd ?? fallbackRow?.current_price,
+      change24hPct: md.price_change_percentage_24h ?? fallbackRow?.price_change_percentage_24h ?? undefined,
+      change7dPct: md.price_change_percentage_7d ?? undefined,
+      change30dPct: md.price_change_percentage_30d ?? undefined,
+      change1yPct: md.price_change_percentage_1y ?? undefined,
+      marketCapUsd: mcap,
+      fdvUsd: fdv,
+      fdvOverMcap,
+      volume24hUsd: md.total_volume?.usd ?? fallbackRow?.total_volume,
+      high24hUsd: md.high_24h?.usd ?? fallbackRow?.high_24h,
+      low24hUsd: md.low_24h?.usd ?? fallbackRow?.low_24h,
+      athUsd: md.ath?.usd ?? fallbackRow?.ath,
+      athChangePct: md.ath_change_percentage?.usd ?? undefined,
+      athDate: md.ath_date?.usd,
+      atlUsd: md.atl?.usd ?? fallbackRow?.atl,
+      atlChangePct: md.atl_change_percentage?.usd ?? undefined,
+      atlDate: md.atl_date?.usd,
+      circulatingSupply: circ,
+      totalSupply: md.total_supply ?? fallbackRow?.total_supply ?? undefined,
+      maxSupply: max,
+      circulatingPctOfMax: circPct,
+    },
+    community: {
+      twitterFollowers: cd.twitter_followers ?? undefined,
+      redditSubscribers: cd.reddit_subscribers ?? undefined,
+      telegramUsers: cd.telegram_channel_user_count ?? undefined,
+      sentimentUpPct: detail.sentiment_votes_up_percentage ?? undefined,
+      sentimentDownPct: detail.sentiment_votes_down_percentage ?? undefined,
+    },
+    developer: {
+      githubStars: dd.stars ?? undefined,
+      githubForks: dd.forks ?? undefined,
+      commits4w: dd.commit_count_4_weeks ?? undefined,
+      contributors: dd.pull_request_contributors ?? undefined,
+      pullRequestsMerged: dd.pull_requests_merged ?? undefined,
+      issuesOpenPct,
+    },
+    topExchanges: tickersTop.length ? tickersTop : undefined,
+  };
 }
 
 async function fetchCoinChart(
@@ -969,6 +1215,15 @@ async function runTokenQuote(query: string): Promise<Web3CliResult> {
       ].join('\n')
     : `## Web3 数据\n未获取到 ${resolved.id} 的现货快照。${errorMessage ? `\n原因: ${errorMessage}` : ''}`;
 
+  // ── Card-ready snapshot ──
+  let tokenSnapshot: TokenSnapshot | undefined;
+  try {
+    const detail = await fetchCoinDetail(resolved.id);
+    tokenSnapshot = buildTokenSnapshot(detail, row);
+  } catch {
+    if (row) tokenSnapshot = buildTokenSnapshot(null, row);
+  }
+
   return {
     ok: true,
     report,
@@ -976,7 +1231,7 @@ async function runTokenQuote(query: string): Promise<Web3CliResult> {
     via,
     assets: row ? [{ id: row.id, symbol: row.symbol, name: row.name }] : [{ id: resolved.id, symbol: resolved.symbol, name: resolved.name }],
     market: { spot: row || {} },
-    discovery: {},
+    discovery: tokenSnapshot ? { tokenSnapshot } : {},
     onchain: {},
     nft: {},
     logs,
@@ -984,6 +1239,7 @@ async function runTokenQuote(query: string): Promise<Web3CliResult> {
     resolvedId: resolved.id,
     spotPriceUsd: row?.current_price,
     resolver,
+    tokenSnapshot,
   };
 }
 
@@ -1389,6 +1645,20 @@ async function runAgentLoop(query: string): Promise<Web3CliResult> {
 
   if (!finalReport) finalReport = '## Web3 数据\n数据收集完成，但未能生成最终报告。';
 
+  // ── Always attach a card-ready snapshot for the resolved primary token ──
+  // Independent of which tools the LLM picked: gives downstream a stable
+  // structured payload (price / market / community / developer / exchanges)
+  // for the TokenCard + crypto-analysis prompt context.
+  let tokenSnapshot: TokenSnapshot | undefined;
+  if (resolvedId) {
+    try {
+      const detail = await fetchCoinDetail(resolvedId);
+      tokenSnapshot = buildTokenSnapshot(detail, getCachedSpotRow(resolvedId));
+    } catch {
+      /* best-effort */
+    }
+  }
+
   return {
     ok: true,
     report: finalReport,
@@ -1399,11 +1669,12 @@ async function runAgentLoop(query: string): Promise<Web3CliResult> {
     resolver: 'llm-agent',
     assets: resolvedAssets,
     market: {},
-    discovery: {},
+    discovery: tokenSnapshot ? { tokenSnapshot } : {},
     onchain: inferredIntent === 'onchain_scan' ? { agent: true } : {},
     nft: inferredIntent === 'nft_scan' ? { agent: true } : {},
-    logs: [`mode=agent`, `intent=${inferredIntent}`, `tools=${toolsUsed.join(',') || 'none'}`, `turns=${toolsUsed.length}`],
+    logs: [`mode=agent`, `intent=${inferredIntent}`, `tools=${toolsUsed.join(',') || 'none'}`, `turns=${toolsUsed.length}`, `tokenSnapshot=${tokenSnapshot ? 'yes' : 'no'}`],
     missingData: [],
+    tokenSnapshot,
   };
 }
 
@@ -1489,7 +1760,7 @@ async function runLegacyMcpQuery(query: string, intent: Web3Intent): Promise<Web
           ? [{ id: resolved.id, symbol: resolved.symbol, name: resolved.name }]
           : [],
       market: coreSpot ? { spot: coreSpot.market?.spot || {} } : {},
-      discovery: {},
+      discovery: coreSpot?.tokenSnapshot ? { tokenSnapshot: coreSpot.tokenSnapshot } : {},
       onchain: intent === 'onchain_scan' ? { tools: successfulTools } : {},
       nft: intent === 'nft_scan' ? { tools: successfulTools } : {},
       logs: [
@@ -1500,6 +1771,7 @@ async function runLegacyMcpQuery(query: string, intent: Web3Intent): Promise<Web
         ...(coreSpot ? ['forced_market_snapshot=true'] : []),
       ],
       missingData,
+      tokenSnapshot: coreSpot?.tokenSnapshot,
     };
   } catch (e) {
       return {
