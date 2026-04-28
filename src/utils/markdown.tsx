@@ -527,11 +527,8 @@ export function QuoteCard({
         </div>
       )}
 
-      {/* Derivatives — merged section (crypto only) */}
-      {okxSnap && <OkxQuoteDerivatives okx={okxSnap} lang={lang as 'zh' | 'en'} />}
-
-      {/* OKX News & Sentiment (crypto only) */}
-      {okxNews && <OkxQuoteNews bundle={okxNews} lang={lang as 'zh' | 'en'} />}
+      {/* OKX-derived derivatives + news sections removed per product decision —
+          crypto data is now surfaced exclusively via the TokenCard upstream. */}
 
       {/* Timestamp */}
       {quote.asOf && (

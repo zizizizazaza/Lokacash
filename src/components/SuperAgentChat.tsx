@@ -8,7 +8,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, TokenCard, type TokenSnapshotData, extractHeadings, SourcesProvider } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, TokenCard, type TokenSnapshotData, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 import { I } from './Icons';
@@ -5340,80 +5340,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                                 </div>
                                                                             </div>
                                                                         )}
-                                                                        {/* OKX News & Sentiment — merged section inside quote card */}
-                                                                        {matchingOkxNews && <OkxQuoteNews bundle={matchingOkxNews} lang={liveQuote.lang === 'en' ? 'en' : 'zh'} />}
-                                                                        {/* OKX Derivatives — merged section inside quote card */}
-                                                                        {matchingOkx && (() => {
-                                                                            const fr = matchingOkx.derivatives?.fundingRate;
-                                                                            const frAnnual = fr != null ? fr * 3 * 365 * 100 : null;
-                                                                            const fundingColor = fr != null
-                                                                                ? (fr >= 0 ? 'text-emerald-600' : 'text-red-500')
-                                                                                : 'text-gray-400';
-                                                                            const range7 = okxSummarizeWindow(matchingOkx.candles, 7);
-                                                                            const range30 = okxSummarizeWindow(matchingOkx.candles, 30);
-                                                                            const derivStats: { label: string; value: React.ReactNode }[] = [];
-                                                                            if (fr != null) {
-                                                                                derivStats.push({
-                                                                                    label: 'Funding / 8h',
-                                                                                    value: (
-                                                                                        <span className={fundingColor}>
-                                                                                            {(fr * 100).toFixed(4)}%
-                                                                                            {frAnnual != null && (
-                                                                                                <span className="text-gray-400 font-normal ml-1">({frAnnual >= 0 ? '+' : ''}{frAnnual.toFixed(1)}% APR)</span>
-                                                                                            )}
-                                                                                        </span>
-                                                                                    ),
-                                                                                });
-                                                                            }
-                                                                            if (matchingOkx.derivatives?.openInterestUsd != null) {
-                                                                                derivStats.push({ label: 'Open Interest', value: okxFmtUsdCompact(matchingOkx.derivatives.openInterestUsd) });
-                                                                            }
-                                                                            if (matchingOkx.orderbookDepthUsd != null) {
-                                                                                derivStats.push({ label: 'Depth ±10', value: okxFmtUsdCompact(matchingOkx.orderbookDepthUsd) });
-                                                                            }
-                                                                            if (derivStats.length === 0 && !range7 && !range30) return null;
-                                                                            return (
-                                                                                <>
-                                                                                    <div className="mx-5 h-px bg-gradient-to-r from-transparent via-amber-200/60 to-transparent" />
-                                                                                    <div className="px-5 py-3.5 space-y-2.5">
-                                                                                        <div className="flex items-center gap-1.5">
-                                                                                            <svg className="w-3 h-3 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
-                                                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6" />
-                                                                                            </svg>
-                                                                                            <span className="text-[9px] uppercase tracking-[0.08em] text-amber-600 font-semibold leading-none">{liveQuote.lang === 'en' ? 'Derivatives' : '衍生品'}</span>
-                                                                                        </div>
-                                                                                        {derivStats.length > 0 && (
-                                                                                            <div className="grid grid-cols-3 gap-x-4 gap-y-3">
-                                                                                                {derivStats.map((s, si) => (
-                                                                                                    <div key={si} className="min-w-0">
-                                                                                                        <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
-                                                                                                        <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
-                                                                                                    </div>
-                                                                                                ))}
-                                                                                            </div>
-                                                                                        )}
-                                                                                        {(range7 || range30) && (
-                                                                                            <div className="text-[11.5px] text-gray-600 pt-1">
-                                                                                                {range7 && (
-                                                                                                    <>
-                                                                                                        <span className="text-gray-400">7D </span>
-                                                                                                        <span className="font-medium text-gray-700 tabular-nums">{okxFmtUsdCompact(range7.low)} — {okxFmtUsdCompact(range7.high)}</span>
-                                                                                                        <span className={`ml-1 font-medium ${range7.pct >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{okxFmtPctSigned(range7.pct)}</span>
-                                                                                                    </>
-                                                                                                )}
-                                                                                                {range7 && range30 && <span className="text-gray-300 mx-2">·</span>}
-                                                                                                {range30 && (
-                                                                                                    <>
-                                                                                                        <span className="text-gray-400">30D </span>
-                                                                                                        <span className={`font-medium ${range30.pct >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{okxFmtPctSigned(range30.pct)}</span>
-                                                                                                    </>
-                                                                                                )}
-                                                                                            </div>
-                                                                                        )}
-                                                                                    </div>
-                                                                                </>
-                                                                            );
-                                                                        })()}
                                                                     </div>
                                                                 );
                                                             })()}
@@ -5485,38 +5411,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 );
                                                             })()}
                                                             {/* Crypto token card (Web3 queries) — live CoinGecko snapshot.
-                                                                Rendered FIRST so the reader sees the token-identity lens (logo /
-                                                                project name / FDV / supply / socials / exchanges) before the
-                                                                trader-oriented Market Signals panel below. */}
+                                                                Token-identity lens: logo / project name / FDV / supply /
+                                                                socials / top exchanges / project links. */}
                                                             {tokenCards[i] && <TokenCard token={tokenCards[i]} lang={/[一-鿿]/.test(msg.content || '') ? 'zh' : 'en'} />}
-                                                            {/* OKX standalone fallback when no QuoteCard renders — reuses the same
-                                                                OkxQuoteDerivatives + OkxQuoteNews as the merged path, wrapped in a
-                                                                header. Surfaces derivatives AND news, bilingual label. */}
-                                                            {!liveQuote && !quote && (okxSnapshots.length > 0 || okxNewsBundles.length > 0) && !msg.isStreaming && (() => {
-                                                                const prevUser = messages.slice(0, i).reverse().find((m) => m.role === 'user');
-                                                                const isZh = !!prevUser && /[\u4e00-\u9fff]/.test(prevUser.content);
-                                                                return (
-                                                                    <div className="mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] bg-gradient-to-br from-amber-50/50 via-white to-white">
-                                                                        <div className="px-5 pt-4 pb-2 flex items-center gap-2">
-                                                                            <svg className="w-4 h-4 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 14l3-3 4 4 6-6" />
-                                                                            </svg>
-                                                                            <span className="text-[13px] font-bold text-gray-900 tracking-tight">
-                                                                                {isZh ? '市场信号' : 'Market Signals'}
-                                                                            </span>
-                                                                            <span className="text-[10.5px] text-amber-600/80 font-medium">
-                                                                                {isZh ? '· 衍生品 · 情绪 · 新闻' : '· Derivatives · Sentiment · News'}
-                                                                            </span>
-                                                                        </div>
-                                                                        {okxSnapshots.map((snap, idx) => (
-                                                                            <OkxQuoteDerivatives key={`d-${idx}`} okx={snap} />
-                                                                        ))}
-                                                                        {okxNewsBundles.map((bundle, idx) => (
-                                                                            <OkxQuoteNews key={`n-${idx}`} bundle={bundle} lang={isZh ? 'zh' : 'en'} />
-                                                                        ))}
-                                                                    </div>
-                                                                );
-                                                            })()}
                                                             {showWebView ? (
                                                                 <HtmlReportFrame html={htmlReports[i]} isStreaming={false} />
                                                             ) : showWebSkeleton ? (
