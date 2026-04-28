@@ -5150,37 +5150,6 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         </button>
                                                     </div>
                                                 )}
-                                                {/* Per-message view tabs: Docs / Web / Roundtable — single row */}
-                                                {msg.role === 'assistant' && !msg.isStreaming && (htmlReports[i] || htmlGenerating[i]) && (
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <div className="flex items-center gap-1.5">
-                                                        {(htmlReports[i] || htmlGenerating[i]) && (
-                                                            <div className="flex items-center gap-0.5 p-0.5 bg-gray-100 rounded-lg">
-                                                                <button
-                                                                    onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'docs' }))}
-                                                                    className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                                                                        (msgViewMode[i] || 'docs') === 'docs'
-                                                                            ? 'bg-white text-gray-900 shadow-sm'
-                                                                            : 'text-gray-500 hover:text-gray-700'
-                                                                    }`}
-                                                                >
-                                                                    Docs
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => setMsgViewMode(prev => ({ ...prev, [i]: 'web' }))}
-                                                                    className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                                                                        msgViewMode[i] === 'web'
-                                                                            ? 'bg-white text-gray-900 shadow-sm'
-                                                                            : 'text-gray-500 hover:text-gray-700'
-                                                                    }`}
-                                                                >
-                                                                    Web
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        </div>
-                                                    </div>
-                                                )}
                                                 {/* Bare stage pipeline — shows for all modes:
                                                     - Roundtable: 5 stages (Summon → Research → Debate → Consensus → Report)
                                                     - Fast / Auto: 3 stages (Route → Research → Respond) */}

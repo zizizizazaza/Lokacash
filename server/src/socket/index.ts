@@ -3347,6 +3347,14 @@ ${synFullContent || contextString}${langFooter}`;
             // LLM completion, so the Debate Tab updates as agents finish.)
 
             if (agentResponses.length > 0) {
+              // Parse the explicit SIGNAL line each persona emits in their
+              // answer schema. Without this, the synthesis LLM has to infer
+              // the verdict from prose and hedges everyone to "Neutral 65%".
+              const parseSignal = (answer: string): 'Bullish' | 'Bearish' | 'Neutral' => {
+                const m = (answer || '').match(/SIGNAL:\s*(bullish|bearish|neutral)/i);
+                const raw = m ? m[1].toLowerCase() : 'neutral';
+                return raw === 'bullish' ? 'Bullish' : raw === 'bearish' ? 'Bearish' : 'Neutral';
+              };
               expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
               expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
               expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
@@ -3361,11 +3369,21 @@ ${synFullContent || contextString}${langFooter}`;
               expertDebateContext += isZhQuery
                 ? `【命名规则】下方每一位专家的名字都必须在正文中原样引用(如"沃伦·巴菲特视角认为…"),禁止替换成"专家1/专家2"等匿名编号。\n\n`
                 : `[NAMING RULE] Each position below is labelled with a specific analyst name. Your report MUST reference them by these exact names when attributing views (e.g. "Warren Buffett's lens argues…"). Do NOT substitute with "Expert 1 / Analyst A / 专家1" or any numeric placeholder.\n\n`;
+              // CRITICAL — verdict + confidence are explicit numeric fields
+              // emitted PER expert below. The synthesis LLM (and the HTML
+              // expert table) MUST copy these values verbatim, NOT infer or
+              // default. Prior bug: every expert ended up "Neutral / 65%" in
+              // the rendered table because the LLM hedged when verdict was
+              // not explicitly provided in a key:value form.
+              expertDebateContext += isZhQuery
+                ? `【数据规则】每位专家下方明确给出 VERDICT(立场)与 CONFIDENCE(信心 %),报告里的"核心观点"和"信心"两栏必须**原值复用**,不允许全部填"中性/65%",也不允许根据自己阅读后再推断。\n\n`
+                : `[DATA RULE] Each expert below has explicit VERDICT and CONFIDENCE values. The "Signal" and "Confidence" columns in your output MUST copy these values verbatim. Do NOT default everyone to "Neutral / 65%" and do NOT re-infer from prose.\n\n`;
               expertDebateContext += `Individual Expert Positions:\n`;
               agentResponses.forEach((resp: any, idx: number) => {
                 const name = resolveAgentName(resp.agentId, idx);
                 const conf = Math.round((resp.confidence || 0) * 100);
-                expertDebateContext += `--- ${name} (${conf}% confidence) ---\n${resp.answer}\n\n`;
+                const verdict = parseSignal(resp.answer);
+                expertDebateContext += `--- ${name} | VERDICT: ${verdict} | CONFIDENCE: ${conf}% ---\n${resp.answer}\n\n`;
               });
             }
 
