@@ -4,6 +4,7 @@
  */
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { usePrivy } from '@privy-io/react-auth';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
@@ -3073,6 +3074,7 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
 
 const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable }) => {
     const navigate = useNavigate();
+    const { ready: privyReady, authenticated: privyAuthenticated } = usePrivy();
     const [sessionId] = useState(() => {
         if (initialSessionId) return initialSessionId;
         try {
@@ -3366,22 +3368,30 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     // Fetch Fast / Roundtable usage quotas so the mode selector can show
     // remaining counts (matches SuperAgentHome behavior — same picker, same badges).
+    // Wait for Privy to resolve before deciding. Without this, the cold-load
+    // path runs once with `api.isAuthenticated === false` (token not yet
+    // injected) and never retries — quota badges stay empty even after login.
     useEffect(() => {
-        if (!api.isAuthenticated) {
+        if (!privyReady) return;
+        if (!privyAuthenticated) {
             setRoundtableQuota(null);
             setFastQuota(null);
             return;
         }
+        let cancelled = false;
         api.getQuota()
             .then(q => {
+                if (cancelled) return;
                 setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
                 if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
             })
             .catch(() => {
+                if (cancelled) return;
                 setRoundtableQuota({ used: 1, limit: 3 });
                 setFastQuota({ used: 4, limit: 20 });
             });
-    }, []);
+        return () => { cancelled = true; };
+    }, [privyReady, privyAuthenticated]);
 
     useEffect(() => {
         if (!agentPickerOpen) return;
