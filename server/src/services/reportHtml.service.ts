@@ -306,14 +306,18 @@ Lists:
 4. Data Visualization: two-col layout with bar charts (.bar-mini) and tables (.seg-table)
 5. Scenario Analysis: 3-4 scenario cards (.scenario-grid with .sc-bull/.sc-base/.sc-flat/.sc-bear)
 6. Risk Matrix: table with probability/impact pills (.pill-low/.pill-mid/.pill-high)
-7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert's core view, confidence, and key argument using expert-row components. Include:
-   - Expert cards: each expert with name, signal (bullish/bearish/neutral), confidence bar, and 1-2 sentence core argument
-   - **HARD DATA RULE — every expert section in the input is labelled like \`--- {Name} | VERDICT: Bullish | CONFIDENCE: 78% ---\`. The Signal column / signal pill MUST copy the VERDICT value verbatim (Bullish / Bearish / Neutral). The Confidence bar / value MUST copy the CONFIDENCE percentage verbatim. NEVER default every expert to "Neutral / 65%". NEVER re-infer the signal by re-reading the prose — the explicit VERDICT field is authoritative.**
-   - Points of Agreement: where experts converged
-   - Points of Contention: where experts disagreed and what data would resolve it
-   - Synthesis: how the debate shaped the final thesis
-8. Key Monitoring: monitor-list with current values and triggers
-9. Action Strategy: trade-box with entry/stop/target cards
+7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert's debate journey + core arguments. Include:
+   - **COVERAGE RULE — render an expert card for EVERY SINGLE expert that appears in the input. If the input has 6 experts, your output MUST have 6 expert cards. NEVER pick a subset, NEVER merge two experts into one card, NEVER skip an expert because their view "looks similar" to another's. The user wants to see every voice represented.**
+   - Expert cards: each expert with name, **strongest directional stance during debate** (bullish/bearish/neutral), confidence bar, and 2-3 sentence core argument (NOT 1 sentence — give each persona room to make their case).
+   - **HARD DATA RULE — the input organizes each expert under \`=== {Name} ===\` with a \`[Round N STRONGEST stance]\` block (verdict + confidence + reasoning) and a \`[Round M FINAL stance after debate]\` block. For the Signal column / signal pill use the STRONGEST stance VERDICT verbatim. For the Confidence bar use the STRONGEST stance CONFIDENCE verbatim. NEVER default every expert to "Neutral / 65%". NEVER re-infer the signal — the explicit VERDICT field is authoritative.**
+   - **NARRATIVE RULE — when the strongest and final stances differ, your prose MUST narrate the journey. Example pattern: "X's lens initially called this Bearish (Round 1), but conceded to Neutral after Y's argument about [specific data]." Don't just list opinions — show how minds moved.**
+   - Points of Agreement: where experts converged in the final round
+   - Points of Contention: where experts had divergent strongest stances; what data would have resolved it
+   - Synthesis: how the debate journey shaped the final consensus
+8. Key Monitoring: monitor-list with current values and triggers.
+   - **COVERAGE RULE — render a monitor-item for EVERY metric / indicator that appears in the input's "Key Monitoring Indicators" or equivalent section. NEVER pick a "top 3" or skip metrics you consider less important. The user is monitoring all of them.**
+9. Action Strategy: trade-box with entry/stop/target cards.
+   - **COVERAGE RULE — if the input describes a long-entry plan, a short-entry plan, AND a range-bound alternative, render all three as separate trade-box rows. Do NOT compress them into one summary box. Each plan should keep its full detail (entry condition + stop + target + position size) — these are the actionable instructions and must NOT be paraphrased away.**
 10. The report ENDS here after Action Strategy. Do NOT add a Related Questions section — the frontend renders that separately.
 
 === CRITICAL RULES ===
@@ -325,7 +329,7 @@ Lists:
 6. Canvas elements MUST have unique IDs.
 7. Use semantic colors in inline styles when needed: green (#3B6D11/#639922) for positive, red (#A32D2D/#E24B4A) for negative, blue (#378ADD/#185FA5) for neutral/info.
 8. For non-stock topics, adapt the template — skip stock-specific widgets, add relevant ones using the available classes.
-9. Keep the design minimal, data-dense, and professional. No decorative elements.
+9. Be data-dense AND comprehensive. When the input is rich (long markdown, multi-section, multi-expert debate), render every section the input contains — do NOT summarize for the sake of brevity. The Bloomberg/Apple aesthetic means dense and structured, not minimal. If the input has 6 experts, 7 monitoring metrics, and 3 trade strategies, your output MUST have 6 expert cards, 7 monitoring items, 3 trade-box rows. Token budget is 16K — use it.
 10. Do NOT use markdown syntax anywhere: no **bold**, no *italic*, no -- dashes for lists. All text must be plain HTML (<strong>, <em>, <ul>/<li>).
 11. Section titles and headings must be plain text inside HTML tags. Never wrap titles in ** asterisks.
 12. The report ends after Action Strategy / Key Monitoring. Do NOT add a Related Questions section, "Data Sources" footnote, or any extra text — the frontend renders those separately.
@@ -429,6 +433,118 @@ Lists:
 }
 
 // ============================================================================
+// Crypto-analysis HTML prompt (mirrors the markdown cryptoMemoPrompt)
+// — adaptive sections, NO mandatory expert-debate / scenario-grid templates.
+// ============================================================================
+
+function buildCryptoHtmlPrompt(userContent: string, inputContext: string): string {
+  const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+  const langLock = isZh
+    ? `\n=== LANGUAGE LOCK (HIGHEST PRIORITY) ===\n用户问题是中文。整篇 HTML 必须 100% 简体中文：所有 <h1>/<h2>/<h3>/.section-title 标题、所有段落、所有 <li>、所有 <th>/<td>、所有 .kpi-label / .t-label / .stat-name 等组件标签、所有 <strong>/<em> 内容、所有 <details><summary>。\n禁止任何英文句子或英文短语作为正文/标题。币种 ticker（BTC、ETH、HYPE 等）、交易所名（OKX、Binance）、缩写（FDV、OI、APR、RSI）保持英文。其他都必须中文。\n如果 Context 里的资料是英文，必须先翻译成中文再写入 HTML，禁止照抄英文段落。\n`
+    : `\n=== LANGUAGE LOCK (HIGHEST PRIORITY) ===\nThe user's question is in English. The entire HTML must be 100% English: every <h1>/<h2>/<h3>/.section-title, every paragraph, every <li>, every <th>/<td>, every .kpi-label / .t-label / .stat-name, every <strong>/<em>, every <details><summary>.\nDo NOT emit any Chinese characters anywhere in the output. Tickers (BTC, ETH) and exchange names (OKX, Binance) stay as-is.\nIf the Context contains Chinese-language material, translate or summarize it in English — never copy Chinese characters into the output.\n`;
+  return `You are a senior crypto trader-analyst AND a world-class frontend designer. You are producing the HTML render of a crypto memo for an experienced trader.
+${langLock}
+=== INPUT ===
+User question: ${userContent}
+Context (raw research — every datum here is fair game; numbers OUTSIDE this block are forbidden):
+${inputContext}
+
+=== HARD RULES ===
+
+1. NO FABRICATION. Every number must come from the Context. If a needed number isn't there, write "(no data)" or skip the claim. Never guess prices, supplies, percentages, dates, holder counts, funding rates, OI, or volume.
+
+2. ANSWER THE QUESTION. Re-read the user question. Make the dominant section answer THAT question. If the user asked about tokenomics, lead with tokenomics. If the user asked "why is X moving today", lead with the tape + news. Do NOT pad with sections the user didn't ask about.
+
+3. NO FIXED TEMPLATE. Pick 2-5 sections based on what the data and the question demand. Section titles must be sharp and specific (e.g. "解锁前的真实抛压" / "Funding overheated vs spot"), NOT generic ("Market Analysis", "Conclusion", "Technicals", "Overview").
+
+4. NO EXPERT-DEBATE / GURU PANEL. There is no expert debate data in the input — do NOT render any expert-card, debate-item, consensus-panel, scenario-grid, or guru-style component. If the input has no scenarios, do NOT invent them.
+
+5. NO TOKEN SNAPSHOT BLOCK. The frontend already renders a TokenCard above this HTML (icon, price, deltas, mkt cap, FDV, top exchanges, links). Do NOT echo basic metadata — no "Token Info" / "标的信息" / "资产快照" section, no contract address, no website list, no Twitter handle.
+
+6. LANGUAGE. Match the user's language end-to-end. Chinese question → all Chinese (headings, KPI labels, table headers). English → all English. No mixing.
+
+=== OUTPUT FORMAT ===
+Output a single <div class="report-wrap">...</div> block. Raw HTML only — NO markdown syntax (no **bold**, no *italic*, no -- dashes), NO \`\`\`html fences, NO preamble, NO trailing prose. Do NOT emit <style> or <link> tags — host injects CSS.
+
+=== AVAILABLE CSS CLASSES (use these — don't invent class names) ===
+
+Layout:
+  .report-wrap (root) → .report-header > (.report-label + .report-title + .report-verdict[.verdict-dot])
+  .section > .section-title
+  .two-col (2-column responsive grid)
+
+Executive snapshot:
+  .thesis-box (left-bordered callout — use this for the opening 2-3 sentence summary)
+
+KPIs (3-4 max — these are LIVE-DATA cards, not narrative):
+  .kpi-grid > .kpi-card > (.kpi-label + .kpi-value[.kpi-up|.kpi-dn] + .kpi-sub)
+
+Catalysts / unlock calendar / numbered drivers:
+  .catalyst-list > .catalyst-item with .catalyst-num (numbered badge)
+
+Tables (tokenomics / funding / holders / exchanges):
+  .seg-table — segmented financial table
+
+Risk matrix (probability × impact):
+  .risk-table with .pill.pill-low / .pill-mid / .pill-high
+
+Bar charts (pure CSS, for funding curves, holder concentration etc):
+  .bar-mini > (.bar-mini-label + .bar-mini-track > .bar-mini-fill + .bar-mini-val)
+
+Risk list:
+  .risk-list > .risk-item > (.risk-dot + text)
+
+Action / tradeable levels:
+  .trade-box > .trade-card > (.t-label + .t-value)
+
+Standard <ul>/<ol>/<li>, <details><summary>, <strong>, <em> are pre-styled — use them.
+
+=== STRUCTURE (FLEXIBLE — pick what fits) ===
+
+A. Header (.report-header) — short label like "CRYPTO MEMO" / "加密研究备忘"; title that captures the angle; .report-verdict badge with bias (Long / Short / Neutral / 看多 / 看空 / 中性). Color the .verdict-dot: green (#10b981) for long, red (#f43f5e) for short, amber (#f59e0b) for neutral.
+
+B. Executive Snapshot (.thesis-box) — 2-3 sentences. Lead line MUST be a one-liner with: Bias / Action / Confidence / Trigger separated by " · ". Each subsequent sentence must carry at least one number from Context.
+
+C. KPI Grid (.kpi-grid, 3-4 cards) — only the metrics that matter for THIS question. Examples:
+   • Spot price + 24h Δ (color via .kpi-up/.kpi-dn)
+   • Funding rate (% per 8h, annualized in .kpi-sub)
+   • Open Interest in USD
+   • FDV / Mkt Cap ratio
+   • Holder concentration (top10 %)
+   • Unlock cliff date / amount
+   Skip a KPI if data is missing — do NOT fabricate to fill the grid.
+
+D. 2-5 body sections (each <section class="section"><h2 class="section-title">…</h2>…</section>). Use whichever building blocks fit the section:
+   • Tape read → KPI grid (already done) + .bar-mini for 7d/30d return + a short paragraph
+   • Tokenomics / supply pressure → .seg-table for vesting + .catalyst-list for upcoming unlocks
+   • What the market missed → paragraph + .seg-table comparing news vs price reaction
+   • On-chain flows / holder concentration → .seg-table or .bar-mini
+   • Comparison vs peers (only if user asked) → .seg-table
+   • Tradeable levels → .trade-box with entry / stop / target cards
+
+   Inside each paragraph: every claim ends with the supporting number, e.g. "<strong>Funding overheated</strong> · +0.012%/8h ≈ 13% APR (OKX)".
+
+   Long raw tables (full holder list, complete vesting schedule, full exchange listings, deep candle table) → wrap in <details><summary>详细数据 / Show details</summary>…</details> so the main report stays scannable.
+
+E. Risks / Kill-switch (always; section title YOUR own creative phrasing) — .risk-list with 3 items. Each item is an OBSERVABLE threshold → action. Example: "BTC -8% intraday → close all longs".
+
+F. Tags + Questions to watch (always last — must be the final block before </div>):
+   - Plain paragraph: "<strong>Tags:</strong> Importance · Categories · Time-horizon" (translate labels).
+   - <strong>Questions to watch / 值得关注的问题：</strong>
+   - <ul> with 3-5 single-question <li> items (each ends in ? or ？; no follow-on prose, no links).
+
+=== CRITICAL FORMATTING RULES ===
+
+1. ONLY HTML. No markdown anywhere — convert ** to <strong>, * to <em>, dashes to <ul>/<li>.
+2. Output starts with <div class="report-wrap"> and ends with </div>. Nothing before, nothing after.
+3. Section titles inside <h2 class="section-title"> must be plain text — never wrapped in ** asterisks.
+4. No "Data Sources" footnote, no Related Questions block, no horizontal rules — frontend renders sources separately.
+5. Use semantic colors via inline style only when no class fits: green #166534/#10b981, red #991B1B/#f43f5e, amber #92400E/#f59e0b, blue #185FA5/#378ADD.
+6. Mobile-responsive grid is handled by the host CSS — don't add media queries.
+`;
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -445,17 +561,27 @@ export interface RunHtmlGenerationParams {
 export async function runHtmlGeneration(params: RunHtmlGenerationParams): Promise<string> {
   const { userContent, contextString, queryType } = params;
   const isGuru = queryType === 'guru-council';
+  const isCrypto = queryType === 'crypto-analysis';
 
   const htmlPrompt = isGuru
     ? buildGuruCouncilHtmlPrompt(userContent, contextString)
-    : buildWebReportPrompt(userContent, contextString);
+    : isCrypto
+      ? buildCryptoHtmlPrompt(userContent, contextString)
+      : buildWebReportPrompt(userContent, contextString);
   const cssBlock = isGuru ? GURU_COUNCIL_CSS : WEB_REPORT_CSS;
 
+  // 16384 token output budget. The earlier 8192 cap was the main reason the
+  // HTML report looked "thin" next to the markdown Docs view: every Bloomberg-
+  // style template section (KPI / scenario / risks / experts / monitoring /
+  // strategy) ate into a small shared budget, so the LLM compressed expert
+  // debate down to 2 cards, monitoring down to 3 metrics, etc. Doubling the
+  // ceiling lets the structured panels carry roughly the same content density
+  // as the markdown report. DeepSeek-v3 / Claude both support 16K+ outputs.
   const htmlStream = await aiService.chatStream(
     [{ role: 'user', content: htmlPrompt }],
     'superagent',
     undefined,
-    8192,
+    16384,
   );
 
   // Parse OpenAI-style SSE stream → plain text

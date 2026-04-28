@@ -11,6 +11,27 @@ const WEB3_ROOT = path.join(__dirname, '../../tools/web3');
 const CLI_JS = path.join(WEB3_ROOT, 'dist', 'cli.js');
 const CLI_TS = path.join(WEB3_ROOT, 'src', 'cli.ts');
 
+/**
+ * Wall-clock budget for the web3 LLM-agent CLI subprocess.
+ *
+ * The agent runs a multi-turn loop: each turn is one LLM call + one CG REST
+ * call (or OKX/news/etc.). For a `token_deep_dive` intent it typically spends
+ * 4-5 turns (search → market → detail → history → final synthesis), each
+ * ~8-12s on DeepSeek-V3, so a healthy run lands around 45-60s. The earlier
+ * hard-coded 45s ceiling killed legitimate runs mid-loop and produced empty
+ * web3 results — the worst kind of failure since the user gets a half-formed
+ * report without realizing the on-chain data was missing.
+ *
+ * Default 90s gives 5-6 full turns of headroom; override with
+ * `WEB3_MCP_TIMEOUT_MS` if your model / network is consistently slower.
+ */
+function web3CliTimeoutMs(): number {
+  const raw = (process.env.WEB3_MCP_TIMEOUT_MS || '').trim();
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 15_000 && n <= 600_000) return n;
+  return 90_000;
+}
+
 export type Web3OkxSnapshot = {
   baseCcy: string;
   spotInstId: string | null;
@@ -68,6 +89,73 @@ export type Web3OkxNewsBundle = {
   sentiment: Web3OkxSentiment | null;
 };
 
+/**
+ * Compact, card-ready snapshot for the primary token of a crypto query.
+ * Mirrors what the web3 CLI emits in `tokenSnapshot`.
+ * Used by the TokenCard UI and as inline data context in the crypto-analysis prompt.
+ */
+export type Web3TokenSnapshot = {
+  id: string;
+  symbol: string;
+  name: string;
+  imageUrl?: string;
+  rank?: number;
+  categories?: string[];
+  description?: string;
+  homepage?: string;
+  whitepaper?: string;
+  twitter?: string;
+  telegram?: string;
+  reddit?: string;
+  github?: string;
+  contract?: { chain: string; address: string };
+  market: {
+    priceUsd?: number;
+    change24hPct?: number;
+    change7dPct?: number;
+    change30dPct?: number;
+    change1yPct?: number;
+    marketCapUsd?: number;
+    fdvUsd?: number;
+    fdvOverMcap?: number;
+    volume24hUsd?: number;
+    high24hUsd?: number;
+    low24hUsd?: number;
+    athUsd?: number;
+    athChangePct?: number;
+    athDate?: string;
+    atlUsd?: number;
+    atlChangePct?: number;
+    atlDate?: string;
+    circulatingSupply?: number;
+    totalSupply?: number;
+    maxSupply?: number;
+    circulatingPctOfMax?: number;
+  };
+  community: {
+    twitterFollowers?: number;
+    redditSubscribers?: number;
+    telegramUsers?: number;
+    sentimentUpPct?: number;
+    sentimentDownPct?: number;
+  };
+  developer: {
+    githubStars?: number;
+    githubForks?: number;
+    commits4w?: number;
+    contributors?: number;
+    pullRequestsMerged?: number;
+    issuesOpenPct?: number;
+  };
+  topExchanges?: Array<{
+    name: string;
+    pair: string;
+    volumeUsd?: number;
+    trustScore?: string;
+    spreadPct?: number;
+  }>;
+};
+
 export type Web3ResearchResult = {
   report: string;
   raw: {
@@ -86,6 +174,8 @@ export type Web3ResearchResult = {
     okx?: Web3OkxSnapshot[];
     okxNews?: Web3OkxNewsBundle[];
     providers?: Array<'coingecko' | 'okx-market' | 'okx-news'>;
+    /** Card-ready snapshot for primary token (single-asset intents). */
+    tokenSnapshot?: Web3TokenSnapshot;
   };
 };
 
@@ -177,13 +267,15 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
 
     let stdout = '';
     let stderr = '';
+    const timeoutMs = web3CliTimeoutMs();
+    const timeoutSec = Math.round(timeoutMs / 1000);
     const timer = setTimeout(() => {
       console.warn(
-        `[web3Research] timeout after 45s query="${clip(q, 120)}" cli=${useCompiled ? 'dist' : useTsx ? 'tsx' : 'none'}`,
+        `[web3Research] timeout after ${timeoutSec}s query="${clip(q, 120)}" cli=${useCompiled ? 'dist' : useTsx ? 'tsx' : 'none'}`,
       );
       child.kill('SIGTERM');
-      reject(new Error('Web3 MCP tool timeout (45s)'));
-    }, 45_000);
+      reject(new Error(`Web3 MCP tool timeout (${timeoutSec}s)`));
+    }, timeoutMs);
 
     child.stdout.on('data', (d) => {
       stdout += d.toString();
@@ -254,6 +346,7 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
           nft?: Record<string, unknown>;
           logs?: string[];
           missingData?: string[];
+          tokenSnapshot?: Web3TokenSnapshot;
         };
         if (!parsed.ok) {
           console.warn(
@@ -293,6 +386,7 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
             nft: parsed.nft || {},
             logs: parsed.logs || [],
             missingData: parsed.missingData || [],
+            tokenSnapshot: parsed.tokenSnapshot,
           },
         });
         setCachedResult(q, {
@@ -310,6 +404,7 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
             nft: parsed.nft || {},
             logs: parsed.logs || [],
             missingData: parsed.missingData || [],
+            tokenSnapshot: parsed.tokenSnapshot,
           },
         });
       } catch (e) {

@@ -315,6 +315,191 @@ function web3FocusTokens(raw: Web3ResearchResult['raw'] | undefined): string[] {
   return Array.from(tokens).filter((t) => /^[a-z0-9][a-z0-9\s_-]{1,30}$/.test(t));
 }
 
+/**
+ * Local crypto fallback report — used when the LLM synthesis fails (e.g. quota
+ * exhausted) but we already have a real `tokenSnapshot` from CoinGecko.
+ *
+ * Pure formatting, no LLM call. Every number comes from `snap.market`. This
+ * is NOT a substitute for the real cryptoMemoPrompt output — it's a
+ * deterministic skeleton so the user can verify the end-to-end flow
+ * (TokenCard render + adaptive markdown + <details> blocks + risk bullets)
+ * without an AI provider being available.
+ */
+function buildLocalCryptoFallback(
+  snap: any,
+  userQuery: string,
+  isZh: boolean,
+  cause: string,
+): string {
+  const m = snap.market || {};
+  const c = snap.community || {};
+  const d = snap.developer || {};
+  const sym = String(snap.symbol || '').toUpperCase();
+  const name = String(snap.name || sym);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const fUsd = (v?: number): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    const a = Math.abs(v);
+    if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+    if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+    if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+    if (a >= 1e3) return `$${(v / 1e3).toFixed(2)}K`;
+    if (a >= 1) return `$${v.toFixed(3)}`;
+    return `$${v.toPrecision(3)}`;
+  };
+  const fNum = (v?: number): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    const a = Math.abs(v);
+    if (a >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+    if (a >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+    if (a >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+    return String(Math.round(v));
+  };
+  const fPct = (v?: number): string => {
+    if (v == null || !Number.isFinite(v)) return 'n/a';
+    return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  };
+  const sign = (v?: number): '偏多' | '偏空' | '中性' | 'bullish' | 'bearish' | 'neutral' => {
+    if (v == null) return isZh ? '中性' : 'neutral';
+    if (isZh) return v > 2 ? '偏多' : v < -2 ? '偏空' : '中性';
+    return v > 2 ? 'bullish' : v < -2 ? 'bearish' : 'neutral';
+  };
+
+  const ch24 = m.change24hPct;
+  const ch7 = m.change7dPct;
+  const ch30 = m.change30dPct;
+  const fdvMc = m.fdvOverMcap;
+  const circPct = m.circulatingPctOfMax;
+
+  const supplyAngleEn = circPct != null && circPct < 50
+    ? `Only ${circPct.toFixed(1)}% of max supply is in circulation — the remaining ${(100 - circPct).toFixed(1)}% is real overhang.`
+    : 'No major supply pressure inferred from circulating data.';
+  const supplyAngleZh = circPct != null && circPct < 50
+    ? `仅 ${circPct.toFixed(1)}% 流通，剩余 ${(100 - circPct).toFixed(1)}% 是真实抛压。`
+    : '从流通数据看暂无明显供应压力。';
+
+  const fdvAngleEn = fdvMc != null && fdvMc > 2
+    ? `FDV/MC ${fdvMc.toFixed(2)}× — material dilution risk vs sector median (~1.5×).`
+    : fdvMc != null
+      ? `FDV/MC ${fdvMc.toFixed(2)}× — within healthy range.`
+      : 'FDV/MC ratio unavailable.';
+  const fdvAngleZh = fdvMc != null && fdvMc > 2
+    ? `FDV/MC ${fdvMc.toFixed(2)}×，相对板块中位（~1.5×）存在显著稀释风险。`
+    : fdvMc != null
+      ? `FDV/MC ${fdvMc.toFixed(2)}×，处合理区间。`
+      : 'FDV/MC 数据缺失。';
+
+  const exchanges = (snap.topExchanges || []).slice(0, 5);
+
+  // Stop-loss heuristic: 5% below 24h low, target = 24h high
+  const stopUsd = m.low24hUsd != null ? m.low24hUsd * 0.95 : undefined;
+  const targetUsd = m.high24hUsd;
+
+  const banner = isZh
+    ? `> ⚠️ **降级输出**：实时 LLM 暂时不可用（${cause.slice(0, 80)}）。下面这份报告由后端基于 CoinGecko 实时数据本地生成，结构与正常 crypto-analysis prompt 一致，但**没有调用 AI**——所以缺少叙事性分析。换上有效 AI key 后即恢复完整 LLM 输出。\n`
+    : `> ⚠️ **Degraded output**: live LLM unavailable (${cause.slice(0, 80)}). This report was assembled locally from CoinGecko data with the same structure as the normal crypto-analysis prompt, but **no AI was called** — narrative analysis is missing. Restore a valid AI key to get the full LLM output.\n`;
+
+  if (isZh) {
+    return [
+      banner,
+      `**立场** ${sign(ch24)} / **建议** 等待 AI 恢复后获取可执行结论 / **置信度** 中（数据完整但缺叙事） / **关键触发** 24h 涨跌穿越 ${fPct(ch24)}`,
+      '',
+      `${name}（${sym}）当前 ${fUsd(m.priceUsd)}，24h ${fPct(ch24)}（CoinGecko ${today}）。7 天 ${fPct(ch7)}、30 天 ${fPct(ch30)}。${supplyAngleZh}${fdvAngleZh}`,
+      '',
+      '## 真实数据快照',
+      '',
+      '| 指标 | 数值 | 来源 |',
+      '|---|---|---|',
+      `| 现价 | ${fUsd(m.priceUsd)} | CoinGecko ${today} |`,
+      `| 市值 | ${fUsd(m.marketCapUsd)}（#${snap.rank ?? 'n/a'}） | CoinGecko |`,
+      `| FDV | ${fUsd(m.fdvUsd)}（FDV/MC ${fdvMc != null ? fdvMc.toFixed(2) + '×' : 'n/a'}） | CoinGecko |`,
+      `| 24h 量 | ${fUsd(m.volume24hUsd)} | CoinGecko |`,
+      `| 24h 高/低 | ${fUsd(m.high24hUsd)} / ${fUsd(m.low24hUsd)} | CoinGecko |`,
+      `| 7d / 30d / 1y | ${fPct(ch7)} / ${fPct(ch30)} / ${fPct(m.change1yPct)} | CoinGecko |`,
+      `| 流通 / 上限 | ${fNum(m.circulatingSupply)} / ${fNum(m.maxSupply)}（${circPct != null ? circPct.toFixed(1) + '%' : 'n/a'}） | CoinGecko |`,
+      `| ATH | ${fUsd(m.athUsd)}（${fPct(m.athChangePct)}） | CoinGecko |`,
+      '',
+      '## 社区与开发活跃度',
+      '',
+      `Twitter ${fNum(c.twitterFollowers)} 粉 · Reddit ${fNum(c.redditSubscribers)} · Telegram ${fNum(c.telegramUsers)}（CoinGecko ${today}）。GitHub 4 周提交 ${d.commits4w ?? 'n/a'} 次，${d.contributors ?? 'n/a'} 位贡献者，star ${fNum(d.githubStars)}。`,
+      '',
+      '<details><summary>详细数据：主要交易所 / 链接</summary>',
+      '',
+      exchanges.length
+        ? '| 交易所 | 交易对 | 24h 量 (USD) | Trust |\n|---|---|---|---|\n' +
+          exchanges.map((e: any) => `| ${e.name} | ${e.pair} | ${fUsd(e.volumeUsd)} | ${e.trustScore || '-'} |`).join('\n')
+        : '_暂无交易所数据_',
+      '',
+      `链接：${snap.homepage ? `[官网](${snap.homepage}) · ` : ''}${snap.twitter ? `[Twitter](https://x.com/${snap.twitter}) · ` : ''}${snap.github ? `[GitHub](${snap.github}) · ` : ''}${snap.whitepaper ? `[白皮书](${snap.whitepaper})` : ''}`,
+      '</details>',
+      '',
+      '## Risks / Kill-switch',
+      '',
+      `- 跌破 24h 低 ${fUsd(m.low24hUsd)} → 短线结构破坏，止损线建议 ${fUsd(stopUsd)}`,
+      `- 突破 24h 高 ${fUsd(targetUsd)} → 上行结构确认，可考虑加仓 / 止盈`,
+      `- BTC dominance 上行 + 山寨同步下挫 → 资金离场板块，全平观望`,
+      '',
+      '## Tags',
+      `**重要性**：中 · **分类**：${(snap.categories || []).slice(0, 3).join(' / ') || 'crypto'}`,
+      '',
+      '**值得关注的问题：**',
+      `- 24h 量 ${fUsd(m.volume24hUsd)} 是否能延续到下一个交易日？`,
+      `- ${fdvMc != null && fdvMc > 2 ? '剩余 ' + (100 - (circPct ?? 0)).toFixed(1) + '% 锁仓何时进入解锁窗口？' : '社区热度 (Twitter ' + fNum(c.twitterFollowers) + ' 粉) 是否有持续增长？'}`,
+      `- 交易所深度（top exchanges 总量）能否承接潜在 1% 流通量的卖盘？`,
+    ].join('\n');
+  }
+
+  // English version
+  return [
+    banner,
+    `**Bias** ${sign(ch24)} / **Action** Wait for AI to come back online for an actionable verdict / **Confidence** Medium (data complete, narrative missing) / **Trigger** 24h move crosses ${fPct(ch24)}`,
+    '',
+    `${name} (${sym}) is at ${fUsd(m.priceUsd)}, 24h ${fPct(ch24)} (CoinGecko ${today}). 7d ${fPct(ch7)}, 30d ${fPct(ch30)}. ${supplyAngleEn} ${fdvAngleEn}`,
+    '',
+    '## Real-data snapshot',
+    '',
+    '| Metric | Value | Source |',
+    '|---|---|---|',
+    `| Price | ${fUsd(m.priceUsd)} | CoinGecko ${today} |`,
+    `| Market cap | ${fUsd(m.marketCapUsd)} (#${snap.rank ?? 'n/a'}) | CoinGecko |`,
+    `| FDV | ${fUsd(m.fdvUsd)} (FDV/MC ${fdvMc != null ? fdvMc.toFixed(2) + '×' : 'n/a'}) | CoinGecko |`,
+    `| 24h volume | ${fUsd(m.volume24hUsd)} | CoinGecko |`,
+    `| 24h high/low | ${fUsd(m.high24hUsd)} / ${fUsd(m.low24hUsd)} | CoinGecko |`,
+    `| 7d / 30d / 1y | ${fPct(ch7)} / ${fPct(ch30)} / ${fPct(m.change1yPct)} | CoinGecko |`,
+    `| Circulating / Max | ${fNum(m.circulatingSupply)} / ${fNum(m.maxSupply)} (${circPct != null ? circPct.toFixed(1) + '%' : 'n/a'}) | CoinGecko |`,
+    `| ATH | ${fUsd(m.athUsd)} (${fPct(m.athChangePct)}) | CoinGecko |`,
+    '',
+    '## Community & developer activity',
+    '',
+    `Twitter ${fNum(c.twitterFollowers)} followers · Reddit ${fNum(c.redditSubscribers)} · Telegram ${fNum(c.telegramUsers)} (CoinGecko ${today}). GitHub: ${d.commits4w ?? 'n/a'} commits in last 4w, ${d.contributors ?? 'n/a'} contributors, ${fNum(d.githubStars)} stars.`,
+    '',
+    '<details><summary>Details: top exchanges / links</summary>',
+    '',
+    exchanges.length
+      ? '| Exchange | Pair | 24h Vol (USD) | Trust |\n|---|---|---|---|\n' +
+        exchanges.map((e: any) => `| ${e.name} | ${e.pair} | ${fUsd(e.volumeUsd)} | ${e.trustScore || '-'} |`).join('\n')
+      : '_No exchange data._',
+    '',
+    `Links: ${snap.homepage ? `[Site](${snap.homepage}) · ` : ''}${snap.twitter ? `[Twitter](https://x.com/${snap.twitter}) · ` : ''}${snap.github ? `[GitHub](${snap.github}) · ` : ''}${snap.whitepaper ? `[Whitepaper](${snap.whitepaper})` : ''}`,
+    '</details>',
+    '',
+    '## Risks / Kill-switch',
+    '',
+    `- Break below 24h low ${fUsd(m.low24hUsd)} → short-term structure broken, suggested stop ${fUsd(stopUsd)}`,
+    `- Break above 24h high ${fUsd(targetUsd)} → upside confirmed, scale in / take profit`,
+    `- BTC dominance up + alts down → capital rotating out, flatten`,
+    '',
+    '## Tags',
+    `**Importance**: Medium · **Categories**: ${(snap.categories || []).slice(0, 3).join(' / ') || 'crypto'}`,
+    '',
+    '**Questions to watch:**',
+    `- Will the 24h volume of ${fUsd(m.volume24hUsd)} carry into the next session?`,
+    `- ${fdvMc != null && fdvMc > 2 ? 'When does the remaining ' + (100 - (circPct ?? 0)).toFixed(1) + '% locked supply enter unlock windows?' : 'Is community engagement (Twitter ' + fNum(c.twitterFollowers) + ' followers) trending up?'}`,
+    `- Can top-exchange depth absorb a 1%-of-float sell?`,
+  ].join('\n');
+}
+
 function xAuthorFromSource(source: SignalSearchSource): string {
   const url = (source.url || '').trim();
   const m = url.match(/^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]{1,15})\//i);
@@ -1451,8 +1636,12 @@ Text: "${query}"`;
               }
             }
           } catch (err) {
-            console.error('[agent:chat] Auto quota cascade failed, allowing through as simple:', (err as Error).message);
-            consumedTier = null; // fail-open degrades to simple
+            // Fail-open: if the quota/subscription tables aren't ready
+            // (e.g. Prisma migrations not yet applied in dev), let the
+            // request run the full Fast pipeline instead of silently
+            // degrading to a tiny simple-chat reply.
+            console.error('[agent:chat] Auto quota cascade failed, falling through as fast:', (err as Error).message);
+            consumedTier = 'fast';
           }
 
           if (consumedTier === 'roundtable') {
@@ -1791,6 +1980,61 @@ Text: "${query}"`;
           emitter.emitStreamDone(fullContent);
         } catch (streamErr: any) {
           console.error('[agent:chat] simple chat stream failed:', streamErr.message);
+
+          // ── Crypto rescue path ───────────────────────────────────────────
+          // The LLM is unreachable (e.g. quota 403). If the user's query
+          // looks crypto-related, try to salvage the request by hitting
+          // CoinGecko directly and emitting a deterministic local report
+          // built from real market data — same path used when the
+          // advanced flow's synthesis fails.
+          const cryptoRegex = /\b(btc|bitcoin|eth|ethereum|sol|solana|usdt|usdc|bnb|xrp|ada|doge|dot|avax|matic|hype|sui|ton|trx|link|ltc|near|atom|apt|arb|op|inj|tia|sei|jto|wif|pepe|shib)\b|比特币|以太坊|以太币|加密货币|代币|tokenomics|defi|链上|altcoin|memecoin|stablecoin/i;
+          if (cryptoRegex.test(userContent)) {
+            console.log(`[agent:chat] simple chat crypto-rescue triggered sessionId=${sessionId}`);
+            try {
+              const web3Result = await web3RouterService.runQuery(userContent.trim());
+              const snap = web3Result.raw.tokenSnapshot;
+              if (snap && snap.id) {
+                emitToUser(userId, 'agent:chat:token', { sessionId, token: snap });
+                console.log(
+                  `[token_card] (rescue) emitted id=${snap.id} symbol=${snap.symbol} price=${snap.market.priceUsd ?? 'n/a'}`,
+                );
+                const isZh = /[\u4e00-\u9fff]/.test(userContent);
+                const fallbackMd = buildLocalCryptoFallback(
+                  snap,
+                  userContent,
+                  isZh,
+                  streamErr.message || 'AI provider unavailable',
+                );
+                streamToChat(fallbackMd);
+                emitter.emitModule('search', 'completed');
+                emitter.emitModule('done', 'completed', {});
+                if (!isGuest) {
+                  try {
+                    await prisma.chatMessage.create({
+                      data: {
+                        userId,
+                        sessionId,
+                        role: 'assistant',
+                        content: fallbackMd,
+                        agentId: 'superagent',
+                        metadata: JSON.stringify({ tokenCard: snap, degraded: true, cause: 'ai_unavailable' }),
+                      },
+                    });
+                  } catch (_) {}
+                }
+                emitter.emitStreamDone(fallbackMd);
+                activeChatSessions.delete(sessionId);
+                chatSessionStartTimes.delete(sessionId);
+                finishChatReplayBuffer(sessionId);
+                chatAbortControllers.delete(sessionId);
+                return;
+              }
+              console.warn('[agent:chat] crypto-rescue: web3 returned no tokenSnapshot');
+            } catch (rescueErr: any) {
+              console.warn('[agent:chat] crypto-rescue failed:', rescueErr?.message || rescueErr);
+            }
+          }
+
           emitter.emitModule('search', 'completed');
           emitter.emitModule('done', 'completed', {});
           emitToUser(userId, 'agent:chat:error', { sessionId, error: 'Connection failed, please try again.' });
@@ -1819,6 +2063,7 @@ Text: "${query}"`;
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
+      let savedTokenCard: any = null;
       let savedXProfileCard: Record<string, unknown> | null = null;
 
       if (plan.capabilities.search.needed) {
@@ -1972,6 +2217,17 @@ Text: "${query}"`;
               finalWeb3Assets = result.raw.assets;
               finalWeb3Via = result.raw.via;
               const focusTokens = web3FocusTokens(result.raw);
+
+              // ── Push TokenCard to client (single-asset crypto intents) ──
+              const snap = result.raw.tokenSnapshot;
+              if (snap && snap.id) {
+                savedTokenCard = snap;
+                emitToUser(userId, 'agent:chat:token', { sessionId, token: snap });
+                console.log(
+                  `[token_card] emitted id=${snap.id} symbol=${snap.symbol} price=${snap.market.priceUsd ?? 'n/a'} mcap=${snap.market.marketCapUsd ?? 'n/a'} fdv/mcap=${snap.market.fdvOverMcap?.toFixed(2) ?? 'n/a'}`,
+                );
+              }
+
               if (plan.capabilities.search.needed) {
                 const preferredSources = combinePreferredSources(finalSearchSourcesRaw, finalWeb3Sources, {
                   web3Intent: finalWeb3Intent,
@@ -2882,10 +3138,115 @@ For each guru in the simulation data, create a detailed subsection. If the user 
 8. # for title, ## for sections, **bold** for guru names and subsections. Use markdown formatting generously: **bold** for emphasis, key numbers, and important terms. NEVER prefix headings with numbers like "1.", "2.", "3.".
 `;
 
+      // ─── Crypto Analysis Prompt (adaptive, question-driven, data-backed) ───
+      // Used when web3 capability fired. Differs from traderMemoPrompt:
+      //  • No fixed section list — model picks 2-5 ## headings that fit the question.
+      //  • Every claim must inline a number from raw context (price/funding/OI/follower/etc).
+      //  • First-pass report stays tight; granular tables go inside <details> blocks.
+      //  • No Token Snapshot section in markdown — UI renders the TokenCard from metadata.
+      const cryptoIsZh = /[\u4e00-\u9fff]/.test(userContent || '');
+      const cryptoLangDirective = cryptoIsZh
+        ? `\n\n=== LANGUAGE LOCK (HIGHEST PRIORITY) ===\n用户问题是中文。整篇回答必须 100% 用简体中文：所有标题（# / ## / ###）、所有正文段落、所有列表项、所有表格表头、所有 <strong> 加粗标签、所有 <details><summary>。\n禁止出现任何英文句子或英文短语作为正文/标题。专有名词（BTC / ETH / FDV / OKX / RSI 等指标缩写、币种 ticker、交易所名）保持英文原文，但说明性文字必须中文。\n如 Context 里的资料是英文，你必须翻译成中文后再写入回答；不要照抄英文段落。\n`
+        : `\n\n=== LANGUAGE LOCK (HIGHEST PRIORITY) ===\nThe user's question is in English. The entire response must be 100% English: every heading (# / ## / ###), every paragraph, every list item, every table header, every <strong>, every <details><summary>.\nDo NOT emit any Chinese characters anywhere in the output. Tickers (BTC, ETH, etc.) and exchange names stay as-is.\nIf the Context contains Chinese-language material, summarize it in English — never quote it raw.\n`;
+      const cryptoMemoPrompt = getGlobalTimeContext() + cryptoLangDirective + `You are a senior crypto trader-analyst writing for an experienced trader who already knows the basics. Your edge is connecting on-chain + derivatives + tokenomics + sentiment to call out what the market is mispricing. NEVER write filler. NEVER write tutorials. NEVER fabricate numbers.
+
+=== INPUT ===
+User question: ${userContent}
+Context (raw research, may be partial — read carefully, every datum below is fair game):
+${contextString}
+
+=== ABSOLUTE RULES ===
+
+1. NO FABRICATION. Every number must come from the Context block. If a number isn't there, write "(no data)" or skip the claim. Do NOT guess prices, supplies, percentages, dates, holder counts, funding rates, or volume.
+
+2. EVERY CONCLUSION CARRIES A NUMBER. Format inline:
+   <claim> · <number> <unit> (<source>, <date if available>)
+   Example: "Funding overheated · +0.012%/8h ≈ 13% APR (OKX, ${new Date().toISOString().slice(0,10)})"
+   Bare assertions like "市场情绪偏多" are NOT acceptable — back them with a number.
+
+3. ANSWER THE QUESTION FIRST. Re-read the user question above. Make the dominant section answer THAT question:
+   • Question about tokenomics / unlock / supply → tokenomics-focused output.
+   • Question about price action / "should I long/short" → tape + positioning focused.
+   • Question about news / "what's happening" → news-impact + tape focused.
+   • Question comparing multiple tokens → comparison table dominant.
+   Do NOT pad with sections the user didn't ask about.
+
+4. NO FIXED HEADINGS. After the executive snapshot, pick 2-5 ## section headings that you invent based on the question. Each ## heading must be a sharp, specific angle — NOT a generic label.
+   Good: "## Funding 透支了 v2 利好"  /  "## FDV 3× 是真实抛压不是叙事"
+   Bad:  "## Market Analysis"  /  "## Technicals"  /  "## Conclusion"  /  "## 总结"
+
+5. LAYERED DETAIL. Default report = scannable conclusions + the key numbers. Long raw tables (full holder list, complete exchange listings, detailed candles, full vesting schedule beyond next 90 days) go INSIDE <details><summary>详细数据</summary>...</details> blocks so they don't bloat the main report. Use <details> liberally for anything beyond the headline numbers.
+
+6. NO Token Snapshot block. The UI renders the ticker card from structured metadata. Do NOT output a "## Token Snapshot" / "## 标的信息" / "## 资产快照" section in markdown. Do NOT echo basic metadata (name / symbol / contract / website / Twitter handle) — the card already shows those.
+
+7. LANGUAGE: Match the user's language end-to-end. Chinese question → all Chinese (headings, labels, table headers). English → all English. No mixing.
+
+8. CITATIONS: When you cite an external source (news, research note, exchange), put the link at the END of the paragraph as [Source Name](url). Do NOT inline mid-sentence. Do NOT list sources separately at the end.
+
+=== STRUCTURE (FLEXIBLE) ===
+
+A. Executive Snapshot (no heading — first thing in the output):
+   - Line 1: **Bias** / **Action** / **Confidence** / **Trigger** (one line, slash-separated, translate labels to user's language).
+   - Then 2-3 sentences: what's happening · what the market is mispricing · why now.
+   - Every sentence carries at least 1 datum from Context.
+
+B. Body (2-5 ## sections, headings YOU invent based on the user question):
+   Pick ONLY the angles that answer the question. Examples (DO NOT use as a checklist):
+   • Tape Read — price + volume + funding + OI vs 7d/30d
+   • Tokenomics & Supply Pressure — FDV/MC, unlocks, vesting, circulating %
+   • What the Market Missed — news vs price reaction
+   • Underwater Scenarios — 2-3 trigger → path → invalidation
+   • Holder Concentration / On-chain Flows
+   • Catalyst Calendar — upcoming dates
+   • Comparison vs peers (only if user asked to compare)
+   • Tradeable Levels — entry / stop / target
+
+C. Risks / Kill-switch (always, ## with your own creative heading):
+   3 bullets. Each bullet: an OBSERVABLE threshold that invalidates the thesis. Format: "<observable> → <action>". E.g. "BTC -8% intraday → close all longs".
+
+D. Tags + Questions to watch (always last, no heading after):
+   - **Tags** line: Importance: High/Medium/Low · Categories: 2-3 tags
+   - **Bold sub-heading** in user's language ("值得关注的问题：" / "Questions to watch:")
+   - 3-5 bullets, each one ONE standalone question only (single sentence ending in ? or ？). No follow-on prose. No links.
+   - This MUST be the very last block — nothing after it.
+
+=== HOW TO HANDLE SPARSE DATA ===
+
+If Context lacks a needed field (e.g. no holder data, no unlock schedule, no derivatives data because token isn't on OKX):
+- DO NOT guess. DO NOT pad with generic statements.
+- Write one short line in the relevant section: "数据缺口：暂无 X，无法判断 Y。需要 Z 接入。"
+- Then move on. A short, honest report is better than a long fabricated one.
+
+=== WORD BUDGET ===
+
+- Simple question (e.g. "BTC 今天怎么了") → 400-700 words.
+- Single-token deep angle (e.g. "HYPE tokenomics 有什么坑") → 700-1200 words main + <details> for raw tables.
+- Multi-token comparison or full DD → 1200-2000 words main + <details>.
+Reserve granular data for follow-up — don't over-deliver on first pass.
+
+=== HEADINGS ===
+
+- # for the report title (optional; only if it sharpens the takeaway). Format like "HYPE: 12-07 解锁前的真实抛压" — angle-driven, never generic.
+- ## for body sections (2-5 of them, YOU invent the wording).
+- **bold** for sub-points and key numbers within paragraphs.
+- NEVER use ###. NEVER number headings ("1.", "2.").
+`;
+
       // Route synthesis prompt by queryType
-      const queryType = plan.queryType || 'investment-analysis';
+      // Auto-promote to crypto-analysis when web3 fired: better quality output
+      // for crypto questions than the equity-shaped traderMemoPrompt.
+      let queryType = plan.queryType || 'investment-analysis';
+      if (
+        plan.capabilities.web3?.needed &&
+        (queryType === 'investment-analysis' || queryType === 'general' || queryType === 'research')
+      ) {
+        queryType = 'crypto-analysis';
+      }
       let synthesizePrompt: string;
       switch (queryType) {
+        case 'crypto-analysis':
+          synthesizePrompt = cryptoMemoPrompt;
+          break;
         case 'research':
           synthesizePrompt = researchPrompt;
           break;
@@ -2934,7 +3295,7 @@ For each guru in the simulation data, create a detailed subsection. If the user 
       // Input is `contextString` (research data) instead of waiting for synthesis output.
       // The resulting promise is awaited AFTER synthesis completes, so HTML is ready
       // immediately (or near-immediately) rather than starting a fresh 148s round trip.
-      const htmlEligible = queryType === 'investment-analysis' || queryType === 'guru-council' || isDeepResearch;
+      const htmlEligible = queryType === 'investment-analysis' || queryType === 'crypto-analysis' || queryType === 'guru-council' || isDeepResearch;
       const htmlReportEnabled = htmlEligible && !config.superAgentDisableHtmlReport;
       if (htmlEligible && config.superAgentDisableHtmlReport) {
         console.log('[agent:chat:html] Skipped (SUPERAGENT_DISABLE_HTML_REPORT is set)');
@@ -2948,16 +3309,37 @@ For each guru in the simulation data, create a detailed subsection. If the user 
       // finalDbContent still runs after synthesis completes.
       if (htmlReportEnabled && contextString.length > 200) {
         const mode = isDeepResearch ? 'roundtable' : 'standard';
-        console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
-        emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
-        parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
-          console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
-          return '';
-        });
+        // ── Roundtable mode: skip parallel HTML ──
+        // Parallel HTML would launch BEFORE consensus runs, so its input
+        // (contextString) never contains the agent debate journey. The
+        // resulting HTML silently drops the Expert Debate Panel — section 7
+        // of the prompt is "MANDATORY when expert debate data is in the
+        // input", and that data only exists after consensus completes.
+        // For roundtable we wait for finalDbContent (which has the debate
+        // already woven in) and run HTML sequentially. Costs ~30s wall but
+        // doubles the HTML report's information density.
+        if (mode === 'roundtable') {
+          console.log('[agent:chat:html] Roundtable mode → skipping PARALLEL HTML, sequential pass will use finalDbContent (with debate journey)');
+        } else {
+          console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
+          emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
+          parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
+            console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
+            return '';
+          });
+        }
       }
 
       const buildLocalSynthesisFallback = (cause: string): string => {
         const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
+        // ── Crypto fallback: when AI is down but we have a TokenCard,
+        //    produce a real-data report so the user can still validate the
+        //    end-to-end flow (TokenCard + adaptive crypto markdown).
+        //    Every number below comes from savedTokenCard.market — no AI,
+        //    no fabrication.
+        if (savedTokenCard && (queryType === 'crypto-analysis' || plan.capabilities.web3?.needed)) {
+          return buildLocalCryptoFallback(savedTokenCard, userContent, isZh, cause);
+        }
         // Count useful data fetched so the user knows their quota wasn't wasted,
         // WITHOUT leaking the raw prompt / conversation history / raw post bodies.
         const sourceCount = finalSocialSources?.length || 0;
@@ -3259,6 +3641,11 @@ ${synFullContent || contextString}${langFooter}`;
             // Track which (round, agentId) pairs we've already emitted so
             // duplicate refinement events don't fan out twice.
             const seenAgentRound = new Set<string>();
+            // Accumulate per-agent per-round answers so we can later surface
+            // each expert's STRONGEST stance across rounds, not just their
+            // post-convergence (often all-Neutral) final round. Aegean's
+            // consensusResult.agentResponses only carries the final round.
+            const perAgentRounds = new Map<string, Array<{ round: number; answer: string; confidence: number }>>();
             const consensusResult = await runConsensusEngine(
               userId,
               'roundtable',
@@ -3289,6 +3676,15 @@ ${synFullContent || contextString}${langFooter}`;
                     if (seenAgentRound.has(key)) return;
                     seenAgentRound.add(key);
                     const answer = evt.answer || '';
+                    // Track this round's answer for the post-debate
+                    // "strongest stance" picker.
+                    const list = perAgentRounds.get(evt.agent_id) || [];
+                    list.push({
+                      round: evt.round_number,
+                      answer,
+                      confidence: evt.confidence ?? 0,
+                    });
+                    perAgentRounds.set(evt.agent_id, list);
                     socket.emit('agent:chat:agent_responded', {
                       sessionId,
                       analystId: evt.agent_id,
@@ -3346,15 +3742,184 @@ ${synFullContent || contextString}${langFooter}`;
             // identical" bug. The streaming SSE fires one event per real
             // LLM completion, so the Debate Tab updates as agents finish.)
 
+            // Canonical expert verdict table — built deterministically from
+            // agentResponses, then injected into the deep-research prompt as a
+            // pre-rendered markdown block. The synthesis LLM is told to emit a
+            // placeholder marker; we substitute the real table after streaming
+            // ends. This guarantees the rendered "专家立场汇总" table always
+            // reflects the actual VERDICT / CONFIDENCE per agent — the LLM
+            // physically cannot drift them to "Neutral 65%" anymore because
+            // it never gets to write that table.
+            const EXPERT_TABLE_PLACEHOLDER = '<!--AEGEAN_EXPERT_VERDICT_TABLE-->';
+            let canonicalExpertTable = '';
             if (agentResponses.length > 0) {
-              // Parse the explicit SIGNAL line each persona emits in their
-              // answer schema. Without this, the synthesis LLM has to infer
-              // the verdict from prose and hedges everyone to "Neutral 65%".
+              // Robust verdict parser. Aegean personas don't all emit the same
+              // schema — some use "SIGNAL: bullish", some "VERDICT: …", others
+              // a markdown header "**Verdict:** …", a few rely on prose alone.
+              // The earlier single-regex implementation defaulted to Neutral
+              // whenever SIGNAL: was missing, silently dropping real Bearish /
+              // Bullish stances into the Neutral bucket and producing the
+              // "everyone is Neutral 80%" symptom in the Expert Summary table.
               const parseSignal = (answer: string): 'Bullish' | 'Bearish' | 'Neutral' => {
-                const m = (answer || '').match(/SIGNAL:\s*(bullish|bearish|neutral)/i);
-                const raw = m ? m[1].toLowerCase() : 'neutral';
-                return raw === 'bullish' ? 'Bullish' : raw === 'bearish' ? 'Bearish' : 'Neutral';
+                const text = answer || '';
+                const tagPatterns = [
+                  /SIGNAL\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /VERDICT\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /POSITION\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /STANCE\s*[:：]\s*\**\s*(bullish|bearish|neutral)/i,
+                  /\*\*Verdict\*\*\s*[:：]?\s*(bullish|bearish|neutral)/i,
+                  /\*\*Signal\*\*\s*[:：]?\s*(bullish|bearish|neutral)/i,
+                  /\*\*Position\*\*\s*[:：]?\s*(bullish|bearish|neutral)/i,
+                  /^\s*(?:Verdict|Signal|Position|Stance)\b[^\n]*?\b(bullish|bearish|neutral)\b/im,
+                ];
+                for (const pat of tagPatterns) {
+                  const m = text.match(pat);
+                  if (m) {
+                    const raw = m[1].toLowerCase();
+                    return raw === 'bullish' ? 'Bullish' : raw === 'bearish' ? 'Bearish' : 'Neutral';
+                  }
+                }
+                // Fallback: keyword frequency. Asymmetric thresholds — only
+                // commit to Bullish/Bearish when one side is clearly dominant
+                // (>= 2 net mentions). Otherwise prose tone is mixed → Neutral.
+                const lower = text.toLowerCase();
+                const bullCount = (lower.match(/\b(bullish|long(?!\s*\/?\s*short)|squeeze|upside|breakout|accumulat|rally|reversal\s+up|short\s+covering|buy\b)\b/g) || []).length;
+                const bearCount = (lower.match(/\b(bearish|short(?!\s*\/?\s*long)|downside|breakdown|distribut|sell-?off|sell\b|crash|tail\s+risk|drawdown|liquidat)\b/g) || []).length;
+                if (bullCount >= bearCount + 2) return 'Bullish';
+                if (bearCount >= bullCount + 2) return 'Bearish';
+                return 'Neutral';
               };
+
+              // Confidence parser. PROSE TAKES PRIORITY over structured
+              // because aegean's `resp.confidence` is a post-consensus
+              // agreement metric (often a uniform 0.8 once agents converge),
+              // NOT each agent's self-reported certainty. The agent itself
+              // emits the real number in "CONFIDENCE: 0.65" inside its
+              // answer schema. Using the structured value would paint every
+              // expert at 80% even when their own prose says 65% / 70%.
+              const parseConfidence = (answer: string, structured: number | undefined | null): number => {
+                // Match both decimal (0.65) and percent (65 / 65%) forms.
+                const m = (answer || '').match(
+                  /(?:CONFIDENCE|信心|置信度)\s*[:：]?\s*(0?\.\d+|\d{1,3}(?:\.\d+)?)\s*%?/i,
+                );
+                if (m) {
+                  const val = parseFloat(m[1]);
+                  if (Number.isFinite(val)) {
+                    // 0.65 → 65, 65 → 65, 0.7 → 70
+                    const pct = val <= 1 ? val * 100 : val;
+                    return Math.max(0, Math.min(100, Math.round(pct)));
+                  }
+                }
+                // Fallback only when the answer didn't include the field at all.
+                if (typeof structured === 'number' && structured > 0) {
+                  return Math.max(0, Math.min(100, Math.round(structured * 100)));
+                }
+                return 50;
+              };
+
+              // ── Strongest-Stance Picker ────────────────────────────
+              // For each agent, walk all rounds we accumulated during the
+              // SSE stream and pick the answer with the strongest (most
+              // directional) verdict. Roundtable consensus tends to
+              // converge to Neutral by the final round, which makes the
+              // table look uniformly hedged — this preserves each
+              // expert's actual lean during the debate.
+              //
+              // Selection order:
+              //   1. Highest |Bullish - Bearish| score across rounds.
+              //      (Bullish/Bearish > Neutral; ties broken by confidence.)
+              //   2. If every round was Neutral, fall back to the final-
+              //      round answer (which is what agentResponses already has).
+              type RoundPick = { round: number; answer: string; confidence: number; verdict: 'Bullish' | 'Bearish' | 'Neutral' };
+              const pickStrongestStance = (agentId: string, fallback: { answer: string; confidence: number }): RoundPick => {
+                const rounds = perAgentRounds.get(agentId) || [];
+                let best: RoundPick | null = null;
+                for (const r of rounds) {
+                  const verdict = parseSignal(r.answer);
+                  const conf = parseConfidence(r.answer, r.confidence);
+                  // Score: 100 for non-Neutral, 0 for Neutral; tiebreaker is conf.
+                  const directional = verdict !== 'Neutral' ? 1 : 0;
+                  const candidate: RoundPick = { round: r.round, answer: r.answer, confidence: conf / 100, verdict };
+                  if (!best) { best = candidate; continue; }
+                  const bestDirectional = best.verdict !== 'Neutral' ? 1 : 0;
+                  if (directional > bestDirectional) { best = candidate; continue; }
+                  if (directional === bestDirectional && conf > Math.round((best.confidence || 0) * 100)) {
+                    best = candidate;
+                  }
+                }
+                if (!best) {
+                  // No streamed rounds (shouldn't happen but defensive) — use final answer.
+                  return {
+                    round: roundsUsed,
+                    answer: fallback.answer,
+                    confidence: fallback.confidence,
+                    verdict: parseSignal(fallback.answer),
+                  };
+                }
+                return best;
+              };
+
+              // Diagnostic: log final-round + strongest-stance per agent.
+              console.log('[agent:chat:rt-parse] expert verdicts/confidences (final | strongest)');
+              agentResponses.forEach((resp: any, idx: number) => {
+                const finalV = parseSignal(resp.answer);
+                const finalC = parseConfidence(resp.answer, resp.confidence);
+                const strongest = pickStrongestStance(resp.agentId, { answer: resp.answer, confidence: resp.confidence });
+                const strongestC = parseConfidence(strongest.answer, strongest.confidence);
+                const name = resolveAgentName(resp.agentId, idx);
+                console.log(`  [${idx}] ${name} → final=${finalV} ${finalC}%  |  strongest=R${strongest.round} ${strongest.verdict} ${strongestC}%`);
+              });
+
+              // Pull a 1-2 sentence "rationale" tagline from each answer.
+              // Prefer an explicit RATIONALE: section, fall back to the first
+              // non-trivial sentence; cap the length so the table stays compact.
+              const extractTagline = (answer: string): string => {
+                if (!answer) return '';
+                const m = answer.match(/RATIONALE:\s*([\s\S]+?)(?:\n[A-Z_]+:|\n\n|$)/i);
+                let raw = (m && m[1].trim()) ? m[1].trim() : answer.trim();
+                raw = raw.replace(/SIGNAL:\s*\w+/gi, '').replace(/CONFIDENCE:\s*[\d.]+%?/gi, '').trim();
+                // First sentence in latin or CJK
+                const firstSentence = raw.match(/^[^.。!?！？\n]{4,180}[.。!?！？]?/);
+                let snippet = firstSentence ? firstSentence[0].trim() : raw.split('\n')[0].trim();
+                snippet = snippet.replace(/\s+/g, ' ');
+                if (snippet.length > 120) snippet = snippet.slice(0, 117).replace(/[\s,。,]+$/, '') + '…';
+                return snippet || (isZhQuery ? '(无核心论据)' : '(no rationale)');
+              };
+
+              // Localized verdict label
+              const verdictLabel = (v: 'Bullish' | 'Bearish' | 'Neutral'): string => {
+                if (!isZhQuery) return v;
+                return v === 'Bullish' ? '看多' : v === 'Bearish' ? '看空' : '中性';
+              };
+
+              // Build the canonical markdown table that will replace the placeholder.
+              // The table now reflects each expert's STRONGEST stance (the round
+              // where they were most directional), not their post-convergence
+              // final position. Otherwise every expert ends up "Neutral 65%"
+              // after Aegean smooths the debate down — which throws away the
+              // most valuable signal: who was actually pushing what view.
+              const tableHeader = isZhQuery
+                ? '| 专家 | 核心观点 | 信心 | 核心论据 |\n|---|---|---|---|'
+                : '| Expert | Stance | Confidence | Key Rationale |\n|---|---|---|---|';
+              const tableRows = agentResponses.map((resp: any, idx: number) => {
+                const name = resolveAgentName(resp.agentId, idx);
+                const pick = pickStrongestStance(resp.agentId, { answer: resp.answer, confidence: resp.confidence });
+                const verdict = pick.verdict;
+                const conf = parseConfidence(pick.answer, pick.confidence);
+                const tagline = extractTagline(pick.answer)
+                  // Markdown-escape pipes so they don't break the table cell
+                  .replace(/\|/g, '\\|');
+                return `| ${name} | ${verdictLabel(verdict)} | ${conf}% | ${tagline} |`;
+              });
+              // Section title chosen to communicate the table's semantics —
+              // "辩论核心立场" makes clear it's the strongest debate stance,
+              // not necessarily the final consensus (which is shown separately).
+              const sectionTitle = isZhQuery ? '## 辩论核心立场' : '## Core Debate Positions';
+              const subtitle = isZhQuery
+                ? `*下表展示每位专家在辩论中给出的最具方向性立场;**最终共识结论**见上文 Verdict 段。*`
+                : `*Each row shows each expert's strongest directional stance during debate; the **final consensus verdict** is summarized above.*`;
+              canonicalExpertTable = `${sectionTitle}\n\n${subtitle}\n\n${tableHeader}\n${tableRows.join('\n')}\n`;
+
               expertDebateContext += `\n\n【EXPERT ROUNDTABLE DEBATE】\n`;
               expertDebateContext += `Rounds of debate: ${roundsUsed}\n`;
               expertDebateContext += `Consensus reached: ${consensusReached ? 'Yes' : 'No'}\n`;
@@ -3369,21 +3934,43 @@ ${synFullContent || contextString}${langFooter}`;
               expertDebateContext += isZhQuery
                 ? `【命名规则】下方每一位专家的名字都必须在正文中原样引用(如"沃伦·巴菲特视角认为…"),禁止替换成"专家1/专家2"等匿名编号。\n\n`
                 : `[NAMING RULE] Each position below is labelled with a specific analyst name. Your report MUST reference them by these exact names when attributing views (e.g. "Warren Buffett's lens argues…"). Do NOT substitute with "Expert 1 / Analyst A / 专家1" or any numeric placeholder.\n\n`;
-              // CRITICAL — verdict + confidence are explicit numeric fields
-              // emitted PER expert below. The synthesis LLM (and the HTML
-              // expert table) MUST copy these values verbatim, NOT infer or
-              // default. Prior bug: every expert ended up "Neutral / 65%" in
-              // the rendered table because the LLM hedged when verdict was
-              // not explicitly provided in a key:value form.
+              // ── Hard rule: the expert verdict table is system-generated ────
               expertDebateContext += isZhQuery
-                ? `【数据规则】每位专家下方明确给出 VERDICT(立场)与 CONFIDENCE(信心 %),报告里的"核心观点"和"信心"两栏必须**原值复用**,不允许全部填"中性/65%",也不允许根据自己阅读后再推断。\n\n`
-                : `[DATA RULE] Each expert below has explicit VERDICT and CONFIDENCE values. The "Signal" and "Confidence" columns in your output MUST copy these values verbatim. Do NOT default everyone to "Neutral / 65%" and do NOT re-infer from prose.\n\n`;
-              expertDebateContext += `Individual Expert Positions:\n`;
+                ? `【表格规则·硬性】关于"专家立场汇总"这张表,请**不要自己写**任何 markdown 表格。系统已经渲染好了一份权威表(verdict + confidence + 核心论据 全部基于结构化数据)。在你需要插入此表的位置,**只输出这一行占位符**(单独一行,不带任何其他符号或说明):\n\n${EXPERT_TABLE_PLACEHOLDER}\n\n后处理会自动把这行替换为真表。如果你写了自己的表,系统会把它整段删掉,等于白写。\n\n`
+                : `[TABLE RULE — HARD] For the "Expert Position Summary" table, do NOT write a markdown table yourself. The system has pre-rendered an authoritative table (verdict + confidence + rationale all from structured data). Where you would insert that table, output ONLY this placeholder on its own line, no other text:\n\n${EXPERT_TABLE_PLACEHOLDER}\n\nPost-processing will substitute it with the real table. If you write your own table the system will strip it.\n\n`;
+              // CRITICAL — per-expert verdict + confidence still go into the
+              // prompt so the synthesis LLM can reference values in prose.
+              // (The table itself is no longer LLM-generated — see TABLE RULE.)
+              expertDebateContext += isZhQuery
+                ? `【数据参考】每位专家下方明确给出 VERDICT(立场)与 CONFIDENCE(信心 %),正文引用专家观点时请用这些数值,不要自己重新推断。\n\n`
+                : `[DATA REFERENCE] Each expert below has explicit VERDICT and CONFIDENCE values. When citing them in prose, use these values verbatim — do not re-infer from the rationale.\n\n`;
+              // ── Per-expert "debate journey" ─────────────────────────
+              // For each expert, surface BOTH (a) their initial / strongest
+              // directional stance AND (b) their final (often converged)
+              // stance, so the synthesis LLM can write a proper "they
+              // started here, debated, ended there" narrative instead of
+              // the boring "everyone agrees Neutral" summary.
+              expertDebateContext += isZhQuery
+                ? `【辩论旅程】下方为每位专家的"最强立场"和"最终立场"对比。请在分析里讲清楚:谁起初看多/看空、被什么论据说服、最终收敛到哪 —— 这才是圆桌辩论的真正价值。\n\n`
+                : `[DEBATE JOURNEY] Each expert below is shown with their STRONGEST stance during debate and their FINAL stance after consensus. Use this to narrate who started where, what convinced whom, and where positions converged — that journey is what makes a roundtable analysis valuable.\n\n`;
+              expertDebateContext += `Individual Expert Journey:\n`;
               agentResponses.forEach((resp: any, idx: number) => {
                 const name = resolveAgentName(resp.agentId, idx);
-                const conf = Math.round((resp.confidence || 0) * 100);
-                const verdict = parseSignal(resp.answer);
-                expertDebateContext += `--- ${name} | VERDICT: ${verdict} | CONFIDENCE: ${conf}% ---\n${resp.answer}\n\n`;
+                const finalConf = parseConfidence(resp.answer, resp.confidence);
+                const finalVerdict = parseSignal(resp.answer);
+                const strongest = pickStrongestStance(resp.agentId, { answer: resp.answer, confidence: resp.confidence });
+                const strongestConf = parseConfidence(strongest.answer, strongest.confidence);
+                expertDebateContext += `=== ${name} ===\n`;
+                if (strongest.verdict !== finalVerdict || strongest.round !== roundsUsed) {
+                  expertDebateContext += `[Round ${strongest.round} STRONGEST stance] VERDICT: ${strongest.verdict} | CONFIDENCE: ${strongestConf}%\n`;
+                  expertDebateContext += `${strongest.answer}\n\n`;
+                  expertDebateContext += `[Round ${roundsUsed} FINAL stance after debate] VERDICT: ${finalVerdict} | CONFIDENCE: ${finalConf}%\n`;
+                  expertDebateContext += `${resp.answer}\n\n`;
+                } else {
+                  // Stance didn't change across rounds — only show one block.
+                  expertDebateContext += `[Stance held across all rounds] VERDICT: ${finalVerdict} | CONFIDENCE: ${finalConf}%\n`;
+                  expertDebateContext += `${resp.answer}\n\n`;
+                }
               });
             }
 
@@ -3422,6 +4009,23 @@ ${synFullContent || contextString}${langFooter}`;
               ? `Raw Research Data:\n${contextString}\n\nInitial Analysis Draft:\n${synFullContent}${expertDebateContext}`
               : `Raw Research Data:\n${contextString}${expertDebateContext}`;
             const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
+
+            // ── Roundtable: kick off HTML generation NOW (in parallel with
+            // deep research second pass). Earlier we deliberately skipped
+            // `parallelHtmlPromise` for roundtable because contextString
+            // alone misses the debate journey. But we now have the full
+            // expertDebateContext baked into deepResearchInput, so HTML can
+            // run with the same rich material AND overlap the ~90s deep
+            // research streaming. Net wall-time saving: ~60-80s vs the pure
+            // sequential HTML fallback. Awaited at the existing emit site.
+            if (htmlReportEnabled && isDeepResearch && !parallelHtmlPromise) {
+              console.log('[agent:chat:html] Roundtable: starting HTML in parallel with deep research, input length=', deepResearchInput.length);
+              emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
+              parallelHtmlPromise = runHtmlGeneration(deepResearchInput).catch(err => {
+                console.error('[agent:chat:html] ❌ Roundtable parallel HTML failed:', err.message);
+                return '';
+              });
+            }
 
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
             const deepSecondPassStartedAt = Date.now();
@@ -3466,6 +4070,43 @@ ${synFullContent || contextString}${langFooter}`;
                     streamToChat(delta);
                   }
                 } catch (e) { }
+              }
+            }
+
+            // Force-substitute the canonical expert verdict table.
+            // The LLM was told to emit `EXPERT_TABLE_PLACEHOLDER` in place of
+            // a hand-written "专家立场汇总" table. We do three layers here:
+            //   1) replace the placeholder with the canonical table verbatim;
+            //   2) if the LLM ignored the placeholder rule and wrote its own
+            //      table anyway, strip that rogue table and inject ours;
+            //   3) if neither happened (LLM forgot the section entirely),
+            //      append the canonical table near the end so the data is
+            //      never lost.
+            if (canonicalExpertTable) {
+              if (deepFullContent.includes(EXPERT_TABLE_PLACEHOLDER)) {
+                deepFullContent = deepFullContent.split(EXPERT_TABLE_PLACEHOLDER).join(canonicalExpertTable);
+              } else {
+                // Find a markdown table whose header row contains both 专家|Expert
+                // and 核心观点|Verdict (or 信心|Confidence). This catches LLM-authored
+                // expert tables in both languages without nuking unrelated tables.
+                const rogueTable = deepFullContent.match(
+                  /(?:^|\n)(?:#{1,4}\s+[^\n]*(?:专家立场|专家观点|辩论核心立场|核心立场|Expert\s+Position|Expert\s+Summary|Core\s+Debate\s+Positions?|Debate\s+Positions?)[^\n]*\n+)?(\|[^\n]*(?:专家|Expert)[^\n]*\|[^\n]*(?:核心观点|信心|Verdict|Stance|Confidence)[^\n]*\|\s*\n\|[\s\-:|]+\|\s*\n(?:\|[^\n]*\|\s*\n?)+)/i,
+                );
+                if (rogueTable && rogueTable.index != null) {
+                  const before = deepFullContent.slice(0, rogueTable.index);
+                  const after = deepFullContent.slice(rogueTable.index + rogueTable[0].length);
+                  deepFullContent = `${before}\n\n${canonicalExpertTable}\n\n${after}`.replace(/\n{3,}/g, '\n\n');
+                  console.log('[agent:chat:rt-table] LLM ignored placeholder, replaced rogue expert table with canonical');
+                } else {
+                  // No table at all — append before any "## 风险" or final closing section
+                  const insertBefore = deepFullContent.search(/\n#{1,3}\s+(?:风险|Risk|结论|Conclusion|附录|Appendix)/i);
+                  if (insertBefore > 0) {
+                    deepFullContent = deepFullContent.slice(0, insertBefore) + `\n\n${canonicalExpertTable}\n` + deepFullContent.slice(insertBefore);
+                  } else {
+                    deepFullContent = deepFullContent.trimEnd() + `\n\n${canonicalExpertTable}\n`;
+                  }
+                  console.log('[agent:chat:rt-table] LLM omitted expert section entirely, appended canonical table');
+                }
               }
             }
 
@@ -3528,6 +4169,7 @@ ${synFullContent || contextString}${langFooter}`;
                   ? { analystIds: data.analystIds }
                   : {}),
                 quoteCard: savedQuoteCard ?? undefined,
+                tokenCard: savedTokenCard ?? undefined,
                 xProfileCard: savedXProfileCard ?? undefined,
                 sources: finalSocialSources.length > 0 ? finalSocialSources : undefined,
               })
@@ -3632,6 +4274,7 @@ ${synFullContent || contextString}${langFooter}`;
                   route: 'Super Agent Orchestrator',
                 },
                 quoteCard: savedQuoteCard ?? undefined,
+                tokenCard: savedTokenCard ?? undefined,
                 xProfileCard: savedXProfileCard ?? undefined,
                 degraded: true,
                 degradedReason: errMsg,

@@ -8,7 +8,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import * as d3 from 'd3';
 import { socket } from '../services/socket';
 import { api } from '../services/api';
-import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, extractHeadings, SourcesProvider } from '../utils/markdown';
+import { renderMarkdownContent, extractQuoteSnapshot, QuoteCard, OkxQuoteDerivatives, OkxQuoteNews, TokenCard, type TokenSnapshotData, extractHeadings, SourcesProvider } from '../utils/markdown';
 import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 import { I } from './Icons';
@@ -3416,6 +3416,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [quoteCards, setQuoteCards] = useState<Record<number, { symbol: string; name?: string; market?: string; lang?: string; price?: string; change?: string; volume?: string; amount?: string; high?: string; low?: string; open?: string; prevClose?: string; marketCap?: string; pe?: string; pb?: string; turnover?: string }>>({});
     // X profile cards keyed by message index
     const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }>>({});
+    // Token snapshot cards keyed by message index (live CoinGecko data injected via agent:chat:token)
+    const [tokenCards, setTokenCards] = useState<Record<number, TokenSnapshotData>>({});
     const currentConsensus = (() => {
         // First try the active message's consensus
         if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
@@ -3792,11 +3794,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 // Guard: if this message is no longer streaming (previous run already finished
                 // or a new run already took over), ignore stale stream_done
                 if (!updated[msgIdx].isStreaming) return prev;
+                // Prefer server content as the source of truth on stream_done.
+                // The server may post-process the streamed text (e.g. substitute
+                // canonical tables that the LLM wasn't trusted to author —
+                // see EXPERT_TABLE_PLACEHOLDER on the backend). Falling back to
+                // streamed content keeps reconnect / partial-stream cases working.
+                const streamed = updated[msgIdx].content || '';
+                const server = data.content || '';
+                const finalContent = server || streamed;
                 updated[msgIdx] = {
                     ...updated[msgIdx],
-                    // Only use server content if we have nothing accumulated (e.g. reconnect)
-                    content: updated[msgIdx].content || data.content || '',
-                    isStreaming: false, 
+                    content: finalContent,
+                    isStreaming: false,
                     timestamp: new Date().toLocaleTimeString(),
                     sources: data.sources,
                 };
@@ -4109,11 +4118,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setQuoteCards(prev => ({ ...prev, [msgIdx]: data.quote }));
         };
 
+        const onToken = (data: { sessionId: string; token: TokenSnapshotData }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0 || !data.token?.id) return;
+            setTokenCards(prev => ({ ...prev, [msgIdx]: data.token }));
+        };
+
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
             if (data.sessionId !== sessionId) return;
             setHtmlGenerating(prev => { const n = { ...prev }; delete n[data.msgIdx]; return n; });
             setHtmlReports(prev => ({ ...prev, [data.msgIdx]: data.html }));
-            setMsgViewMode(prev => ({ ...prev, [data.msgIdx]: 'web' }));
+            // Note: we deliberately do NOT auto-switch the view mode to 'web' here.
+            // Auto-jumping the user from the markdown answer they're reading into
+            // the HTML report card is jarring and loses their place. The default
+            // is 'docs', and the Docs/Web toggle in the actions bar lets the user
+            // opt in when they want the Bloomberg-style HTML view.
         };
 
         const onHtmlGenerating = (data: { sessionId: string; msgIdx: number }) => {
@@ -4134,6 +4154,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:thinking_log', onThinkingLog);
         socket.on('agent:chat:consensus_done', onConsensusDone);
         socket.on('agent:chat:quote', onQuote);
+        socket.on('agent:chat:token', onToken);
         socket.on('agent:chat:html_ready', onHtmlReady);
         socket.on('agent:chat:html_generating', onHtmlGenerating);
         // New Roundtable persona events (log-only in Stage 4)
@@ -4156,6 +4177,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:thinking_log', onThinkingLog);
             socket.off('agent:chat:consensus_done', onConsensusDone);
             socket.off('agent:chat:quote', onQuote);
+            socket.off('agent:chat:token', onToken);
             socket.off('agent:chat:html_ready', onHtmlReady);
             socket.off('agent:chat:html_generating', onHtmlGenerating);
             socket.off('agent:chat:analysts_selected', onAnalystsSelected);
@@ -4484,6 +4506,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const restoredThinking: Record<number, ThinkingFlow> = {};
                     const restoredConsensus: Record<number, any> = {};
                     const restoredQuotes: Record<number, any> = {};
+                    const restoredTokens: Record<number, TokenSnapshotData> = {};
                     const restoredHtml: Record<number, string> = {};
                     const restoredViewModes: Record<number, 'docs' | 'web'> = {};
                     let hasRoundtableHistory = false;
@@ -4491,7 +4514,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         (m: { role: string; metadata?: string | null }, idx: number) => {
                             if (m.role !== 'assistant' || !m.metadata) return;
                             try {
-                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; htmlReport?: string; sources?: SearchSource[] };
+                                const meta = JSON.parse(m.metadata) as { thinkingFlow?: ThinkingFlow; consensusResult?: any; quoteCard?: any; tokenCard?: TokenSnapshotData; htmlReport?: string; sources?: SearchSource[] };
                                 if (meta.thinkingFlow && Array.isArray(meta.thinkingFlow.modules)) {
                                     const isRt = meta.thinkingFlow.routedMode === 'roundtable' || !!meta.consensusResult;
                                     if (isRt) {
@@ -4516,9 +4539,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 if (meta.quoteCard) {
                                     restoredQuotes[idx] = meta.quoteCard;
                                 }
+                                if (meta.tokenCard && meta.tokenCard.id) {
+                                    restoredTokens[idx] = meta.tokenCard;
+                                }
                                 if (meta.htmlReport) {
                                     restoredHtml[idx] = meta.htmlReport;
-                                    restoredViewModes[idx] = 'web';
+                                    // Deliberately do NOT default the view mode to 'web' on history
+                                    // restore. Older sessions persist `htmlReport` in metadata
+                                    // regardless of which tab the user last looked at, and
+                                    // auto-jumping every restored message into the HTML card hides
+                                    // the markdown answer they actually came back to read. Default
+                                    // is 'docs' (set by the useState initializer); they can opt
+                                    // into the HTML view via the Docs/Web toggle when they want it.
                                 }
                             } catch {
                                 /* ignore */
@@ -4565,6 +4597,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     }
                     if (Object.keys(restoredQuotes).length > 0) {
                         setQuoteCards(prev => ({ ...prev, ...restoredQuotes }));
+                    }
+                    if (Object.keys(restoredTokens).length > 0) {
+                        setTokenCards(prev => ({ ...prev, ...restoredTokens }));
                     }
                     if (Object.keys(restoredHtml).length > 0) {
                         setHtmlReports(prev => ({ ...prev, ...restoredHtml }));
@@ -5425,6 +5460,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                     </a>
                                                                 );
                                                             })()}
+                                                            {/* Crypto token card (Web3 queries) — live CoinGecko snapshot.
+                                                                Rendered FIRST so the reader sees the token-identity lens (logo /
+                                                                project name / FDV / supply / socials / exchanges) before the
+                                                                trader-oriented Market Signals panel below. */}
+                                                            {tokenCards[i] && <TokenCard token={tokenCards[i]} lang={/[一-鿿]/.test(msg.content || '') ? 'zh' : 'en'} />}
                                                             {/* OKX standalone fallback when no QuoteCard renders — reuses the same
                                                                 OkxQuoteDerivatives + OkxQuoteNews as the merged path, wrapped in a
                                                                 header. Surfaces derivatives AND news, bilingual label. */}
