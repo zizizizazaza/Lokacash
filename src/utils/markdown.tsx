@@ -681,13 +681,35 @@ function ExtLink({ href, icon, label, title }: { href: string; icon: React.React
   );
 }
 
-function StatBlock({ label, value, hint, color }: { label: string; value?: string; hint?: string; color?: string }) {
-  if (!value) return null;
+function StatBlock({ label, value, hint, color, info, alwaysShow }: { label: string; value?: string; hint?: string; color?: string; info?: string; alwaysShow?: boolean }) {
+  if (!value && !alwaysShow) return null;
+  const shown = value ?? '—';
+  const showHint = !!value && !!hint;
   return (
     <div className="min-w-0">
-      <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{label}</p>
-      <p className={`text-[13px] font-semibold tabular-nums truncate leading-none ${color || 'text-gray-800'}`}>{value}</p>
-      {hint && <p className="text-[9.5px] text-gray-400 mt-0.5 truncate leading-none">{hint}</p>}
+      <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1 flex items-center gap-1">
+        <span className="truncate">{label}</span>
+        {info && (
+          <span className="tk-info group relative inline-flex items-center shrink-0" tabIndex={0}>
+            <svg
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              className="w-[12px] h-[12px] text-gray-400 group-hover:text-gray-600 group-focus:text-gray-600 transition-colors"
+              fill="currentColor"
+            >
+              <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.4a5.1 5.1 0 1 1 0 10.2A5.1 5.1 0 0 1 8 2.9Zm0 2.1a.85.85 0 1 0 0 1.7.85.85 0 0 0 0-1.7Zm-.85 3.05V11.8a.85.85 0 1 0 1.7 0V8.05a.85.85 0 1 0-1.7 0Z" />
+            </svg>
+            <span
+              role="tooltip"
+              className="tk-info-pop pointer-events-none absolute left-1/2 bottom-full mb-1.5 -translate-x-1/2 z-30 normal-case tracking-normal whitespace-normal text-[11px] font-normal leading-snug text-white bg-gray-900/95 rounded-lg px-2.5 py-1.5 w-[220px] shadow-lg ring-1 ring-black/10 opacity-0 translate-y-1 transition-all duration-100 group-hover:opacity-100 group-hover:translate-y-0 group-focus:opacity-100 group-focus:translate-y-0"
+            >
+              {info}
+            </span>
+          </span>
+        )}
+      </p>
+      <p className={`text-[13px] font-semibold tabular-nums truncate leading-none ${value ? (color || 'text-gray-800') : 'text-gray-300'}`}>{shown}</p>
+      {showHint && <p className="text-[9.5px] text-gray-400 mt-0.5 truncate leading-none">{hint}</p>}
     </div>
   );
 }
@@ -701,8 +723,12 @@ export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: st
         ch24: '24h', ch7: '7d', ch30: '30d', ch1y: '1y',
         circ: '流通', total: '总量', max: '上限', circPct: '流通%',
         ath: '历史最高', atl: '历史最低',
-        twitter: '推特', reddit: 'Reddit', telegram: 'TG', github: 'GitHub',
+        twitter: '推特粉丝', reddit: 'Reddit', telegram: 'TG 群', github: 'GitHub',
         commits4w: '4周提交', stars: 'Stars', forks: 'Forks', contributors: '贡献者',
+        infoTwitter: '项目官方 Twitter / X 账号的粉丝数。',
+        infoTelegram: '项目官方 Telegram 群的成员数。没有官方 TG 群时显示 —。',
+        infoCommits4w: '主代码仓库最近 4 周的提交次数，用来看项目近期开发是否活跃。0 代表项目近 1 个月没动过代码。',
+        infoStars: '主代码仓库累计获得的 GitHub Stars，反映开发者社区对项目的关注度。',
         sentimentUp: '看涨投票', sentimentDown: '看跌投票',
         topExch: '主要交易所',
         details: '详细数据',
@@ -712,8 +738,12 @@ export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: st
         ch24: '24h', ch7: '7d', ch30: '30d', ch1y: '1y',
         circ: 'Circ', total: 'Total', max: 'Max', circPct: 'Circ %',
         ath: 'ATH', atl: 'ATL',
-        twitter: 'Twitter', reddit: 'Reddit', telegram: 'TG', github: 'GitHub',
+        twitter: 'Twitter', reddit: 'Reddit', telegram: 'Telegram', github: 'GitHub',
         commits4w: '4w commits', stars: 'Stars', forks: 'Forks', contributors: 'Contributors',
+        infoTwitter: 'Followers of the project’s official Twitter / X account.',
+        infoTelegram: 'Members of the project’s official Telegram group. Shows — if there is none.',
+        infoCommits4w: 'GitHub commits to the main repo in the last 4 weeks. 0 means no code activity for a month.',
+        infoStars: 'Cumulative GitHub stars on the main repo — a proxy for developer interest.',
         sentimentUp: 'Bullish votes', sentimentDown: 'Bearish votes',
         topExch: 'Top exchanges',
         details: 'Show details',
@@ -765,23 +795,36 @@ export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: st
     },
   ];
 
-  // Row 3: community + developer
-  const row3: { label: string; value?: string; hint?: string; color?: string }[] = [
-    { label: L.twitter, value: fmtCount(c.twitterFollowers) },
-    { label: L.reddit, value: fmtCount(c.redditSubscribers) },
-    { label: L.telegram, value: fmtCount(c.telegramUsers) },
-    { label: L.commits4w, value: d.commits4w != null ? String(d.commits4w) : undefined, hint: d.contributors != null ? `${d.contributors} ${L.contributors}` : undefined },
-    { label: L.stars, value: fmtCount(d.githubStars), hint: d.githubForks != null ? `${fmtCount(d.githubForks)} ${L.forks}` : undefined },
+  // Row 3: community + developer — always render so the labels stay
+  // self-explanatory even when the project has no TG / GitHub.
+  const row3: { label: string; value?: string; hint?: string; color?: string; info?: string; alwaysShow?: boolean }[] = [
+    { label: L.twitter, value: fmtCount(c.twitterFollowers), info: L.infoTwitter, alwaysShow: true },
+    { label: L.telegram, value: fmtCount(c.telegramUsers), info: L.infoTelegram, alwaysShow: true },
+    {
+      label: L.commits4w,
+      value: d.commits4w != null ? String(d.commits4w) : undefined,
+      hint: d.contributors != null ? `${d.contributors} ${L.contributors}` : undefined,
+      info: L.infoCommits4w,
+      alwaysShow: true,
+    },
+    {
+      label: L.stars,
+      value: fmtCount(d.githubStars),
+      hint: d.githubForks != null ? `${fmtCount(d.githubForks)} ${L.forks}` : undefined,
+      info: L.infoStars,
+      alwaysShow: true,
+    },
   ];
 
   const hasAnyRow1 = row1.some((s) => s.value);
   const hasAnyRow2 = row2.some((s) => s.value);
-  const hasAnyRow3 = row3.some((s) => s.value);
+  // Row 3 has alwaysShow entries — keep the row visible even when every value is missing.
+  const hasAnyRow3 = true;
 
   const topEx = (token.topExchanges || []).slice(0, 5);
 
   return (
-    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
+    <div className={`mb-5 rounded-2xl ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
       {/* Header */}
       <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
         <div className="min-w-0 flex items-start gap-3">

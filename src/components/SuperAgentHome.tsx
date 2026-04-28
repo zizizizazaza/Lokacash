@@ -244,16 +244,16 @@ const PULSE_FALLBACK_COINS: PulseCoin[] = [
   { sym: 'XRP', name: 'XRP',      price:   2.38,chg: -2.3, spark: [55,54,52,53,51,50,48,49,47,46,45,44,43,42,41,40,41,39,38,37], icon: 'https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png' },
   { sym: 'DOGE',name: 'Dogecoin', price:   0.34,chg:  4.1, spark: [30,31,33,32,34,36,35,38,40,39,42,41,44,46,45,48,47,50,52,54], icon: 'https://assets.coingecko.com/coins/images/5/small/dogecoin.png' },
 ];
-const PULSE_FALLBACK_TRENDING: { sym: string; chg: number }[] = [
-  { sym: 'WIF', chg: 18.3 }, { sym: 'JUP', chg: -4.1 }, { sym: 'ONDO', chg: 9.2 },
-  { sym: 'TAO', chg: 12.7 }, { sym: 'PENDLE', chg: -2.6 }, { sym: 'ENA', chg: 6.4 },
-  { sym: 'PYTH', chg: 3.9 },
+const PULSE_FALLBACK_TRENDING: { sym: string; chg: number; name: string }[] = [
+  { sym: 'WIF', name: 'dogwifhat', chg: 18.3 }, { sym: 'JUP', name: 'Jupiter', chg: -4.1 }, { sym: 'ONDO', name: 'Ondo', chg: 9.2 },
+  { sym: 'TAO', name: 'Bittensor', chg: 12.7 }, { sym: 'PENDLE', name: 'Pendle', chg: -2.6 }, { sym: 'ENA', name: 'Ethena', chg: 6.4 },
+  { sym: 'PYTH', name: 'Pyth Network', chg: 3.9 },
 ];
 
 const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v4';
 const PULSE_CACHE_TTL = 5 * 60 * 1000; // 5 min — banners need to feel current
 
-type PulseCache = { at: number; coins: PulseCoin[]; trending: { sym: string; chg: number }[] };
+type PulseCache = { at: number; coins: PulseCoin[]; trending: { sym: string; chg: number; name: string }[] };
 
 const readPulseCache = (): PulseCache | null => {
   try {
@@ -310,7 +310,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
   // Cached for 5 min. Background refresh (below) re-pulls every 5 min
   // while the user lingers.
   const [coins, setCoins] = useState<PulseCoin[]>(() => readPulseCache()?.coins ?? PULSE_FALLBACK_COINS);
-  const [trending, setTrending] = useState<{ sym: string; chg: number }[]>(() => readPulseCache()?.trending ?? PULSE_FALLBACK_TRENDING);
+  const [trending, setTrending] = useState<{ sym: string; chg: number; name: string }[]>(() => readPulseCache()?.trending ?? PULSE_FALLBACK_TRENDING);
   const [updatedAt, setUpdatedAt] = useState<number>(() => readPulseCache()?.at ?? 0);
 
   // ── 2. Live "vibe" metrics (gas + Fear & Greed) ──────────────────
@@ -419,22 +419,30 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
         // Pull 5 from each side, drop dust (price < $0.0001 to avoid
         // wild meme-coin shitshow), interleave so the strip mixes
         // green and red.
-        const formatMover = (x: any): { sym: string; chg: number } | null => {
+        const formatMover = (x: any): { sym: string; chg: number; name: string } | null => {
           const sym = String(x.symbol || '').toUpperCase();
           const chg = Number(x.price_change_percentage_24h);
           const price = Number(x.current_price);
+          const name = String(x.name || sym);
           if (!sym || STABLE_OR_WRAPPED.test(sym) || !Number.isFinite(chg) || chg === 0) return null;
           if (!Number.isFinite(price) || price < 0.0001) return null;
-          return { sym, chg };
+          return { sym, chg, name };
         };
-        const gainers = (gainersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number }[];
-        const losers = (losersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number }[];
-        const interleaved: { sym: string; chg: number }[] = [];
-        for (let i = 0; i < 6; i++) {
+        const gainers = (gainersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number; name: string }[];
+        const losers = (losersRaw as any[]).map(formatMover).filter(Boolean) as { sym: string; chg: number; name: string }[];
+        const interleaved: { sym: string; chg: number; name: string }[] = [];
+        for (let i = 0; i < 12; i++) {
           if (gainers[i]) interleaved.push(gainers[i]);
           if (losers[i]) interleaved.push(losers[i]);
         }
-        const nextTrending = interleaved.slice(0, 12);
+        // Dedup by symbol so the strip doesn't show e.g. BTC twice when
+        // the same coin appears in both halves of the underlying API call.
+        const seenSym = new Set<string>();
+        const nextTrending = interleaved.filter((m) => {
+          if (seenSym.has(m.sym)) return false;
+          seenSym.add(m.sym);
+          return true;
+        }).slice(0, 20);
 
         if (cancelled) return;
         if (nextCoins.length) setCoins(nextCoins);
@@ -634,16 +642,34 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
       <div className="relative overflow-hidden border-t border-gray-100 bg-gray-50/60">
         <div className="flex items-center gap-6 px-5 sm:px-6 py-2.5 w3p-marquee">
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">Top Movers 24h</span>
-          {[...trending, ...trending].map((t, i) => (
-            <span key={`${t.sym}-${i}`} className="shrink-0 inline-flex items-center gap-1.5 text-[11.5px]">
-              <span className="font-semibold text-gray-700 tracking-wide">{t.sym}</span>
-              {t.chg !== 0 && (
-                <span className={`tabular-nums ${t.chg >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                  {t.chg >= 0 ? '+' : ''}{t.chg.toFixed(1)}%
-                </span>
-              )}
-            </span>
-          ))}
+          {[...trending, ...trending].map((t, i) => {
+            // Second pass is a visual-only clone for seamless looping —
+            // hide it from screen-readers and disable interaction so the
+            // user only ever clicks the original.
+            const isDup = i >= trending.length;
+            return (
+              <button
+                key={`${t.sym}-${i}`}
+                type="button"
+                aria-hidden={isDup || undefined}
+                tabIndex={isDup ? -1 : 0}
+                onClick={() => {
+                  if (isDup) return;
+                  onAsk?.(`What's driving ${t.name} (${t.sym}) today?`);
+                }}
+                className="shrink-0 inline-flex items-center gap-1.5 text-[11.5px] rounded-md px-1.5 py-0.5 -mx-1 hover:bg-white hover:ring-1 hover:ring-black/5 transition cursor-pointer disabled:cursor-default"
+                disabled={isDup}
+                title={isDup ? undefined : `Ask Loka about ${t.name}`}
+              >
+                <span className="font-semibold text-gray-700 tracking-wide">{t.sym}</span>
+                {t.chg !== 0 && (
+                  <span className={`tabular-nums ${t.chg >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                    {t.chg >= 0 ? '+' : ''}{t.chg.toFixed(1)}%
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -713,13 +739,29 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const pickDomain = (d: Domain) => {
     if (d === domain) return;
     setDomain(d);
-    try { window.localStorage.setItem(DOMAIN_STORAGE_KEY, d); } catch {}
     setShowWelcome(false);
     // Switching domain closes any open agent pill and its scenario, so
     // the Stocks/Web3 views never bleed into each other.
     setSelectedAgent(null);
     setSelectedScenario(null);
   };
+
+  // Persist the active domain to localStorage on every change, so the next
+  // mount (refresh, New Chat, route bounce) restores the same tab. Also
+  // listen for `storage` events so a domain switch in one tab updates the
+  // other tabs of the same browser.
+  useEffect(() => {
+    try { window.localStorage.setItem(DOMAIN_STORAGE_KEY, domain); } catch {}
+  }, [domain]);
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== DOMAIN_STORAGE_KEY) return;
+      const next = e.newValue === 'web3' ? 'web3' : 'stocks';
+      setDomain((prev) => (prev === next ? prev : next));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
   const dismissWelcome = () => setShowWelcome(false);
 
   // Roundtable quota
@@ -873,6 +915,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       setInput('');
       setSelectedAgent(null);
       setSelectedScenario(null);
+      // Live Demo is a one-shot flag — never let it leak into a manual chat
+      setLiveDemoActive(false);
       setPhIdx(Math.floor(Math.random() * QUICK_ACTIONS.length));
     }
   }, [newChatTs]); // eslint-disable-line

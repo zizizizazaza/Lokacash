@@ -3144,7 +3144,11 @@ For each guru in the simulation data, create a detailed subsection. If the user 
       //  • Every claim must inline a number from raw context (price/funding/OI/follower/etc).
       //  • First-pass report stays tight; granular tables go inside <details> blocks.
       //  • No Token Snapshot section in markdown — UI renders the TokenCard from metadata.
-      const cryptoMemoPrompt = getGlobalTimeContext() + `You are a senior crypto trader-analyst writing for an experienced trader who already knows the basics. Your edge is connecting on-chain + derivatives + tokenomics + sentiment to call out what the market is mispricing. NEVER write filler. NEVER write tutorials. NEVER fabricate numbers.
+      const cryptoIsZh = /[\u4e00-\u9fff]/.test(userContent || '');
+      const cryptoLangDirective = cryptoIsZh
+        ? `\n\n=== LANGUAGE LOCK (HIGHEST PRIORITY) ===\n用户问题是中文。整篇回答必须 100% 用简体中文：所有标题（# / ## / ###）、所有正文段落、所有列表项、所有表格表头、所有 <strong> 加粗标签、所有 <details><summary>。\n禁止出现任何英文句子或英文短语作为正文/标题。专有名词（BTC / ETH / FDV / OKX / RSI 等指标缩写、币种 ticker、交易所名）保持英文原文，但说明性文字必须中文。\n如 Context 里的资料是英文，你必须翻译成中文后再写入回答；不要照抄英文段落。\n`
+        : `\n\n=== LANGUAGE LOCK (HIGHEST PRIORITY) ===\nThe user's question is in English. The entire response must be 100% English: every heading (# / ## / ###), every paragraph, every list item, every table header, every <strong>, every <details><summary>.\nDo NOT emit any Chinese characters anywhere in the output. Tickers (BTC, ETH, etc.) and exchange names stay as-is.\nIf the Context contains Chinese-language material, summarize it in English — never quote it raw.\n`;
+      const cryptoMemoPrompt = getGlobalTimeContext() + cryptoLangDirective + `You are a senior crypto trader-analyst writing for an experienced trader who already knows the basics. Your edge is connecting on-chain + derivatives + tokenomics + sentiment to call out what the market is mispricing. NEVER write filler. NEVER write tutorials. NEVER fabricate numbers.
 
 === INPUT ===
 User question: ${userContent}
