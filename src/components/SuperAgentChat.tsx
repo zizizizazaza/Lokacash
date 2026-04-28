@@ -3817,6 +3817,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 if (!prev[msgIdx]) return prev;
                 return { ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } };
             });
+            // Refresh quota counts after a successful turn so the ModeSelector
+            // badges ("18 left" / "1 left") decrement immediately. The Privy
+            // mount-time fetch is one-shot and won't see usage changes from
+            // chats sent later in the same session. Best-effort: keep stale
+            // counts if the refetch fails.
+            if (privyAuthenticated) {
+                api.getQuota()
+                    .then((q) => {
+                        setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+                        if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+                    })
+                    .catch(() => { /* keep last good values */ });
+            }
         };
 
         const onError = (data: { sessionId: string; error: string; mode?: string; resetAt?: string; hint?: string }) => {
@@ -3851,6 +3864,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 return updated;
             });
             setIsStreaming(false);
+            // Quota may have been consumed before the error fired (the backend
+            // charges as soon as the run is routed to fast/roundtable). Refetch
+            // so the badge reflects reality even on a failed turn.
+            if (privyAuthenticated) {
+                api.getQuota()
+                    .then((q) => {
+                        setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+                        if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+                    })
+                    .catch(() => { /* keep last good values */ });
+            }
         };
 
         const onThinkingLog = (data: { sessionId: string; line: string }) => {
