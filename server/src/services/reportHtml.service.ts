@@ -306,8 +306,9 @@ Lists:
 4. Data Visualization: two-col layout with bar charts (.bar-mini) and tables (.seg-table)
 5. Scenario Analysis: 3-4 scenario cards (.scenario-grid with .sc-bull/.sc-base/.sc-flat/.sc-bear)
 6. Risk Matrix: table with probability/impact pills (.pill-low/.pill-mid/.pill-high)
-7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert’s core view, confidence, and key argument using expert-row components. Include:
+7. Expert Debate Panel (MANDATORY when expert debate data is in the input): Present each expert's core view, confidence, and key argument using expert-row components. Include:
    - Expert cards: each expert with name, signal (bullish/bearish/neutral), confidence bar, and 1-2 sentence core argument
+   - **HARD DATA RULE — every expert section in the input is labelled like \`--- {Name} | VERDICT: Bullish | CONFIDENCE: 78% ---\`. The Signal column / signal pill MUST copy the VERDICT value verbatim (Bullish / Bearish / Neutral). The Confidence bar / value MUST copy the CONFIDENCE percentage verbatim. NEVER default every expert to "Neutral / 65%". NEVER re-infer the signal by re-reading the prose — the explicit VERDICT field is authoritative.**
    - Points of Agreement: where experts converged
    - Points of Contention: where experts disagreed and what data would resolve it
    - Synthesis: how the debate shaped the final thesis
