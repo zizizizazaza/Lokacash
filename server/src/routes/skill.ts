@@ -702,6 +702,112 @@ router.get('/v1/crypto/pulse-trending', async (_req: Request, res: Response) => 
 });
 
 /**
+ * GET /skill/v1/crypto/pulse-prices?syms=BTC,ETH,SOL  OR  ?ids=bitcoin,ethereum
+ *
+ * Lightweight live spot price proxy for the home banner's "tick every 20s"
+ * polling. Same job as the previous direct browser → api.coingecko.com call
+ * but via our backend so it works in markets where the browser cannot reach
+ * CoinGecko. 15s server-side cache covers the burst of polls from many tabs.
+ *
+ * Two ways to query:
+ *   - `syms=BTC,ETH,SOL,...`  uppercase tickers — easier, we map common ones
+ *     to CoinGecko slugs internally (BTC→bitcoin, XRP→ripple, BNB→binancecoin
+ *     etc.). Unmapped tickers are skipped.
+ *   - `ids=bitcoin,ethereum,...`  raw CoinGecko slugs (lowercase). Use this
+ *     when you already know the canonical id.
+ *
+ * Returns prices keyed BY THE INPUT FORM (sym if you sent syms; slug if ids).
+ */
+type PulsePricesPayload = {
+  prices: Record<string, number>;
+  asOf: number;
+};
+const pulsePricesCache = new Map<string, { data: PulsePricesPayload; cachedAt: number }>();
+const PULSE_PRICES_TTL_MS = 15_000;
+
+// Common ticker → CoinGecko slug map. Covers the home-banner fallback list
+// plus the usual top-30 tickers. CoinGecko's ID system is irregular (XRP is
+// `ripple`, BNB is `binancecoin`, MATIC is `matic-network`) so we curate
+// the mapping rather than try to derive it from images or symbols.
+const TICKER_TO_CG_SLUG: Record<string, string> = {
+  BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', XRP: 'ripple',
+  BNB: 'binancecoin', DOGE: 'dogecoin', ADA: 'cardano', AVAX: 'avalanche-2',
+  TRX: 'tron', LINK: 'chainlink', DOT: 'polkadot', MATIC: 'matic-network',
+  POL: 'matic-network', LTC: 'litecoin', BCH: 'bitcoin-cash', NEAR: 'near',
+  UNI: 'uniswap', ATOM: 'cosmos', XLM: 'stellar', ETC: 'ethereum-classic',
+  HBAR: 'hedera-hashgraph', APT: 'aptos', ARB: 'arbitrum', OP: 'optimism',
+  FIL: 'filecoin', ICP: 'internet-computer', INJ: 'injective-protocol',
+  STX: 'blockstack', AAVE: 'aave', MKR: 'maker', SUI: 'sui', SEI: 'sei-network',
+  TIA: 'celestia', PEPE: 'pepe', SHIB: 'shiba-inu', WIF: 'dogwifcoin',
+  PENGU: 'pudgy-penguins', PI: 'pi-network', MON: 'monad', LUNC: 'terra-luna',
+  RAVE: 'ravedao', BLEND: 'blend', JUP: 'jupiter-exchange-solana',
+  ONDO: 'ondo-finance', TAO: 'bittensor', PENDLE: 'pendle', ENA: 'ethena',
+  PYTH: 'pyth-network', HYPE: 'hyperliquid', RENDER: 'render-token',
+  RNDR: 'render-token',
+};
+
+router.get('/v1/crypto/pulse-prices', async (req: Request, res: Response) => {
+  const symsParam = String(req.query.syms || '').trim();
+  const idsParam = String(req.query.ids || '').trim();
+
+  // Build a list of (key the caller wants in response, slug we send to CG).
+  // syms takes precedence so the response is ticker-keyed when both are sent.
+  const requests: Array<{ key: string; slug: string }> = [];
+  const seen = new Set<string>();
+  if (symsParam) {
+    for (const raw of symsParam.split(',')) {
+      const sym = raw.trim().toUpperCase();
+      if (!sym || !/^[A-Z0-9_]{1,15}$/.test(sym)) continue;
+      const slug = TICKER_TO_CG_SLUG[sym];
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      requests.push({ key: sym, slug });
+    }
+  } else if (idsParam) {
+    for (const raw of idsParam.split(',')) {
+      const slug = raw.trim().toLowerCase();
+      if (!slug || !/^[a-z0-9][a-z0-9-]{0,40}$/.test(slug) || seen.has(slug)) continue;
+      seen.add(slug);
+      requests.push({ key: slug, slug });
+    }
+  }
+  if (requests.length === 0) {
+    return errorResponse(res, 400, 'missing_ids', 'Pass `syms=BTC,ETH,...` (tickers) or `ids=bitcoin,ethereum,...` (CoinGecko slugs).');
+  }
+  const requestsCapped = requests.slice(0, 50);
+
+  const cacheKey = requestsCapped.map((r) => `${r.key}|${r.slug}`).sort().join(',');
+  const now = Date.now();
+  const hit = pulsePricesCache.get(cacheKey);
+  if (hit && now - hit.cachedAt < PULSE_PRICES_TTL_MS) {
+    return res.json({ ok: true, data: hit.data, cached: true });
+  }
+  try {
+    const base = pulseTrendingCgBase();
+    const headers = pulseTrendingCgHeaders();
+    const slugs = requestsCapped.map((r) => r.slug);
+    const url = `${base}/simple/price?ids=${slugs.join(',')}&vs_currencies=usd`;
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(6_000) });
+    if (!r.ok) throw new Error(`simple/price HTTP ${r.status}`);
+    const j = (await r.json()) as Record<string, { usd?: number }>;
+    const prices: Record<string, number> = {};
+    for (const { key, slug } of requestsCapped) {
+      const usd = Number(j[slug]?.usd);
+      if (Number.isFinite(usd)) prices[key] = usd;
+    }
+    const data: PulsePricesPayload = { prices, asOf: now };
+    pulsePricesCache.set(cacheKey, { data, cachedAt: now });
+    res.json({ ok: true, data, cached: false });
+  } catch (err) {
+    if (hit) {
+      console.warn('[pulse-prices] upstream failed, serving stale:', (err as Error).message);
+      return res.json({ ok: true, data: hit.data, cached: true, stale: true });
+    }
+    return errorResponse(res, 502, 'pulse_prices_failed', (err as Error).message);
+  }
+});
+
+/**
  * GET /skill/v1/info
  * Self-describing endpoint for skill discovery.
  */

@@ -235,6 +235,13 @@ const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo })
      - /search/trending    → marquee of today's most-searched tokens
    Both are cached in localStorage for 30 min so we don't hammer the API
    across navigations. Fallbacks (below) keep the UI useful if offline. */
+// Resolve the API base from Vite env. In local dev it's `/api` (Vite proxy
+// or same-origin server), in production builds Vercel serves the frontend
+// while the actual API lives on a separate host (e.g. nftkashai.online),
+// so VITE_API_BASE must be set to the absolute backend URL or all the
+// `/api/skill/...` calls below 404 against Vercel itself.
+const PULSE_API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/+$/, '');
+
 type PulseCoin = { sym: string; name: string; price: number; chg: number; spark: number[]; icon?: string };
 const PULSE_FALLBACK_COINS: PulseCoin[] = [
   { sym: 'BTC', name: 'Bitcoin',  price: 97420, chg:  2.4, spark: [36,34,33,37,40,42,41,44,46,45,48,52,50,53,55,58,56,59,62,60], icon: 'https://assets.coingecko.com/coins/images/1/small/bitcoin.png' },
@@ -351,7 +358,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
     // (c) one less direct CG dependency on the frontend.
     const pullAll = async () => {
       try {
-        const r = await fetch('/api/skill/v1/crypto/pulse-trending', { cache: 'no-store' });
+        const r = await fetch(`${PULSE_API_BASE}/skill/v1/crypto/pulse-trending`, { cache: 'no-store' });
         if (!r.ok) throw new Error(`pulse-trending HTTP ${r.status}`);
         const body = (await r.json()) as {
           ok?: boolean;
@@ -391,7 +398,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
     let cancelled = false;
     const pull = async () => {
       try {
-        const r = await fetch('/api/skill/v1/crypto/pulse-meta', { cache: 'no-store' });
+        const r = await fetch(`${PULSE_API_BASE}/skill/v1/crypto/pulse-meta`, { cache: 'no-store' });
         if (!r.ok) return;
         const j = await r.json();
         const data = j?.data;
@@ -422,30 +429,21 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
   useEffect(() => {
     if (!coins.length) return;
     let cancelled = false;
-    // Extract CoinGecko slug from each coin's icon URL since /coins/markets
-    // returned the icons (slug ≠ symbol — e.g. matic-network ≠ MATIC).
-    const symBySlug: Record<string, string> = {};
-    for (const c of coins.slice(0, 6)) {
-      const m = c.icon?.match(/\/small\/([a-z0-9-]+)\.[a-z]+/);
-      if (m?.[1]) symBySlug[m[1]] = c.sym;
-    }
-    const slugs = Object.keys(symBySlug);
-    if (slugs.length === 0) return; // nothing reliable to query
+    // Just send tickers — backend has the curated TICKER → CoinGecko slug map
+    // and will skip ones it doesn't know. This avoids the old icon-URL slug
+    // regex hack that mis-derived `xrp-symbol-white-128` from XRP's icon.
+    const syms = coins.slice(0, 6).map((c) => c.sym).filter(Boolean);
+    if (syms.length === 0) return;
 
     const pull = async () => {
       try {
-        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${slugs.join(',')}&vs_currencies=usd`;
+        const url = `${PULSE_API_BASE}/skill/v1/crypto/pulse-prices?syms=${encodeURIComponent(syms.join(','))}`;
         const r = await fetch(url, { cache: 'no-store' });
         if (!r.ok) return;
-        const j = (await r.json()) as Record<string, { usd?: number }>;
+        const body = (await r.json()) as { data?: { prices?: Record<string, number> } };
+        const prices = body?.data?.prices || {};
         if (cancelled) return;
-        const next: Record<string, number> = {};
-        for (const slug of Object.keys(j)) {
-          const sym = symBySlug[slug];
-          const usd = Number(j[slug]?.usd);
-          if (sym && Number.isFinite(usd)) next[sym] = usd;
-        }
-        if (Object.keys(next).length) setLivePrices((prev) => ({ ...prev, ...next }));
+        if (Object.keys(prices).length) setLivePrices((prev) => ({ ...prev, ...prices }));
       } catch {
         /* swallow — keep last known prices */
       }
