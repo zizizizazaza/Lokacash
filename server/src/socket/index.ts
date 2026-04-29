@@ -34,6 +34,9 @@ import {
   finishChatReplayBuffer,
   getChatReplayBuffer,
   recordChatToolTraceStep,
+  recordChatTokenCard,
+  recordChatRoutedMode,
+  recordChatRtEvent,
 } from '../services/moduleEmitter.js';
 import {
   mergeSignalSources,
@@ -1206,8 +1209,18 @@ Text: "${query}"`;
             steps: chatBuffer.toolTraceSteps,
             modules: chatBuffer.modules,
             mode: chatBuffer.mode,
+            // Actual post-routing mode (e.g. Auto resolved to 'roundtable').
+            // Drives the 5-stage pipeline + Workbench UI on replay.
+            routedMode: chatBuffer.routedMode,
             report: chatBuffer.content || undefined,
             status: chatBuffer.status,
+            // Round-trip the most recent TokenCard snapshot so a client that
+            // navigated away mid-stream restores the card immediately, instead
+            // of waiting for the next history fetch.
+            tokenCard: chatBuffer.tokenCard,
+            // Roundtable agent-debate event stream — replayed in order on the
+            // client to rebuild rtRounds + rtConsensus + Workbench UI.
+            rtEvents: chatBuffer.rtEvents || [],
           } as any);
           return;
         }
@@ -1241,7 +1254,7 @@ Text: "${query}"`;
       }
     });
 
-    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[] }) => {
+    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[]; assetHint?: { sym?: string; name?: string; kind?: string; coingeckoId?: string } }) => {
       const userContent = typeof data?.content === 'string' ? data.content : '';
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
@@ -1589,6 +1602,59 @@ Text: "${query}"`;
         plan.isSimpleChat = false;
       }
 
+      // ── assetHint override (Web3 trending-card click) ──
+      // When the user starts a chat by clicking a Web3 trending card on the
+      // home page, the frontend already KNOWS the asset is crypto. The LLM
+      // router can still misclassify it (e.g. BLEND token vs Blend Labs Inc.
+      // NYSE:BLND), which sets web3.needed=false and skips the entire web3
+      // pipeline (no TokenCard). Trust the frontend signal here: force web3 on,
+      // strip stock-side analysis to keep the response focused, and unset
+      // simpleChat so the synth pipeline runs.
+      const incomingHint = data.assetHint;
+      const hintSym = typeof incomingHint?.sym === 'string' ? incomingHint.sym.trim().toUpperCase() : '';
+      const hintName = typeof incomingHint?.name === 'string' ? incomingHint.name.trim() : '';
+      // CoinGecko id is propagated all the way into the web3 CLI subprocess so
+      // the agent can skip its search_crypto_asset turn (~7s saved per query).
+      const hintCgId =
+        typeof (incomingHint as any)?.coingeckoId === 'string'
+          ? ((incomingHint as any).coingeckoId as string).trim()
+          : '';
+      const web3Hint =
+        incomingHint?.kind === 'crypto' && hintCgId
+          ? { coingeckoId: hintCgId, symbol: hintSym || undefined, name: hintName || undefined }
+          : null;
+      if (incomingHint?.kind === 'crypto' && hintSym) {
+        plan.isSimpleChat = false;
+        plan.capabilities = plan.capabilities || {};
+        plan.capabilities.web3 = {
+          needed: true,
+          query: hintName ? `${hintSym} ${hintName} price market analysis` : `${hintSym} crypto price market analysis`,
+        };
+        // Stocks-side capability is meaningless for a crypto symbol — clear
+        // any tickers the router may have hallucinated (e.g. BLND for BLEND).
+        plan.capabilities.analysis = { needed: false, tickers: undefined };
+        if (plan.capabilities.simulate) {
+          plan.capabilities.simulate = { needed: false, tickers: undefined };
+        }
+        // Keep search ON so the Debate panel still gets news/sentiment context,
+        // but rewrite the search query to favor the resolved crypto asset.
+        const searchOn = !!plan.capabilities.search?.needed;
+        plan.capabilities.search = {
+          needed: true,
+          query: hintName ? `${hintName} ${hintSym} crypto market sentiment news` : `${hintSym} crypto market sentiment news`,
+          showXAccountProfile: !!plan.capabilities.search?.showXAccountProfile,
+        };
+        // queryType defaults to market-brief for "what's driving X today?"-style
+        // prompts; only override clearly-wrong types so guru-council / multi-turn
+        // continuations stay intact.
+        if (plan.queryType === 'general' || !plan.queryType) {
+          plan.queryType = 'market-brief';
+        }
+        console.log(
+          `[agent:chat] assetHint override applied: sym=${hintSym} name=${hintName || '∅'} cgId=${hintCgId || '∅'} → web3.needed=true, analysis=false${searchOn ? '' : ', search=on'}${web3Hint ? ' [will skip search_crypto_asset]' : ' [no cgId — agent will call search]'}`,
+        );
+      }
+
       // Guests are capped at the simple-chat path regardless of what the
       // orchestrator decided. The 5/day guest quota pays for a plain LLM
       // answer, not search + Web3 + synthesis.
@@ -1894,6 +1960,11 @@ Text: "${query}"`;
         actualTier === 'roundtable' ? 'roundtable' :
         actualTier === 'simple' ? 'auto' :
         'fast';
+      // Mirror into the replay buffer so a client navigating away mid-stream
+      // can still restore the Roundtable/Fast UI (5-stage pipeline, Workbench)
+      // when it returns. Without this, replay only sees the originally
+      // requested mode (e.g. 'auto'), which can't drive routedMode-gated UI.
+      recordChatRoutedMode(sessionId, legacyMode);
       socket.emit('agent:chat:routed', {
         sessionId,
         mode: legacyMode,
@@ -1991,9 +2062,12 @@ Text: "${query}"`;
           if (cryptoRegex.test(userContent)) {
             console.log(`[agent:chat] simple chat crypto-rescue triggered sessionId=${sessionId}`);
             try {
-              const web3Result = await web3RouterService.runQuery(userContent.trim());
+              const web3Result = await web3RouterService.runQuery(userContent.trim(), web3Hint ? { hint: web3Hint } : undefined);
               const snap = web3Result.raw.tokenSnapshot;
               if (snap && snap.id) {
+                // Mirror into the replay buffer so a client that navigates away
+                // mid-stream can still get the card on `agent:chat:replay`.
+                recordChatTokenCard(sessionId, snap);
                 emitToUser(userId, 'agent:chat:token', { sessionId, token: snap });
                 console.log(
                   `[token_card] (rescue) emitted id=${snap.id} symbol=${snap.symbol} price=${snap.market.priceUsd ?? 'n/a'}`,
@@ -2198,6 +2272,7 @@ Text: "${query}"`;
         emitter.emitModule('web3', 'active', {
           variant: 'coingecko_mcp',
           label: 'CoinGecko MCP',
+          stages: [],
         });
         const routedWeb3Q = (plan.capabilities.web3.query || '').trim();
         const originalQ = userContent.trim();
@@ -2205,9 +2280,80 @@ Text: "${query}"`;
           routedWeb3Q && originalQ && routedWeb3Q !== originalQ
             ? `${originalQ} ; ${routedWeb3Q}`
             : routedWeb3Q || originalQ;
+
+        // ── Real-time sub-stages for the Process panel ──
+        // Each tool call inside the web3 ReAct loop emits an 'active' event
+        // before it runs and a 'completed'/'failed' event after. We accumulate
+        // them here and re-emit the entire web3 module on every transition so
+        // the client always sees a consistent ordered list.
+        const web3Stages: Array<{
+          stage: string;
+          title_en: string;
+          title_zh: string;
+          state: 'active' | 'completed' | 'failed' | 'skipped';
+          startedAt: number;
+          durationMs?: number;
+          summary?: string;
+          error?: string;
+        }> = [];
+        const web3OnStage = (event: import('../services/web3Research.service.js').Web3StageEvent) => {
+          const idx = web3Stages.findIndex((s) => s.stage === event.stage && s.state === 'active');
+          if (event.state === 'active') {
+            // New stage. Replace any prior failed/skipped entry with the same
+            // id (the agent can retry, especially on transient CoinGecko errors).
+            const dupIdx = web3Stages.findIndex((s) => s.stage === event.stage);
+            const entry = {
+              stage: event.stage,
+              title_en: event.title_en,
+              title_zh: event.title_zh,
+              state: 'active' as const,
+              startedAt: Date.now(),
+            };
+            if (dupIdx >= 0) web3Stages[dupIdx] = entry;
+            else web3Stages.push(entry);
+          } else if (idx >= 0) {
+            web3Stages[idx] = {
+              ...web3Stages[idx],
+              state: event.state,
+              durationMs: event.durationMs,
+              summary: event.summary,
+              error: event.error,
+            };
+          } else {
+            // Completion event without a matching active (shouldn't happen, but
+            // be lenient — push as-is).
+            web3Stages.push({
+              stage: event.stage,
+              title_en: event.title_en,
+              title_zh: event.title_zh,
+              state: event.state,
+              startedAt: Date.now(),
+              durationMs: event.durationMs,
+              summary: event.summary,
+              error: event.error,
+            });
+          }
+          emitter.emitModule('web3', 'active', {
+            variant: 'coingecko_mcp',
+            label: 'CoinGecko MCP',
+            stages: web3Stages.map((s) => ({
+              stage: s.stage,
+              title_en: s.title_en,
+              title_zh: s.title_zh,
+              state: s.state,
+              durationMs: s.durationMs,
+              summary: s.summary,
+              error: s.error,
+            })),
+          });
+        };
+
         promises.push(
           web3RouterService
-            .runQuery(web3Q)
+            .runQuery(web3Q, {
+              ...(web3Hint ? { hint: web3Hint } : {}),
+              onStage: web3OnStage,
+            })
             .then((result) => {
               finalWeb3Intent = result.raw.intent || undefined;
               finalWeb3Sources = buildWeb3ProviderSources(result.raw);
@@ -2222,6 +2368,9 @@ Text: "${query}"`;
               const snap = result.raw.tokenSnapshot;
               if (snap && snap.id) {
                 savedTokenCard = snap;
+                // Mirror into the replay buffer so a client that navigates away
+                // mid-stream can still get the card on `agent:chat:replay`.
+                recordChatTokenCard(sessionId, snap);
                 emitToUser(userId, 'agent:chat:token', { sessionId, token: snap });
                 console.log(
                   `[token_card] emitted id=${snap.id} symbol=${snap.symbol} price=${snap.market.priceUsd ?? 'n/a'} mcap=${snap.market.marketCapUsd ?? 'n/a'} fdv/mcap=${snap.market.fdvOverMcap?.toFixed(2) ?? 'n/a'}`,
@@ -2263,6 +2412,17 @@ Text: "${query}"`;
                 okx: result.raw.okx || [],
                 okxNews: result.raw.okxNews || [],
                 providers: result.raw.providers || [],
+                // Preserve the live stage timeline on the completion event so
+                // the persisted thinkingFlow can be restored on history reload.
+                stages: web3Stages.map((s) => ({
+                  stage: s.stage,
+                  title_en: s.title_en,
+                  title_zh: s.title_zh,
+                  state: s.state,
+                  durationMs: s.durationMs,
+                  summary: s.summary,
+                  error: s.error,
+                })),
               });
               return { type: 'WEB3', data: result.report };
             })
@@ -2270,7 +2430,7 @@ Text: "${query}"`;
               console.warn(
                 `[web3Research] failed sessionId=${sessionId} err=${(e as Error).message}`,
               );
-              emitter.emitModule('web3', 'completed', {});
+              emitter.emitModule('web3', 'completed', { stages: web3Stages });
               return { type: 'WEB3', data: 'Error: ' + (e as Error).message };
             }),
         );
@@ -3645,6 +3805,10 @@ ${synFullContent || contextString}${langFooter}`;
                   : null;
               })
               .filter((x): x is PublicAnalystPersona => x !== null);
+            // Mirror to replay buffer so a reconnecting client can rebuild the
+            // Workbench (Agent Room + Graph + Debate) without waiting for a new
+            // emission of this one-shot event.
+            recordChatRtEvent(sessionId, 'analysts_selected', { analysts: rosterPayload });
             socket.emit('agent:chat:analysts_selected', {
               sessionId,
               analysts: rosterPayload,
@@ -3672,6 +3836,10 @@ ${synFullContent || contextString}${langFooter}`;
                   if (isAborted()) return;
                   // Round transitions
                   if (evt.type === 'round_started') {
+                    recordChatRtEvent(sessionId, 'round_started', {
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
                     socket.emit('agent:chat:round_started', {
                       sessionId,
                       round: evt.round_number,
@@ -3680,6 +3848,10 @@ ${synFullContent || contextString}${langFooter}`;
                     return;
                   }
                   if (evt.type === 'round_completed') {
+                    recordChatRtEvent(sessionId, 'round_completed', {
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
                     socket.emit('agent:chat:round_completed', {
                       sessionId,
                       round: evt.round_number,
@@ -3701,6 +3873,13 @@ ${synFullContent || contextString}${langFooter}`;
                       confidence: evt.confidence ?? 0,
                     });
                     perAgentRounds.set(evt.agent_id, list);
+                    recordChatRtEvent(sessionId, 'agent_responded', {
+                      analystId: evt.agent_id,
+                      round: evt.round_number,
+                      confidence: evt.confidence ?? 0,
+                      summary: answer.slice(0, 400),
+                      answer,
+                    });
                     socket.emit('agent:chat:agent_responded', {
                       sessionId,
                       analystId: evt.agent_id,
@@ -4029,6 +4208,7 @@ ${synFullContent || contextString}${langFooter}`;
               conclusion: { verdict: verdictLabel, confidence: conf },
             };
             emitter.emitModule('consensus', 'completed', consensusFlowData);
+            recordChatRtEvent(sessionId, 'consensus_done', { result: consensusResult });
             socket.emit('agent:chat:consensus_done', {
               sessionId,
               result: consensusResult
@@ -4166,9 +4346,11 @@ ${synFullContent || contextString}${langFooter}`;
               conclusion: { verdict: 'Consensus failed', confidence: 0 },
             };
             emitter.emitModule('consensus', 'completed', consensusFlowData);
+            const failedConsensusResult = { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } };
+            recordChatRtEvent(sessionId, 'consensus_done', { result: failedConsensusResult });
             socket.emit('agent:chat:consensus_done', {
               sessionId,
-              result: { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } }
+              result: failedConsensusResult
             });
           } finally {
             console.log(

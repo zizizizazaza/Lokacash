@@ -360,6 +360,19 @@ interface Web3OkxNewsBundle {
     sentiment: Web3OkxSentiment | null;
 }
 
+// One sub-stage of the web3 ReAct loop. Backend pushes these in real time
+// (stage:'active' → 'completed'/'failed') so the user can watch the agent
+// work through tool calls instead of staring at a 30s blank wait.
+export interface Web3Stage {
+    stage: string;
+    title_en: string;
+    title_zh: string;
+    state: 'active' | 'completed' | 'failed' | 'skipped';
+    durationMs?: number;
+    summary?: string;
+    error?: string;
+}
+
 interface Web3ModuleData {
     label?: string;
     intent?: string;
@@ -369,6 +382,7 @@ interface Web3ModuleData {
     okxNews?: Web3OkxNewsBundle[];
     providers?: string[];
     duration?: number;
+    stages?: Web3Stage[];
 }
 
 export interface ThinkingModule {
@@ -2288,6 +2302,65 @@ const ThinkingProcessSidePanel: React.FC<{
         );
     };
 
+    // ── Web3 Module Renderer (ReAct sub-stages) ──
+    // Renders the live timeline of CoinGecko tool calls so the user can see
+    // the agent working during the ~25s web3 ReAct window. Each sub-stage
+    // shows a title, status, duration, and a one-line summary of the result.
+    const Web3Module: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
+        const d = mod.data as Web3ModuleData | undefined;
+        const stages = d?.stages;
+        if (!stages || stages.length === 0) return null;
+        // Process-panel labels are kept English-only by product decision —
+        // matches the rest of the panel ("Searching", "Analyzing", "Done").
+        return (
+            <div>
+                <div className="flex items-center gap-2.5 mb-3">
+                    <StatusIcon status={mod.status} />
+                    <span className="text-[14px] font-bold text-gray-900">Crypto Research</span>
+                </div>
+                <div className="ml-7 space-y-2 mb-3">
+                    {stages.map((s) => {
+                        const title = s.title_en;
+                        const dotColor =
+                            s.state === 'completed' ? 'bg-emerald-500'
+                            : s.state === 'failed'   ? 'bg-rose-500'
+                            : s.state === 'skipped'  ? 'bg-gray-300'
+                            : 'bg-blue-500 animate-pulse';
+                        const textColor =
+                            s.state === 'completed' ? 'text-gray-700'
+                            : s.state === 'failed'   ? 'text-rose-600'
+                            : s.state === 'skipped'  ? 'text-gray-400'
+                            : 'text-blue-600';
+                        const durSec = typeof s.durationMs === 'number' ? (s.durationMs / 1000).toFixed(1) : null;
+                        return (
+                            <div key={s.stage} className={`rounded-xl border px-3 py-2 transition-all ${
+                                s.state === 'active'    ? 'border-blue-100 bg-blue-50/30'
+                                : s.state === 'failed'  ? 'border-rose-100 bg-rose-50/30'
+                                : s.state === 'skipped' ? 'border-gray-100 bg-gray-50/30'
+                                : 'border-gray-100 bg-gray-50/50'
+                            }`}>
+                                <div className="flex items-center gap-2">
+                                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+                                    <span className={`text-[12px] font-semibold flex-1 ${textColor}`}>{title}</span>
+                                    {durSec && (
+                                        <span className="text-[10px] text-gray-400 tabular-nums">{durSec}s</span>
+                                    )}
+                                </div>
+                                {(s.summary || s.error) && (
+                                    <div className={`mt-1 ml-3.5 text-[11px] tabular-nums ${
+                                        s.state === 'failed' ? 'text-rose-500' : 'text-gray-500'
+                                    }`}>
+                                        {s.error || s.summary}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        );
+    };
+
     // ══════════════════════════════════════════════════════════════
     // ── Roundtable 4-Phase Process View ──────────────────────────
     // ══════════════════════════════════════════════════════════════
@@ -3000,6 +3073,9 @@ const ThinkingProcessSidePanel: React.FC<{
             if (mod.type === 'simulation') continue; // Simulation module hidden
             if (mod.type === 'done' && mod.status !== 'completed') continue;
             switch (mod.type) {
+                case 'web3':
+                    mods.push({ key: 'web3', element: <Web3Module mod={mod} /> });
+                    break;
                 case 'analysis':
                     mods.push({ key: 'analysis', element: <AnalysisModule mod={mod} /> });
                     break;
@@ -3135,6 +3211,26 @@ interface SuperAgentChatProps {
     /** When true, the Roundtable summon flow auto-confirms after the selecting
      *  phase reveals, producing a hands-free "live demo" run from the home banner. */
     autoStartRoundtable?: boolean;
+    /** When the chat starts from a Web3 trending-card click, the home page hands
+     *  us the asset context so the backend orchestrator can skip the
+     *  is-this-a-stock LLM guess (e.g. BLEND token vs Blend Labs Inc.). Only
+     *  applied to the very first user turn.
+     *
+     *  Optional fields piggyback on the same hand-off so the chat can:
+     *    - hand `coingeckoId` to backend so its web3 agent skips search_crypto_asset
+     *    - render an instant placeholder TokenCard from `priceUsd`/`change24hPct`/
+     *      `imageUrl`/`sparkline` while the web3 agent is still running
+     *  All fields are optional — only `sym/name/kind` are required for routing. */
+    initialAssetHint?: {
+        sym: string;
+        name: string;
+        kind: 'crypto';
+        coingeckoId?: string;
+        priceUsd?: number;
+        change24hPct?: number;
+        imageUrl?: string;
+        sparkline?: number[];
+    };
 }
 
 /** Replace bare [Source Name] citations with [Source Name](url) using the sources list,
@@ -3248,7 +3344,7 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     return result;
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable }) => {
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable, initialAssetHint }) => {
     const navigate = useNavigate();
     const { ready: privyReady, authenticated: privyAuthenticated } = usePrivy();
     const [sessionId] = useState(() => {
@@ -3359,6 +3455,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const tocNavRef = useRef<HTMLDivElement>(null);
     const hasSentInitial = useRef(false);
     const replayRecoverAttemptedRef = useRef(false);
+    // Holds the replay payload when it arrives BEFORE the history-fetch
+    // placeholder exists. Without this, the silent `if (c[msgIdx])` guard in
+    // setMessages drops the buffered content and the user's mid-stream
+    // navigation results in lost paragraphs. History fetch reads this ref to
+    // pre-fill its newly-created assistant placeholder.
+    const pendingReplayPayloadRef = useRef<{
+        msgIdx: number;
+        report: string;
+        isRunning: boolean;
+    } | null>(null);
     const restoredFromPendingRef = useRef(
         (() => {
             try {
@@ -4336,7 +4442,16 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             if (data.sessionId !== sessionId) return;
             const msgIdx = activeMsgIdxRef.current;
             if (msgIdx < 0 || !data.token?.id) return;
-            setTokenCards(prev => ({ ...prev, [msgIdx]: data.token }));
+            setTokenCards(prev => {
+                const replacing = prev[msgIdx];
+                saLog('TokenCard upgraded (placeholder → full)', {
+                    msgIdx,
+                    placeholderHadPrice: typeof replacing?.market?.priceUsd === 'number',
+                    fullId: data.token.id,
+                    fullSym: data.token.symbol,
+                });
+                return { ...prev, [msgIdx]: data.token };
+            });
         };
 
         const onHtmlReady = (data: { sessionId: string; msgIdx: number; html: string }) => {
@@ -4415,13 +4530,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     steps?: unknown[];
                     modules?: Array<{ moduleType: string; status: string; data?: any }>;
                     mode?: string;
+                    /** Actual post-routing mode. Auto can resolve to 'roundtable'/'fast'/'simple';
+                     *  this drives the panel's roundtable-only UI on replay. */
+                    routedMode?: string;
                     report?: string;
                     status?: string;
+                    tokenCard?: TokenSnapshotData;
+                    /** Roundtable agent-debate event stream — applied in order to
+                     *  rebuild rtRounds + rtConsensus on the Workbench. */
+                    rtEvents?: Array<{ type: string; payload: any }>;
                 }) => {
-                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, modulesLen: Array.isArray(res?.modules) ? res.modules.length : 0, mode: res?.mode, isRunning: res?.isRunning, status: res?.status });
+                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, modulesLen: Array.isArray(res?.modules) ? res.modules.length : 0, mode: res?.mode, routedMode: res?.routedMode, isRunning: res?.isRunning, status: res?.status });
+                    // Determine the effective routed mode. `routedMode` (post-Auto-routing
+                    // actual tier) wins over `mode` (originally requested), so an Auto
+                    // → roundtable session correctly restores the roundtable UI.
+                    const effectiveRoutedMode = res?.routedMode || res?.mode;
                     // Restore roundtable chatMode so the right-side panel picks the correct variant
                     // when a client returns mid-stream to a roundtable session.
-                    if (res?.mode === 'roundtable' && chatMode !== 'roundtable') {
+                    if (effectiveRoutedMode === 'roundtable' && chatMode !== 'roundtable') {
                         setChatMode('roundtable');
                     }
 
@@ -4458,16 +4584,166 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 ...(prev[msgIdx] || {
                                     modules: [],
                                     isActive: !!res.isRunning,
-                                    route: res?.mode === 'roundtable' ? 'Roundtable' : 'Investment Analyst',
+                                    route: effectiveRoutedMode === 'roundtable' ? 'Roundtable' : 'Investment Analyst',
                                 }),
                                 ...(hasModules ? { modules: rebuiltModules } : {}),
                                 ...(trace !== undefined ? { toolTrace: trace } : {}),
                                 ...(planning !== undefined ? { planningMessage: planning } : {}),
-                                ...(res?.mode === 'roundtable' ? { routedMode: 'roundtable' } : {}),
+                                // routedMode drives the 5-stage pipeline + Workbench UI.
+                                // Use `effectiveRoutedMode` so Auto-resolved-to-roundtable
+                                // sessions restore the proper UI.
+                                ...(effectiveRoutedMode ? { routedMode: effectiveRoutedMode } : {}),
+                                // Workbench gate (5647): renders when rtPreparationStatus
+                                // is 'done' OR rtRounds/rtDataSearch is non-empty. Live
+                                // mode sets this in handleSummonConfirm immediately, so
+                                // we mirror that on replay too — otherwise mid-stream
+                                // session switches (when no agent_responded has fired
+                                // yet) hide the Workbench until consensus_done lands,
+                                // even though the live experience showed it the whole time.
+                                ...(effectiveRoutedMode === 'roundtable' ? { rtPreparationStatus: 'done' as const } : {}),
                                 isActive: !!res.isRunning,
                             },
                         }));
+                        // Restore TokenCard from buffer if the user navigated away after
+                        // web3 finished but before the page-level history fetch had a
+                        // persisted metadata.tokenCard to draw from.
+                        if (res.tokenCard && (res.tokenCard as any).id) {
+                            setTokenCards(prev => ({ ...prev, [msgIdx]: res.tokenCard as TokenSnapshotData }));
+                        }
+
+                        // ── Replay roundtable agent-debate events ──
+                        // Rebuild Workbench state (selectedAgentIds, rtRounds,
+                        // rtConsensus, rtPreparationStatus) by folding the buffered
+                        // event stream in order. This mirrors the live socket
+                        // handlers (onAnalystsSelected / onRoundStarted / etc.) so
+                        // a session-switch mid-roundtable shows the EXACT same
+                        // panel state it would if the user had stayed connected.
+                        if (Array.isArray(res.rtEvents) && res.rtEvents.length > 0) {
+                            let selectedAgentIds: string[] | undefined;
+                            let rtRounds: RtRoundData[] = [];
+                            let rtConsensus: RtConsensusResult | undefined;
+                            let rtReportStatus: 'pending' | 'active' | 'done' | undefined;
+
+                            for (const ev of res.rtEvents) {
+                                if (ev.type === 'analysts_selected') {
+                                    const analysts = ev.payload?.analysts;
+                                    if (Array.isArray(analysts)) {
+                                        selectedAgentIds = analysts.map((a: any) => a.id);
+                                    }
+                                } else if (ev.type === 'round_started') {
+                                    const r = Number(ev.payload?.round);
+                                    if (Number.isFinite(r)) {
+                                        const idx = rtRounds.findIndex(x => x.round === r);
+                                        if (idx === -1) {
+                                            rtRounds.push({ round: r, status: 'active', agents: [] });
+                                        } else {
+                                            rtRounds[idx] = { ...rtRounds[idx], status: 'active' };
+                                        }
+                                    }
+                                } else if (ev.type === 'round_completed') {
+                                    const r = Number(ev.payload?.round);
+                                    const idx = rtRounds.findIndex(x => x.round === r);
+                                    if (idx !== -1) {
+                                        rtRounds[idx] = {
+                                            ...rtRounds[idx],
+                                            status: 'done',
+                                            agents: rtRounds[idx].agents.map(a => ({ ...a, status: 'done' })),
+                                        };
+                                    }
+                                } else if (ev.type === 'agent_responded') {
+                                    const { analystId, round, confidence, answer } = ev.payload || {};
+                                    if (typeof analystId === 'string' && Number.isFinite(round)) {
+                                        const verdict = parsePersonaVerdict(answer || '');
+                                        const reasoning = parsePersonaReasoning(answer || '');
+                                        const confPct = Math.round((confidence || 0) * 100);
+                                        const newAgent: RtAgentInference = {
+                                            agentId: analystId,
+                                            agentName: getAnalystDisplayName(analystId),
+                                            status: 'done',
+                                            verdict,
+                                            confidence: confPct,
+                                            reasoning,
+                                        };
+                                        const idx = rtRounds.findIndex(x => x.round === round);
+                                        if (idx === -1) {
+                                            rtRounds.push({ round, status: 'active', agents: [newAgent] });
+                                        } else {
+                                            const agents = [...rtRounds[idx].agents];
+                                            const pos = agents.findIndex(a => a.agentId === analystId);
+                                            if (pos === -1) agents.push(newAgent);
+                                            else agents[pos] = { ...agents[pos], ...newAgent };
+                                            rtRounds[idx] = { ...rtRounds[idx], agents };
+                                        }
+                                    }
+                                } else if (ev.type === 'consensus_done') {
+                                    const result = ev.payload?.result || {};
+                                    const resp: Array<{ agentId: string; answer: string; confidence: number }> =
+                                        result?.consensus?.agentResponses || [];
+                                    const reached = result?.consensus?.consensusReached !== false;
+                                    const conclusions = resp.map((r) => ({
+                                        agentName: getAnalystDisplayName(r.agentId),
+                                        verdict: parsePersonaVerdict(r.answer || ''),
+                                        confidence: Math.round((r.confidence || 0) * 100),
+                                    }));
+                                    let finalConfidencePct = Math.round(((result?.consensus?.confidence as number) || 0) * 100);
+                                    if (finalConfidencePct <= 0 && conclusions.length > 0) {
+                                        const sum = conclusions.reduce((s, c) => s + (c.confidence || 0), 0);
+                                        finalConfidencePct = Math.round(sum / conclusions.length);
+                                    }
+                                    if (finalConfidencePct <= 0) finalConfidencePct = 50;
+                                    const tally: Record<string, number> = { Bullish: 0, Bearish: 0, Neutral: 0 };
+                                    for (const c of conclusions) tally[c.verdict] = (tally[c.verdict] || 0) + 1;
+                                    const finalVerdict =
+                                        (Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] as string) || 'Neutral';
+                                    const majorityCount = tally[finalVerdict] || 0;
+                                    const conflictRate =
+                                        conclusions.length > 0
+                                            ? Math.round(((conclusions.length - majorityCount) / conclusions.length) * 100)
+                                            : 0;
+                                    rtConsensus = {
+                                        status: 'done',
+                                        hasConsensus: reached,
+                                        conflictRate,
+                                        agentConclusions: conclusions,
+                                        finalVerdict,
+                                        finalConfidence: finalConfidencePct,
+                                    };
+                                    rtReportStatus = 'active';
+                                }
+                            }
+
+                            // Apply once.
+                            setThinkingProcesses(prev => {
+                                const existing = prev[msgIdx];
+                                if (!existing) return prev;
+                                return {
+                                    ...prev,
+                                    [msgIdx]: {
+                                        ...existing,
+                                        // Workbench renders when ANY of these is set,
+                                        // so always seed rtPreparationStatus so the
+                                        // panel becomes visible the moment replay
+                                        // returns (even before round events arrive).
+                                        rtPreparationStatus: 'done',
+                                        ...(selectedAgentIds ? { selectedAgentIds } : {}),
+                                        ...(rtRounds.length > 0 ? { rtRounds } : {}),
+                                        ...(rtConsensus ? { rtConsensus } : {}),
+                                        ...(rtReportStatus ? { rtReportStatus } : {}),
+                                    },
+                                };
+                            });
+                        }
                         if (res.report) {
+                            // Stash the payload so a slow history fetch can still
+                            // pick it up after the placeholder lands. Replay can
+                            // arrive (~10ms socket roundtrip) before history fetch
+                            // (~100-500ms HTTP); without this the silent
+                            // `if (c[msgIdx])` guard below would drop the content.
+                            pendingReplayPayloadRef.current = {
+                                msgIdx,
+                                report: res.report,
+                                isRunning: !!res.isRunning,
+                            };
                             setMessages(prev => {
                                 const c = [...prev];
                                 if (c[msgIdx]) {
@@ -4478,13 +4754,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     c[msgIdx] = {
                                         ...c[msgIdx],
                                         content: res.report,
-                                        isStreaming: false,
+                                        // CRITICAL: keep isStreaming=true while the server is
+                                        // still running, otherwise onProgress / onStreamDone
+                                        // both bail out via their `if (!isStreaming) return`
+                                        // guards and the user sees a frozen partial message
+                                        // until the html_ready fallback fires.
+                                        isStreaming: !!res.isRunning,
                                         timestamp: new Date().toLocaleTimeString(),
                                     };
+                                    // Applied successfully — clear the ref so a later
+                                    // history fetch doesn't double-apply.
+                                    pendingReplayPayloadRef.current = null;
                                 }
                                 return c;
                             });
                             if (!res.isRunning) setIsStreaming(false);
+                            else setIsStreaming(true);
                         }
                         return;
                     }
@@ -4600,7 +4885,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
     }, [sessionId, chatMode, chatSelectedAgent]);
 
-    const sendToAI = useCallback((text: string, existingMessages?: Message[], analystIds?: string[]) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[], analystIds?: string[], assetHint?: SuperAgentChatProps['initialAssetHint']) => {
         // Bump generation so stale events from a previous run are dropped
         chatGenRef.current += 1;
         activeChatGenRef.current = chatGenRef.current;
@@ -4668,6 +4953,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             // Roundtable persona selection — sent only when user picks analysts.
             // Must include the 4 system IDs + ≥1 user-picked (validated server-side).
             ...(analystIds && analystIds.length > 0 ? { analystIds } : {}),
+            // assetHint is only attached on the very first turn (the one started
+            // from the Web3 trending card). Backend treats it as a hard override
+            // for the LLM-based "is this crypto or stock?" guess. We only forward
+            // the fields the backend actually uses; price/spark/icon stay
+            // client-side for the placeholder TokenCard render.
+            ...(assetHint ? {
+                assetHint: {
+                    sym: assetHint.sym,
+                    name: assetHint.name,
+                    kind: assetHint.kind,
+                    ...(assetHint.coingeckoId ? { coingeckoId: assetHint.coingeckoId } : {}),
+                },
+            } : {}),
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -4705,15 +5003,42 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         (lastHistoryMsg.role === 'assistant' && !lastHistoryMsg.content)
                     );
                     if (streamStillActive) {
+                        // If replay already came back ahead of us with buffered
+                        // content (typical on session-switch mid-stream), seed
+                        // the placeholder with that content + the actual running
+                        // state, so the user sees the prior paragraphs instantly
+                        // and onProgress can continue appending.
+                        // We match by "there IS a pending payload" rather than
+                        // by exact msgIdx, since replay's default msgIdx is 1
+                        // but multi-turn sessions may have the placeholder at
+                        // a higher index. The just-created placeholder is
+                        // always the last message in the array, so the index
+                        // alignment is implicit.
+                        const pending = pendingReplayPayloadRef.current;
+                        const placeholderIdx = transformedHistory.length;
                         setMessages([
                             ...transformedHistory,
                             {
                                 role: 'assistant',
-                                content: '',
+                                content: pending ? pending.report : '',
                                 timestamp: new Date().toLocaleTimeString(),
-                                isStreaming: true,
+                                isStreaming: pending ? pending.isRunning : true,
                             },
                         ]);
+                        if (pending) {
+                            // Update activeMsgIdxRef so subsequent onProgress
+                            // chunks land on the right message.
+                            activeMsgIdxRef.current = placeholderIdx;
+                            pendingReplayPayloadRef.current = null;
+                            // Sync the top-level streaming flag so the input
+                            // shows the "Waiting for reply" state while the
+                            // server keeps pushing chunks.
+                            setIsStreaming(pending.isRunning);
+                        } else {
+                            // No replay payload: still align activeMsgIdxRef
+                            // so live onProgress can find the placeholder.
+                            activeMsgIdxRef.current = placeholderIdx;
+                        }
                     } else {
                         setMessages(transformedHistory);
                     }
@@ -4908,6 +5233,34 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const initialMessages = [userMsg];
         setMessages(initialMessages);
 
+        // Render an instant placeholder TokenCard from the trending-card snapshot
+        // we already have client-side. The card sits at msgIdx=1 (the assistant
+        // message slot we're about to create) and is overwritten the moment the
+        // backend's `agent:chat:token` event fires with the full TokenSnapshot.
+        // Without this, the user stares at a blank screen for ~35s while the
+        // web3 ReAct loop runs through all 4 tools.
+        if (initialAssetHint?.kind === 'crypto' && initialAssetHint.coingeckoId) {
+            const placeholder: TokenSnapshotData = {
+                id: initialAssetHint.coingeckoId,
+                symbol: initialAssetHint.sym,
+                name: initialAssetHint.name,
+                imageUrl: initialAssetHint.imageUrl,
+                market: {
+                    priceUsd: initialAssetHint.priceUsd,
+                    change24hPct: initialAssetHint.change24hPct,
+                },
+                community: {},
+                developer: {},
+            };
+            setTokenCards(prev => ({ ...prev, 1: placeholder }));
+            saLog('placeholder TokenCard rendered from assetHint', {
+                id: initialAssetHint.coingeckoId,
+                sym: initialAssetHint.sym,
+                priceUsd: initialAssetHint.priceUsd,
+                hasIcon: !!initialAssetHint.imageUrl,
+            });
+        }
+
         // Roundtable mode: show inline summon panel instead of sending immediately
         if (chatMode === 'roundtable') {
             saLog('initial: roundtable → show summon flow', { initialPreview: initialMessage.slice(0, 80) });
@@ -4930,8 +5283,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         }
 
         saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages); setTimeout(scrollUserMsgToTop, 150); }, 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode]);
+        setTimeout(() => { sendToAI(initialMessage, initialMessages, undefined, initialAssetHint); setTimeout(scrollUserMsgToTop, 150); }, 50);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode, initialAssetHint]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSummonConfirm = useCallback(() => {
@@ -5158,9 +5511,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         }
 
-        sendToAI(text, messages, realAnalystIds);
+        // First-turn-only: forward initialAssetHint when the roundtable confirm
+        // fires the very first sendToAI (messages still empty before the user
+        // turn was appended). Subsequent roundtable turns must NOT carry the
+        // stale hint.
+        const isFirstTurn = (messages?.length ?? 0) === 0
+            || (messages?.length === 1 && messages[0]?.role === 'user');
+        sendToAI(text, messages, realAnalystIds, isFirstTurn ? initialAssetHint : undefined);
         setTimeout(scrollUserMsgToTop, 150);
-    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop, selectedSummonIds]);
+    }, [pendingRtText, messages, sendToAI, scrollUserMsgToTop, selectedSummonIds, initialAssetHint]);
 
     // Live Demo: when autoConfirmTick bumps, fire the confirm with the latest
     // closure so the pre-selected lenses are picked up correctly.

@@ -494,10 +494,16 @@ function buildOkxNewsSection(bundles: Web3OkxNewsBundle[]): string {
  *
  * Safe drop-in for `runWeb3ResearchQuery` (same return type).
  */
-export async function runWeb3RouterQuery(userQuery: string): Promise<Web3ResearchResult> {
+export async function runWeb3RouterQuery(
+  userQuery: string,
+  opts?: {
+    hint?: import('./web3Research.service.js').Web3PreResolvedHint | null;
+    onStage?: (event: import('./web3Research.service.js').Web3StageEvent) => void;
+  },
+): Promise<Web3ResearchResult> {
   const q = (userQuery || '').trim();
   if (!q) {
-    return runWeb3ResearchQuery(q);
+    return runWeb3ResearchQuery(q, opts);
   }
 
   const startMs = Date.now();
@@ -528,7 +534,7 @@ export async function runWeb3RouterQuery(userQuery: string): Promise<Web3Researc
     }
   }
 
-  const cgTask = runWeb3ResearchQuery(q);
+  const cgTask = runWeb3ResearchQuery(q, opts);
   const cg = await cgTask;
   if (Array.isArray(cg.raw.logs)) logs.unshift(...cg.raw.logs);
 

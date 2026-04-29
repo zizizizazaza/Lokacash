@@ -537,6 +537,10 @@ function pulseTrendingCgBase(): string {
 const STABLE_OR_WRAPPED = /^(USDT|USDC|DAI|TUSD|FDUSD|USDE|PYUSD|BUSD|USDD|FRAX|LUSD|GUSD|WBTC|WETH|STETH|WSTETH|WEETH|CBBTC|CBETH|RETH|TBTC)$/;
 
 type PulseTrendingCoin = {
+  // CoinGecko id is shipped to the frontend so a Web3 trending-card click can
+  // hand it straight to the backend orchestrator (see assetHint flow). With the
+  // id pre-resolved, the web3 agent can skip its search_crypto_asset turn (~7s).
+  id: string;
   sym: string;
   name: string;
   price: number;
@@ -544,7 +548,7 @@ type PulseTrendingCoin = {
   spark: number[];
   icon: string;
 };
-type PulseTrendingMover = { sym: string; chg: number; name: string };
+type PulseTrendingMover = { id: string; sym: string; chg: number; name: string };
 type PulseTrending = {
   coins: PulseTrendingCoin[];
   trending: PulseTrendingMover[];
@@ -643,6 +647,7 @@ async function fetchPulseTrendingBundle(): Promise<PulseTrending> {
     .map((it: any): PulseTrendingCoin => {
       const detail = sparklineMap[it.id];
       return {
+        id: String(it.id || ''),
         sym: String(it.symbol || '').toUpperCase(),
         name: detail?.name || it.name || '',
         price: detail?.price || Number(it?.data?.price) || 0,
@@ -651,18 +656,19 @@ async function fetchPulseTrendingBundle(): Promise<PulseTrending> {
         icon: detail?.image || it.thumb || it.small || it.large || '',
       };
     })
-    .filter((c) => c.sym && c.price > 0)
+    .filter((c) => c.id && c.sym && c.price > 0)
     .slice(0, 6);
 
   // ── Marquee: top movers (gainers + losers, interleaved) ──
   const formatMover = (x: any): PulseTrendingMover | null => {
+    const id = String(x.id || '');
     const sym = String(x.symbol || '').toUpperCase();
     const chg = Number(x.price_change_percentage_24h);
     const price = Number(x.current_price);
     const name = String(x.name || sym);
-    if (!sym || STABLE_OR_WRAPPED.test(sym) || !Number.isFinite(chg) || chg === 0) return null;
+    if (!id || !sym || STABLE_OR_WRAPPED.test(sym) || !Number.isFinite(chg) || chg === 0) return null;
     if (!Number.isFinite(price) || price < 0.0001) return null;
-    return { sym, chg, name };
+    return { id, sym, chg, name };
   };
   const gainers = (gainersRaw as any[]).map(formatMover).filter(Boolean) as PulseTrendingMover[];
   const losers = (losersRaw as any[]).map(formatMover).filter(Boolean) as PulseTrendingMover[];
