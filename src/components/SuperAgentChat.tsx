@@ -654,7 +654,13 @@ function reconstructRtFromMetadata(meta: any): {
                 status: 'done',
                 verdict: parsePersonaVerdict(e.answer || ''),
                 confidence: Math.round((Number(e.confidence) || 0) * 100),
-                reasoning: e.answer || '',
+                // Mirror the LIVE-stream path (onAgentResponded at line ~4246):
+                // strip the SIGNAL/CONFIDENCE/KEY_EVIDENCE/RATIONALE/
+                // WOULD_CHANGE_MY_MIND schema prefixes and keep only the
+                // RATIONALE prose. Without this the restored Debate tab
+                // shows raw schema spew + citations dropped mid-content,
+                // which doesn't match what the user saw mid-conversation.
+                reasoning: parsePersonaReasoning(e.answer || ''),
             });
         }
         for (const round of [...byRound.keys()].sort((a, b) => a - b)) {
@@ -693,7 +699,14 @@ function reconstructRtFromMetadata(meta: any): {
                         status: 'done',
                         verdict: r?.verdict || parsePersonaVerdict(r?.answer || ''),
                         confidence: Math.round((Number(r?.confidence) || 0) * 100),
-                        reasoning: r?.answer || r?.reasoning || '',
+                        // Same RATIONALE-only extraction as the live path so
+                        // restored messages read identically to live-streamed
+                        // ones. `reasoning` here is sometimes already a clean
+                        // body (legacy aegean shape), sometimes a raw schema
+                        // dump (modern roundtable persona format) — running
+                        // both through parsePersonaReasoning is a safe no-op
+                        // when no schema markers are present.
+                        reasoning: parsePersonaReasoning(r?.answer || r?.reasoning || ''),
                     });
                 }
                 rtRounds.push({ round: rIdx + 1, status: 'done', agents });
@@ -714,7 +727,8 @@ function reconstructRtFromMetadata(meta: any): {
                     status: 'done',
                     verdict: r.verdict || parsePersonaVerdict(r.answer || ''),
                     confidence: Math.round((Number(r.confidence) || 0) * 100),
-                    reasoning: r.answer || r.reasoning || '',
+                    // RATIONALE-only extraction — match live-stream rendering.
+                    reasoning: parsePersonaReasoning(r.answer || r.reasoning || ''),
                 };
             });
             rtRounds.push({ round: 1, status: 'done', agents });
