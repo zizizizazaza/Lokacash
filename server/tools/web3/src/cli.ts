@@ -1580,15 +1580,131 @@ Rules:
 - Do NOT give trading advice — report facts only
 - If data is unavailable, state so clearly`;
 
-async function runAgentLoop(query: string): Promise<Web3CliResult> {
+// PreResolvedHint comes from the upstream "Web3 trending card click" path. When
+// the user's chat is started by clicking a known trending coin, the frontend
+// already has its CoinGecko id (e.g. PENGU → "pudgy-penguins"), so we hand it
+// here via env vars from `runWeb3ResearchQuery`. This lets the agent skip the
+// search_crypto_asset turn (~7s saved) and start with a usable resolvedId for
+// downstream tokenSnapshot building.
+type PreResolvedHint = { coingeckoId: string; symbol?: string; name?: string };
+
+function readHintFromEnv(): PreResolvedHint | null {
+  const id = (process.env.LOKA_WEB3_HINT_COINGECKO_ID || '').trim();
+  if (!id) return null;
+  const symbol = (process.env.LOKA_WEB3_HINT_SYMBOL || '').trim() || undefined;
+  const name = (process.env.LOKA_WEB3_HINT_NAME || '').trim() || undefined;
+  return { coingeckoId: id, symbol, name };
+}
+
+// ─── Stage event emitter ───────────────────────────────────────────────────
+// Each tool call becomes a "stage" in the frontend Process panel ("Resolving
+// token", "Fetching market data", etc). We emit structured JSON lines on
+// stderr; the parent web3Research.service parses them and forwards via socket
+// so the user sees real-time agent progress instead of a 30s blank wait.
+//
+// Format: one line per event, prefixed with `__WEB3_STAGE__ ` so the parent
+// can filter from regular log noise.
+const STAGE_TITLES: Record<string, { en: string; zh: string }> = {
+  search_crypto_asset:        { en: 'Resolving token',           zh: '解析代币身份' },
+  get_token_price_and_market: { en: 'Fetching market data',      zh: '获取市场行情' },
+  get_token_detail:           { en: 'Reading project profile',   zh: '拉取项目资料' },
+  get_price_history:          { en: 'Charting price history',    zh: '整理 K 线历史' },
+  get_market_rankings:        { en: 'Reading market rankings',   zh: '查看市场排名' },
+  get_trending_coins:         { en: 'Reading trending coins',    zh: '查看热度榜' },
+  get_global_market_overview: { en: 'Reading global market',     zh: '查看全市场概览' },
+  get_institutional_holdings: { en: 'Checking institutional holdings', zh: '查看机构持仓' },
+  get_exchange_rankings:      { en: 'Ranking exchanges',         zh: '梳理交易所排名' },
+  get_nft_collection:         { en: 'Reading NFT collection',    zh: '查看 NFT 数据' },
+  get_onchain_pools:          { en: 'Scanning on-chain pools',   zh: '扫描链上流动性' },
+  get_category_coins:         { en: 'Reading sector coins',      zh: '查看赛道代币' },
+};
+function titleForTool(name: string): { en: string; zh: string } {
+  return STAGE_TITLES[name] || { en: name.replace(/_/g, ' '), zh: name };
+}
+
+type StageEvent = {
+  _evt: 'web3_stage';
+  stage: string;          // tool name (stable id for client-side dedup)
+  title_en: string;
+  title_zh: string;
+  state: 'active' | 'completed' | 'failed' | 'skipped';
+  /** ms since stage start, only on completed/failed */
+  durationMs?: number;
+  /** Compact summary for the user (e.g. "$0.20 +154%"), best-effort */
+  summary?: string;
+  /** Optional error message when state=failed */
+  error?: string;
+};
+
+function emitStageEvent(ev: StageEvent): void {
+  // The `__WEB3_STAGE__` prefix lets the parent process distinguish event
+  // lines from the existing free-form `[web3-agent] ...` log lines.
+  process.stderr.write(`__WEB3_STAGE__ ${JSON.stringify(ev)}\n`);
+}
+
+/** Best-effort one-line summary for the user-facing stage card. */
+function summarizeToolResult(toolName: string, raw: string): string | undefined {
+  try {
+    const parsed = JSON.parse(raw);
+    if (toolName === 'search_crypto_asset') {
+      return parsed?.id ? `${parsed.symbol?.toUpperCase() || parsed.id} → ${parsed.id}` : undefined;
+    }
+    if (toolName === 'get_token_price_and_market' && Array.isArray(parsed) && parsed[0]) {
+      const p = parsed[0];
+      const price = typeof p.price_usd === 'number' ? `$${p.price_usd < 1 ? p.price_usd.toPrecision(3) : p.price_usd.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '';
+      const chg = typeof p.change_24h_pct === 'number' ? `${p.change_24h_pct >= 0 ? '+' : ''}${p.change_24h_pct.toFixed(2)}%` : '';
+      return [price, chg].filter(Boolean).join(' · ') || undefined;
+    }
+    if (toolName === 'get_token_detail') {
+      const cats = Array.isArray(parsed?.categories) && parsed.categories.length ? parsed.categories.slice(0, 2).join(', ') : '';
+      return cats || (parsed?.name ? `${parsed.name}` : undefined);
+    }
+    if (toolName === 'get_price_history') {
+      const days = parsed?.days;
+      const hi = parsed?.ohlc?.period_high_usd;
+      const lo = parsed?.ohlc?.period_low_usd;
+      if (days && Number.isFinite(hi) && Number.isFinite(lo)) {
+        return `${days}d: $${Number(lo).toPrecision(3)} – $${Number(hi).toPrecision(3)}`;
+      }
+      return days ? `${days}d` : undefined;
+    }
+    if (toolName === 'get_trending_coins' && Array.isArray(parsed?.coins)) {
+      return `${parsed.coins.length} trending`;
+    }
+    if (toolName === 'get_market_rankings' && Array.isArray(parsed?.coins)) {
+      return `top ${parsed.coins.length}`;
+    }
+    if (toolName === 'get_global_market_overview' && parsed?.total_market_cap_usd) {
+      const tc = parsed.total_market_cap_usd;
+      return `$${(tc / 1e12).toFixed(2)}T total mcap`;
+    }
+  } catch { /* ignore */ }
+  return undefined;
+}
+
+async function runAgentLoop(query: string, hint?: PreResolvedHint | null): Promise<Web3CliResult> {
+  // When the upstream caller has already resolved the token (trending-card
+  // path), we prepend an explicit instruction at the user-message level. This
+  // overrides the system prompt's "ALWAYS call search_crypto_asset first" rule
+  // because the user message gives concrete state. DeepSeek V3 with tool-calling
+  // honours this and goes straight to price/detail/history with the known id.
+  if (hint) {
+    console.error(
+      `[web3-agent] pre-resolved hint consumed: id=${hint.coingeckoId} sym=${hint.symbol || '∅'} name=${hint.name || '∅'} — instructing LLM to skip search_crypto_asset`,
+    );
+  }
+  const userContent = hint
+    ? `[Pre-resolved by frontend] ${hint.symbol ?? 'token'}${hint.name ? ' (' + hint.name + ')' : ''} → CoinGecko id = "${hint.coingeckoId}". Do NOT call search_crypto_asset; use this id directly with get_token_price_and_market / get_token_detail / get_price_history as needed.\n\nUser query: ${query}`
+    : query;
   const messages: LLMMessage[] = [
     { role: 'system', content: AGENT_SYSTEM },
-    { role: 'user', content: query },
+    { role: 'user', content: userContent },
   ];
   let inferredIntent: Web3Intent = 'token_deep_dive';
-  let resolvedId: string | undefined;
+  let resolvedId: string | undefined = hint?.coingeckoId;
   let spotPriceUsd: number | undefined;
   const resolvedAssets: Array<{ id?: string; symbol?: string; name?: string }> = [];
+  if (hint) resolvedAssets.push({ id: hint.coingeckoId, symbol: hint.symbol, name: hint.name });
   const toolsUsed: string[] = [];
   let finalReport = '';
 
@@ -1614,8 +1730,49 @@ async function runAgentLoop(query: string): Promise<Web3CliResult> {
     for (const tc of resp.tool_calls) {
       let args: Record<string, unknown> = {};
       try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+      // Detect the case where DeepSeek ignored our "skip search_crypto_asset"
+      // instruction and called it anyway. Useful for spotting prompt-following
+      // regressions when the model is upgraded.
+      if (hint && tc.function.name === 'search_crypto_asset') {
+        console.error(
+          `[web3-agent] WARN: LLM called search_crypto_asset despite pre-resolved hint (id=${hint.coingeckoId}). Optimization missed; check user-prompt wording.`,
+        );
+      }
       console.error(`[web3-agent] turn=${turn} tool="${tc.function.name}" args=${JSON.stringify(args)}`);
-      const result = await executeWeb3Tool(tc.function.name, args);
+      // Frontend Process panel stage event: 'active' before the tool runs.
+      const stageTitle = titleForTool(tc.function.name);
+      emitStageEvent({
+        _evt: 'web3_stage',
+        stage: tc.function.name,
+        title_en: stageTitle.en,
+        title_zh: stageTitle.zh,
+        state: 'active',
+      });
+      const stageStartMs = Date.now();
+      let toolFailed = false;
+      let result = '';
+      try {
+        result = await executeWeb3Tool(tc.function.name, args);
+        try {
+          const parsedCheck = JSON.parse(result);
+          if (parsedCheck && typeof parsedCheck === 'object' && parsedCheck.error) {
+            toolFailed = true;
+          }
+        } catch { /* non-JSON result is fine */ }
+      } catch (toolErr) {
+        toolFailed = true;
+        result = JSON.stringify({ error: (toolErr as Error).message });
+      }
+      const stageDurMs = Date.now() - stageStartMs;
+      emitStageEvent({
+        _evt: 'web3_stage',
+        stage: tc.function.name,
+        title_en: stageTitle.en,
+        title_zh: stageTitle.zh,
+        state: toolFailed ? 'failed' : 'completed',
+        durationMs: stageDurMs,
+        summary: toolFailed ? undefined : summarizeToolResult(tc.function.name, result),
+      });
       toolsUsed.push(tc.function.name);
 
       try {
@@ -1800,9 +1957,10 @@ async function runLegacyMcpQuery(query: string, intent: Web3Intent): Promise<Web
 }
 
 async function runWeb3Pipeline(query: string): Promise<Web3CliResult> {
+  const hint = readHintFromEnv();
   if (LLM_BASE_URL && LLM_API_KEY) {
-    console.error(`[web3-cli] mode=agent model=${LLM_WEB3_MODEL} query="${truncate(query, 140)}"`);
-    return runAgentLoop(query);
+    console.error(`[web3-cli] mode=agent model=${LLM_WEB3_MODEL} query="${truncate(query, 140)}"${hint ? ` hint_id=${hint.coingeckoId}` : ''}`);
+    return runAgentLoop(query, hint);
   }
   // Fallback when LLM is not configured
   console.error(`[web3-cli] mode=mcp_fallback query="${truncate(query, 140)}"`);

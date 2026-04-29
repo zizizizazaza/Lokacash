@@ -242,7 +242,10 @@ const RoundtableBanner: React.FC<{ onLiveDemo?: () => void }> = ({ onLiveDemo })
 // `/api/skill/...` calls below 404 against Vercel itself.
 const PULSE_API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/+$/, '');
 
-type PulseCoin = { sym: string; name: string; price: number; chg: number; spark: number[]; icon?: string };
+// `id` is the CoinGecko slug (e.g. "pudgy-penguins"). When a user clicks this
+// coin's trending card we pass it down to the backend orchestrator as an
+// assetHint so the web3 agent can skip its search_crypto_asset resolver turn.
+type PulseCoin = { id?: string; sym: string; name: string; price: number; chg: number; spark: number[]; icon?: string };
 const PULSE_FALLBACK_COINS: PulseCoin[] = [
   { sym: 'BTC', name: 'Bitcoin',  price: 97420, chg:  2.4, spark: [36,34,33,37,40,42,41,44,46,45,48,52,50,53,55,58,56,59,62,60], icon: 'https://assets.coingecko.com/coins/images/1/small/bitcoin.png' },
   { sym: 'ETH', name: 'Ethereum', price:  3418, chg: -1.1, spark: [60,62,59,57,58,55,54,56,53,51,52,50,48,49,47,46,48,45,44,46], icon: 'https://assets.coingecko.com/coins/images/279/small/ethereum.png' },
@@ -260,7 +263,7 @@ const PULSE_FALLBACK_TRENDING: { sym: string; chg: number; name: string }[] = [
 const PULSE_CACHE_KEY = 'loka_web3_pulse_cache_v4';
 const PULSE_CACHE_TTL = 5 * 60 * 1000; // 5 min — banners need to feel current
 
-type PulseCache = { at: number; coins: PulseCoin[]; trending: { sym: string; chg: number; name: string }[] };
+type PulseCache = { at: number; coins: PulseCoin[]; trending: { id?: string; sym: string; chg: number; name: string }[] };
 
 const readPulseCache = (): PulseCache | null => {
   try {
@@ -307,7 +310,30 @@ const fmtPrice = (n: number) => {
   return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
 };
 
-const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) => {
+// AssetHint travels from a Web3 trending-card click into the backend orchestrator
+// so routing can bypass the LLM "is this a stock?" guess. The home page already
+// knows the user is in the Web3 module, so we trust that signal.
+//
+// We also stash the snapshot data the trending card was already showing
+// (price/24h-change/icon/sparkline) so SuperAgentChat can render an instant
+// placeholder TokenCard while the backend's web3 agent is still running. The
+// placeholder is replaced when the real `agent:chat:token` event arrives.
+//
+// `coingeckoId` is the slug returned by /search/trending or /coins/markets.
+// When present, the backend can skip the web3 agent's search_crypto_asset
+// resolver turn (~7s saved).
+export type AssetHint = {
+  sym: string;
+  name: string;
+  kind: 'crypto';
+  coingeckoId?: string;
+  priceUsd?: number;
+  change24hPct?: number;
+  imageUrl?: string;
+  sparkline?: number[];
+};
+
+const Web3PulseBanner: React.FC<{ onAsk?: (q: string, opts?: { assetHint?: AssetHint }) => void }> = ({ onAsk }) => {
   // ── 1. Trending coin grid + movers marquee ───────────────────────
   // Grid: CoinGecko /search/trending — the actual top-searched coins
   //       right now (askSurf-style hotlist). Real ranking, not a
@@ -317,7 +343,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
   // Cached for 5 min. Background refresh (below) re-pulls every 5 min
   // while the user lingers.
   const [coins, setCoins] = useState<PulseCoin[]>(() => readPulseCache()?.coins ?? PULSE_FALLBACK_COINS);
-  const [trending, setTrending] = useState<{ sym: string; chg: number; name: string }[]>(() => readPulseCache()?.trending ?? PULSE_FALLBACK_TRENDING);
+  const [trending, setTrending] = useState<{ id?: string; sym: string; chg: number; name: string }[]>(() => readPulseCache()?.trending ?? PULSE_FALLBACK_TRENDING);
   const [updatedAt, setUpdatedAt] = useState<number>(() => readPulseCache()?.at ?? 0);
 
   // ── 2. Live "vibe" metrics (gas + Fear & Greed) ──────────────────
@@ -362,7 +388,7 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
         if (!r.ok) throw new Error(`pulse-trending HTTP ${r.status}`);
         const body = (await r.json()) as {
           ok?: boolean;
-          data?: { coins?: PulseCoin[]; trending?: { sym: string; chg: number; name: string }[]; asOf?: number };
+          data?: { coins?: PulseCoin[]; trending?: { id?: string; sym: string; chg: number; name: string }[]; asOf?: number };
         };
         if (cancelled) return;
         const nextCoins = Array.isArray(body?.data?.coins) ? body.data.coins : [];
@@ -503,7 +529,18 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
           return (
             <button
               key={`${c.sym}-${i}`}
-              onClick={() => onAsk?.(`What's driving ${c.name} (${c.sym}) today?`)}
+              onClick={() => onAsk?.(`What's driving ${c.name} (${c.sym}) today?`, {
+                assetHint: {
+                  sym: c.sym,
+                  name: c.name,
+                  kind: 'crypto',
+                  coingeckoId: c.id,
+                  priceUsd: c.price,
+                  change24hPct: c.chg,
+                  imageUrl: c.icon,
+                  sparkline: c.spark,
+                },
+              })}
               className={`group flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 px-3 sm:px-5 py-3 sm:py-3.5 text-left transition-colors hover:bg-gray-50 border-gray-100 ${col > 0 ? 'border-l' : ''} ${row > 0 ? 'border-t' : ''}`}
             >
               <div className="flex items-center gap-2 sm:gap-3 min-w-0 w-full sm:flex-1">
@@ -571,7 +608,19 @@ const Web3PulseBanner: React.FC<{ onAsk?: (q: string) => void }> = ({ onAsk }) =
                 tabIndex={isDup ? -1 : 0}
                 onClick={() => {
                   if (isDup) return;
-                  onAsk?.(`What's driving ${t.name} (${t.sym}) today?`);
+                  // Marquee items don't carry price/spark/icon (they're a slim
+                  // gainer/loser list). We still pass coingeckoId + chg so the
+                  // backend can skip search and the placeholder card has *some*
+                  // signal even before web3 returns.
+                  onAsk?.(`What's driving ${t.name} (${t.sym}) today?`, {
+                    assetHint: {
+                      sym: t.sym,
+                      name: t.name,
+                      kind: 'crypto',
+                      coingeckoId: t.id,
+                      change24hPct: t.chg,
+                    },
+                  });
                 }}
                 className="shrink-0 inline-flex items-center gap-1.5 text-[11.5px] rounded-md px-1.5 py-0.5 -mx-1 hover:bg-white hover:ring-1 hover:ring-black/5 transition cursor-pointer disabled:cursor-default"
                 disabled={isDup}
@@ -613,18 +662,24 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const { ready, authenticated } = usePrivy();
   const isLoggedIn = ready && authenticated;
-  const tryStartChat = (text: string) => {
+  const tryStartChat = (text: string, opts?: { assetHint?: AssetHint }) => {
     if (!text?.trim()) return;
     if (!isLoggedIn) {
       window.dispatchEvent(new Event('show-auth-modal'));
       return;
     }
+    setChatAssetHint(opts?.assetHint || null);
     setChatMessage(text.trim());
   };
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [mode, setMode] = useState<'auto' | 'fast' | 'roundtable'>('auto');
   const [chatMessage, setChatMessage] = useState<string | null>(null);
+  // When the user starts a chat by clicking a Web3 trending card, we already
+  // know the asset is crypto. Hand that fact down to SuperAgentChat → socket
+  // → backend orchestrator so the LLM router can't misclassify it as a stock
+  // (e.g. BLEND token vs Blend Labs Inc.).
+  const [chatAssetHint, setChatAssetHint] = useState<AssetHint | null>(null);
   // Live Demo: when set, we skip directly into SuperAgentChat with a canned
   // prompt, roundtable mode forced, and auto-confirm so the visitor watches
   // the whole Roundtable animation without clicking.
@@ -828,6 +883,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     if (newChatTs && newChatTs !== prevNewChatRef.current) {
       prevNewChatRef.current = newChatTs;
       setChatMessage(null);
+      setChatAssetHint(null);
       setInput('');
       setSelectedAgent(null);
       setSelectedScenario(null);
@@ -874,6 +930,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   // clicked, treat chatMessage as null so SuperAgentChat doesn't mount with
   // the stale value (the useEffect above will clear it for subsequent renders).
   const effectiveChatMessage = isNewChatReset ? null : chatMessage;
+  const effectiveAssetHint = isNewChatReset ? null : chatAssetHint;
 
   // ── Welcome modal: 2-step market introduction ──
   // Palette tuned for a calmer, finance-grade feel:
@@ -1133,7 +1190,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           initialChatMode={sessionParam ? undefined : mode}
           selectedAgentId={selectedAgent || undefined}
           autoStartRoundtable={liveDemoActive}
-          onBack={() => { setChatMessage(null); setSelectedAgent(null); setSelectedScenario(null); setLiveDemoActive(false); navigate('/'); }}
+          initialAssetHint={effectiveAssetHint || undefined}
+          onBack={() => { setChatMessage(null); setChatAssetHint(null); setSelectedAgent(null); setSelectedScenario(null); setLiveDemoActive(false); navigate('/'); }}
         />
       </>
     );
@@ -1612,7 +1670,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       {/* ── Web3 Pulse banner — on-chain snapshot, Web3 only ── */}
       {!selectedAgent && domain === 'web3' && (
         <div className="px-4 pb-10 pt-0 w-full relative" style={{ zIndex: 10 }}>
-          <Web3PulseBanner onAsk={(q) => tryStartChat(q)} />
+          <Web3PulseBanner onAsk={(q, opts) => tryStartChat(q, opts)} />
         </div>
       )}
 

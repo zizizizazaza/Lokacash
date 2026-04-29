@@ -21,6 +21,12 @@ export interface ChatReplayBuffer {
    *  back to a session whose stream is still mid-flight. */
   mode?: string;
   completedAt?: number;
+  /** Most recent TokenCard snapshot pushed via `agent:chat:token`. Stored here
+   *  so a client navigating away mid-stream and back can restore the card from
+   *  replay (the underlying socket event fires only once and is otherwise lost
+   *  on `socket.off`). Type kept as `any` to avoid an upward dependency on the
+   *  TokenSnapshot type that lives in the web3 CLI. */
+  tokenCard?: any;
 }
 
 const chatReplayBuffers = new Map<string, ChatReplayBuffer>();
@@ -43,6 +49,16 @@ export function getChatReplayBuffer(sessionId: string): ChatReplayBuffer | undef
 export function recordChatToolTraceStep(sessionId: string, step: any): void {
   const b = chatReplayBuffers.get(sessionId);
   if (b && b.status === 'running') b.toolTraceSteps.push(step);
+}
+
+/**
+ * Persist the latest TokenCard snapshot into the replay buffer so a client
+ * that navigates away mid-stream can restore the card via `agent:chat:replay`.
+ * Called from the same place that `emitToUser('agent:chat:token', ...)` fires.
+ */
+export function recordChatTokenCard(sessionId: string, tokenCard: any): void {
+  const b = chatReplayBuffers.get(sessionId);
+  if (b) b.tokenCard = tokenCard;
 }
 
 export function appendChatReplayContent(sessionId: string, chunk: string): void {

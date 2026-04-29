@@ -214,9 +214,47 @@ function setCachedResult(query: string, value: Web3ResearchResult): void {
 }
 
 /**
+ * Optional hint to short-circuit the web3 agent's search_crypto_asset turn.
+ * Comes from the frontend Web3 trending-card click flow: when the user clicks
+ * a known trending coin, the frontend already knows its CoinGecko id. The
+ * agent reads this hint via env vars and starts directly at price/detail/history.
+ */
+export type Web3PreResolvedHint = { coingeckoId: string; symbol?: string; name?: string };
+
+/**
+ * Real-time stage event emitted by the web3 CLI agent for each tool call.
+ * The Process panel renders these as sub-stages so the user can see what
+ * the agent is doing during the 20-30s window the ReAct loop runs.
+ */
+export type Web3StageEvent = {
+  /** Stable id (= tool name). Same id for active + completed pairs. */
+  stage: string;
+  /** Human-readable bilingual titles (frontend picks based on user lang). */
+  title_en: string;
+  title_zh: string;
+  state: 'active' | 'completed' | 'failed' | 'skipped';
+  /** Wall-clock duration in ms; only set on completed/failed. */
+  durationMs?: number;
+  /** Compact one-line summary, e.g. "$0.20 +154%". */
+  summary?: string;
+  /** Error message when state=failed. */
+  error?: string;
+};
+
+/**
  * Runs the CoinGecko web3 CLI (`tools/web3`) and returns report + structured payload.
  */
-export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3ResearchResult> {
+export async function runWeb3ResearchQuery(
+  userQuery: string,
+  opts?: {
+    hint?: Web3PreResolvedHint | null;
+    /** Real-time stage events from the agent's ReAct loop. Called once per
+     *  active/completed transition; ordering matches what the user should
+     *  see chronologically. Best-effort — exceptions in the callback are
+     *  swallowed so a misbehaving subscriber can't kill the agent run. */
+    onStage?: (event: Web3StageEvent) => void;
+  },
+): Promise<Web3ResearchResult> {
   const q = (userQuery || '').trim();
   if (!q) {
     return {
@@ -259,9 +297,31 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
       return `${t.slice(0, max)}…`;
     };
 
+    // Hand the optional pre-resolved hint to the CLI via env vars so the
+    // agent's user prompt can include "skip search_crypto_asset" guidance.
+    const hint = opts?.hint;
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONUTF8: '1',
+      ...(hint?.coingeckoId
+        ? {
+            LOKA_WEB3_HINT_COINGECKO_ID: hint.coingeckoId,
+            ...(hint.symbol ? { LOKA_WEB3_HINT_SYMBOL: hint.symbol } : {}),
+            ...(hint.name ? { LOKA_WEB3_HINT_NAME: hint.name } : {}),
+          }
+        : {}),
+    };
+
+    if (hint?.coingeckoId) {
+      console.log(
+        `[web3Research] spawning CLI with pre-resolved hint: id=${hint.coingeckoId} sym=${hint.symbol || '∅'} name=${hint.name || '∅'} (agent should skip search_crypto_asset turn)`,
+      );
+    }
+
     const child = spawn(execPath, args, {
       cwd: WEB3_ROOT,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      env: childEnv,
       windowsHide: true,
     });
 
@@ -280,8 +340,48 @@ export async function runWeb3ResearchQuery(userQuery: string): Promise<Web3Resea
     child.stdout.on('data', (d) => {
       stdout += d.toString();
     });
+
+    // Stderr carries two streams of content interleaved:
+    //   1. Free-form `[web3-agent] ...` log lines (kept in `stderr` for diagnostics)
+    //   2. Structured `__WEB3_STAGE__ {json}` event lines that we forward live
+    //      to the frontend Process panel via `opts.onStage`.
+    // We line-buffer both because Node's child stderr arrives in arbitrary
+    // chunks; partial lines must wait for the next chunk to complete.
+    let stderrBuf = '';
+    const STAGE_PREFIX = '__WEB3_STAGE__ ';
+    const onStage = opts?.onStage;
     child.stderr.on('data', (d) => {
-      stderr += d.toString();
+      const chunk = d.toString();
+      stderr += chunk;
+      stderrBuf += chunk;
+      let nl: number;
+      while ((nl = stderrBuf.indexOf('\n')) !== -1) {
+        const line = stderrBuf.slice(0, nl);
+        stderrBuf = stderrBuf.slice(nl + 1);
+        if (!onStage) continue;
+        if (!line.startsWith(STAGE_PREFIX)) continue;
+        try {
+          const ev = JSON.parse(line.slice(STAGE_PREFIX.length));
+          if (ev && ev._evt === 'web3_stage' && typeof ev.stage === 'string') {
+            try {
+              onStage({
+                stage: ev.stage,
+                title_en: String(ev.title_en || ev.stage),
+                title_zh: String(ev.title_zh || ev.stage),
+                state: (ev.state || 'active') as Web3StageEvent['state'],
+                durationMs: typeof ev.durationMs === 'number' ? ev.durationMs : undefined,
+                summary: typeof ev.summary === 'string' ? ev.summary : undefined,
+                error: typeof ev.error === 'string' ? ev.error : undefined,
+              });
+            } catch (cbErr) {
+              // Subscriber raised — log and keep the agent run alive.
+              console.warn(`[web3Research] onStage subscriber threw: ${(cbErr as Error).message}`);
+            }
+          }
+        } catch {
+          /* malformed JSON line, skip */
+        }
+      }
     });
 
     child.on('error', (err) => {
