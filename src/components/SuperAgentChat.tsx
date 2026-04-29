@@ -4530,14 +4530,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     steps?: unknown[];
                     modules?: Array<{ moduleType: string; status: string; data?: any }>;
                     mode?: string;
+                    /** Actual post-routing mode. Auto can resolve to 'roundtable'/'fast'/'simple';
+                     *  this drives the panel's roundtable-only UI on replay. */
+                    routedMode?: string;
                     report?: string;
                     status?: string;
                     tokenCard?: TokenSnapshotData;
+                    /** Roundtable agent-debate event stream — applied in order to
+                     *  rebuild rtRounds + rtConsensus on the Workbench. */
+                    rtEvents?: Array<{ type: string; payload: any }>;
                 }) => {
-                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, modulesLen: Array.isArray(res?.modules) ? res.modules.length : 0, mode: res?.mode, isRunning: res?.isRunning, status: res?.status });
+                    saLog('replay ack', { ok: res?.ok, stepsLen: Array.isArray(res?.steps) ? res.steps.length : 0, modulesLen: Array.isArray(res?.modules) ? res.modules.length : 0, mode: res?.mode, routedMode: res?.routedMode, isRunning: res?.isRunning, status: res?.status });
+                    // Determine the effective routed mode. `routedMode` (post-Auto-routing
+                    // actual tier) wins over `mode` (originally requested), so an Auto
+                    // → roundtable session correctly restores the roundtable UI.
+                    const effectiveRoutedMode = res?.routedMode || res?.mode;
                     // Restore roundtable chatMode so the right-side panel picks the correct variant
                     // when a client returns mid-stream to a roundtable session.
-                    if (res?.mode === 'roundtable' && chatMode !== 'roundtable') {
+                    if (effectiveRoutedMode === 'roundtable' && chatMode !== 'roundtable') {
                         setChatMode('roundtable');
                     }
 
@@ -4574,12 +4584,23 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 ...(prev[msgIdx] || {
                                     modules: [],
                                     isActive: !!res.isRunning,
-                                    route: res?.mode === 'roundtable' ? 'Roundtable' : 'Investment Analyst',
+                                    route: effectiveRoutedMode === 'roundtable' ? 'Roundtable' : 'Investment Analyst',
                                 }),
                                 ...(hasModules ? { modules: rebuiltModules } : {}),
                                 ...(trace !== undefined ? { toolTrace: trace } : {}),
                                 ...(planning !== undefined ? { planningMessage: planning } : {}),
-                                ...(res?.mode === 'roundtable' ? { routedMode: 'roundtable' } : {}),
+                                // routedMode drives the 5-stage pipeline + Workbench UI.
+                                // Use `effectiveRoutedMode` so Auto-resolved-to-roundtable
+                                // sessions restore the proper UI.
+                                ...(effectiveRoutedMode ? { routedMode: effectiveRoutedMode } : {}),
+                                // Workbench gate (5647): renders when rtPreparationStatus
+                                // is 'done' OR rtRounds/rtDataSearch is non-empty. Live
+                                // mode sets this in handleSummonConfirm immediately, so
+                                // we mirror that on replay too — otherwise mid-stream
+                                // session switches (when no agent_responded has fired
+                                // yet) hide the Workbench until consensus_done lands,
+                                // even though the live experience showed it the whole time.
+                                ...(effectiveRoutedMode === 'roundtable' ? { rtPreparationStatus: 'done' as const } : {}),
                                 isActive: !!res.isRunning,
                             },
                         }));
@@ -4588,6 +4609,129 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                         // persisted metadata.tokenCard to draw from.
                         if (res.tokenCard && (res.tokenCard as any).id) {
                             setTokenCards(prev => ({ ...prev, [msgIdx]: res.tokenCard as TokenSnapshotData }));
+                        }
+
+                        // ── Replay roundtable agent-debate events ──
+                        // Rebuild Workbench state (selectedAgentIds, rtRounds,
+                        // rtConsensus, rtPreparationStatus) by folding the buffered
+                        // event stream in order. This mirrors the live socket
+                        // handlers (onAnalystsSelected / onRoundStarted / etc.) so
+                        // a session-switch mid-roundtable shows the EXACT same
+                        // panel state it would if the user had stayed connected.
+                        if (Array.isArray(res.rtEvents) && res.rtEvents.length > 0) {
+                            let selectedAgentIds: string[] | undefined;
+                            let rtRounds: RtRoundData[] = [];
+                            let rtConsensus: RtConsensusResult | undefined;
+                            let rtReportStatus: 'pending' | 'active' | 'done' | undefined;
+
+                            for (const ev of res.rtEvents) {
+                                if (ev.type === 'analysts_selected') {
+                                    const analysts = ev.payload?.analysts;
+                                    if (Array.isArray(analysts)) {
+                                        selectedAgentIds = analysts.map((a: any) => a.id);
+                                    }
+                                } else if (ev.type === 'round_started') {
+                                    const r = Number(ev.payload?.round);
+                                    if (Number.isFinite(r)) {
+                                        const idx = rtRounds.findIndex(x => x.round === r);
+                                        if (idx === -1) {
+                                            rtRounds.push({ round: r, status: 'active', agents: [] });
+                                        } else {
+                                            rtRounds[idx] = { ...rtRounds[idx], status: 'active' };
+                                        }
+                                    }
+                                } else if (ev.type === 'round_completed') {
+                                    const r = Number(ev.payload?.round);
+                                    const idx = rtRounds.findIndex(x => x.round === r);
+                                    if (idx !== -1) {
+                                        rtRounds[idx] = {
+                                            ...rtRounds[idx],
+                                            status: 'done',
+                                            agents: rtRounds[idx].agents.map(a => ({ ...a, status: 'done' })),
+                                        };
+                                    }
+                                } else if (ev.type === 'agent_responded') {
+                                    const { analystId, round, confidence, answer } = ev.payload || {};
+                                    if (typeof analystId === 'string' && Number.isFinite(round)) {
+                                        const verdict = parsePersonaVerdict(answer || '');
+                                        const reasoning = parsePersonaReasoning(answer || '');
+                                        const confPct = Math.round((confidence || 0) * 100);
+                                        const newAgent: RtAgentInference = {
+                                            agentId: analystId,
+                                            agentName: getAnalystDisplayName(analystId),
+                                            status: 'done',
+                                            verdict,
+                                            confidence: confPct,
+                                            reasoning,
+                                        };
+                                        const idx = rtRounds.findIndex(x => x.round === round);
+                                        if (idx === -1) {
+                                            rtRounds.push({ round, status: 'active', agents: [newAgent] });
+                                        } else {
+                                            const agents = [...rtRounds[idx].agents];
+                                            const pos = agents.findIndex(a => a.agentId === analystId);
+                                            if (pos === -1) agents.push(newAgent);
+                                            else agents[pos] = { ...agents[pos], ...newAgent };
+                                            rtRounds[idx] = { ...rtRounds[idx], agents };
+                                        }
+                                    }
+                                } else if (ev.type === 'consensus_done') {
+                                    const result = ev.payload?.result || {};
+                                    const resp: Array<{ agentId: string; answer: string; confidence: number }> =
+                                        result?.consensus?.agentResponses || [];
+                                    const reached = result?.consensus?.consensusReached !== false;
+                                    const conclusions = resp.map((r) => ({
+                                        agentName: getAnalystDisplayName(r.agentId),
+                                        verdict: parsePersonaVerdict(r.answer || ''),
+                                        confidence: Math.round((r.confidence || 0) * 100),
+                                    }));
+                                    let finalConfidencePct = Math.round(((result?.consensus?.confidence as number) || 0) * 100);
+                                    if (finalConfidencePct <= 0 && conclusions.length > 0) {
+                                        const sum = conclusions.reduce((s, c) => s + (c.confidence || 0), 0);
+                                        finalConfidencePct = Math.round(sum / conclusions.length);
+                                    }
+                                    if (finalConfidencePct <= 0) finalConfidencePct = 50;
+                                    const tally: Record<string, number> = { Bullish: 0, Bearish: 0, Neutral: 0 };
+                                    for (const c of conclusions) tally[c.verdict] = (tally[c.verdict] || 0) + 1;
+                                    const finalVerdict =
+                                        (Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] as string) || 'Neutral';
+                                    const majorityCount = tally[finalVerdict] || 0;
+                                    const conflictRate =
+                                        conclusions.length > 0
+                                            ? Math.round(((conclusions.length - majorityCount) / conclusions.length) * 100)
+                                            : 0;
+                                    rtConsensus = {
+                                        status: 'done',
+                                        hasConsensus: reached,
+                                        conflictRate,
+                                        agentConclusions: conclusions,
+                                        finalVerdict,
+                                        finalConfidence: finalConfidencePct,
+                                    };
+                                    rtReportStatus = 'active';
+                                }
+                            }
+
+                            // Apply once.
+                            setThinkingProcesses(prev => {
+                                const existing = prev[msgIdx];
+                                if (!existing) return prev;
+                                return {
+                                    ...prev,
+                                    [msgIdx]: {
+                                        ...existing,
+                                        // Workbench renders when ANY of these is set,
+                                        // so always seed rtPreparationStatus so the
+                                        // panel becomes visible the moment replay
+                                        // returns (even before round events arrive).
+                                        rtPreparationStatus: 'done',
+                                        ...(selectedAgentIds ? { selectedAgentIds } : {}),
+                                        ...(rtRounds.length > 0 ? { rtRounds } : {}),
+                                        ...(rtConsensus ? { rtConsensus } : {}),
+                                        ...(rtReportStatus ? { rtReportStatus } : {}),
+                                    },
+                                };
+                            });
                         }
                         if (res.report) {
                             // Stash the payload so a slow history fetch can still

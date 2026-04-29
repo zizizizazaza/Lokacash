@@ -27,6 +27,18 @@ export interface ChatReplayBuffer {
    *  on `socket.off`). Type kept as `any` to avoid an upward dependency on the
    *  TokenSnapshot type that lives in the web3 CLI. */
   tokenCard?: any;
+  /** Actual mode chosen post-Auto-routing (e.g. user picked 'auto' but plan
+   *  resolved to 'roundtable'). Captured from `agent:chat:routed` so a client
+   *  reconnecting mid-stream can restore the 5-stage pipeline / Workbench UI
+   *  even when `mode` (the originally requested mode) is still 'auto'. */
+  routedMode?: string;
+  /** Roundtable agent-debate event stream (analysts_selected,
+   *  round_started/completed, agent_responded, consensus_done). The frontend
+   *  Workbench (Agent Room + Graph + Debate) is built from these one-shot
+   *  events; without buffering, navigating away mid-stream loses every event
+   *  fired before the new SuperAgentChat instance subscribed. Re-played in
+   *  order on the client to rebuild rtRounds + rtConsensus. */
+  rtEvents?: Array<{ type: string; payload: any }>;
 }
 
 const chatReplayBuffers = new Map<string, ChatReplayBuffer>();
@@ -59,6 +71,29 @@ export function recordChatToolTraceStep(sessionId: string, step: any): void {
 export function recordChatTokenCard(sessionId: string, tokenCard: any): void {
   const b = chatReplayBuffers.get(sessionId);
   if (b) b.tokenCard = tokenCard;
+}
+
+/**
+ * Persist the post-routing actual mode so replay can restore the
+ * roundtable-only UI (5-stage pipeline, Workbench) even when the buffer's
+ * top-level `mode` field is still the originally-requested 'auto'.
+ */
+export function recordChatRoutedMode(sessionId: string, routedMode: string): void {
+  const b = chatReplayBuffers.get(sessionId);
+  if (b) b.routedMode = routedMode;
+}
+
+/**
+ * Persist a roundtable agent-debate event so a reconnecting client can rebuild
+ * the Workbench (Agent Room + Graph + Debate) panel exactly as it would have
+ * appeared if the client had stayed connected. Events are appended in the
+ * order they fire and replayed verbatim on the client.
+ */
+export function recordChatRtEvent(sessionId: string, type: string, payload: any): void {
+  const b = chatReplayBuffers.get(sessionId);
+  if (!b || b.status !== 'running') return;
+  if (!b.rtEvents) b.rtEvents = [];
+  b.rtEvents.push({ type, payload });
 }
 
 export function appendChatReplayContent(sessionId: string, chunk: string): void {

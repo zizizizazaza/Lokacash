@@ -35,6 +35,8 @@ import {
   getChatReplayBuffer,
   recordChatToolTraceStep,
   recordChatTokenCard,
+  recordChatRoutedMode,
+  recordChatRtEvent,
 } from '../services/moduleEmitter.js';
 import {
   mergeSignalSources,
@@ -1207,12 +1209,18 @@ Text: "${query}"`;
             steps: chatBuffer.toolTraceSteps,
             modules: chatBuffer.modules,
             mode: chatBuffer.mode,
+            // Actual post-routing mode (e.g. Auto resolved to 'roundtable').
+            // Drives the 5-stage pipeline + Workbench UI on replay.
+            routedMode: chatBuffer.routedMode,
             report: chatBuffer.content || undefined,
             status: chatBuffer.status,
             // Round-trip the most recent TokenCard snapshot so a client that
             // navigated away mid-stream restores the card immediately, instead
             // of waiting for the next history fetch.
             tokenCard: chatBuffer.tokenCard,
+            // Roundtable agent-debate event stream — replayed in order on the
+            // client to rebuild rtRounds + rtConsensus + Workbench UI.
+            rtEvents: chatBuffer.rtEvents || [],
           } as any);
           return;
         }
@@ -1952,6 +1960,11 @@ Text: "${query}"`;
         actualTier === 'roundtable' ? 'roundtable' :
         actualTier === 'simple' ? 'auto' :
         'fast';
+      // Mirror into the replay buffer so a client navigating away mid-stream
+      // can still restore the Roundtable/Fast UI (5-stage pipeline, Workbench)
+      // when it returns. Without this, replay only sees the originally
+      // requested mode (e.g. 'auto'), which can't drive routedMode-gated UI.
+      recordChatRoutedMode(sessionId, legacyMode);
       socket.emit('agent:chat:routed', {
         sessionId,
         mode: legacyMode,
@@ -3792,6 +3805,10 @@ ${synFullContent || contextString}${langFooter}`;
                   : null;
               })
               .filter((x): x is PublicAnalystPersona => x !== null);
+            // Mirror to replay buffer so a reconnecting client can rebuild the
+            // Workbench (Agent Room + Graph + Debate) without waiting for a new
+            // emission of this one-shot event.
+            recordChatRtEvent(sessionId, 'analysts_selected', { analysts: rosterPayload });
             socket.emit('agent:chat:analysts_selected', {
               sessionId,
               analysts: rosterPayload,
@@ -3819,6 +3836,10 @@ ${synFullContent || contextString}${langFooter}`;
                   if (isAborted()) return;
                   // Round transitions
                   if (evt.type === 'round_started') {
+                    recordChatRtEvent(sessionId, 'round_started', {
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
                     socket.emit('agent:chat:round_started', {
                       sessionId,
                       round: evt.round_number,
@@ -3827,6 +3848,10 @@ ${synFullContent || contextString}${langFooter}`;
                     return;
                   }
                   if (evt.type === 'round_completed') {
+                    recordChatRtEvent(sessionId, 'round_completed', {
+                      round: evt.round_number,
+                      maxRounds: evt.round_number,
+                    });
                     socket.emit('agent:chat:round_completed', {
                       sessionId,
                       round: evt.round_number,
@@ -3848,6 +3873,13 @@ ${synFullContent || contextString}${langFooter}`;
                       confidence: evt.confidence ?? 0,
                     });
                     perAgentRounds.set(evt.agent_id, list);
+                    recordChatRtEvent(sessionId, 'agent_responded', {
+                      analystId: evt.agent_id,
+                      round: evt.round_number,
+                      confidence: evt.confidence ?? 0,
+                      summary: answer.slice(0, 400),
+                      answer,
+                    });
                     socket.emit('agent:chat:agent_responded', {
                       sessionId,
                       analystId: evt.agent_id,
@@ -4176,6 +4208,7 @@ ${synFullContent || contextString}${langFooter}`;
               conclusion: { verdict: verdictLabel, confidence: conf },
             };
             emitter.emitModule('consensus', 'completed', consensusFlowData);
+            recordChatRtEvent(sessionId, 'consensus_done', { result: consensusResult });
             socket.emit('agent:chat:consensus_done', {
               sessionId,
               result: consensusResult
@@ -4313,9 +4346,11 @@ ${synFullContent || contextString}${langFooter}`;
               conclusion: { verdict: 'Consensus failed', confidence: 0 },
             };
             emitter.emitModule('consensus', 'completed', consensusFlowData);
+            const failedConsensusResult = { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } };
+            recordChatRtEvent(sessionId, 'consensus_done', { result: failedConsensusResult });
             socket.emit('agent:chat:consensus_done', {
               sessionId,
-              result: { consensus: { finalAnswer: finalDbContent, confidence: 0, executionTime: 0, agentResponses: [] } }
+              result: failedConsensusResult
             });
           } finally {
             console.log(
