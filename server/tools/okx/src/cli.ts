@@ -12,6 +12,7 @@ import { getInstrumentsCache, isListed, resolveSpotInstId, resolveSwapInstId } f
 import {
   fetchCandles,
   fetchFundingRate,
+  fetchLiquidationsAggregate,
   fetchMarketSnapshot,
   fetchOpenInterest,
   fetchOrderBook,
@@ -208,6 +209,19 @@ async function dispatch(req: OkxRequest): Promise<OkxCliResult> {
           report: `OKX news bundle ${bundle.baseCcy}: news=${bundle.latestNews.length} sentiment=${bundle.sentiment ? 'ok' : 'n/a'}`,
           payload: bundle,
           logs: [...logs, ...bundle.logs],
+        };
+      }
+      case 'liquidations': {
+        if (!req.baseCcy) throw new Error('missing baseCcy');
+        const data = await fetchLiquidationsAggregate(req.baseCcy, req.limit ?? 50);
+        const longUsd = fmtUsd(data.longNotionalUsd);
+        const shortUsd = fmtUsd(data.shortNotionalUsd);
+        return {
+          ok: true,
+          intent,
+          report: `OKX liquidations ${data.baseCcy} 24h: long ${longUsd} (${data.longCount}) / short ${shortUsd} (${data.shortCount})`,
+          payload: data,
+          logs: [...logs, ...data.logs],
         };
       }
       default:

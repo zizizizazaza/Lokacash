@@ -139,6 +139,18 @@ export function createModuleEmitter(userId: string, sessionId: string) {
       emitToUser(userId, 'agent:chat:stream_done', { sessionId, content, ...extra });
     },
 
+    /**
+     * Notify the client that the stream was user-cancelled (Stop button) so it
+     * can clear loading indicators on every surface listening to this socket
+     * (chat thread, sidebar Recents row, etc). Emitted from every isAborted()
+     * early-return branch in agent:chat. Distinct event from stream_done so
+     * the chat thread doesn't accidentally treat partial output as the final
+     * answer (the client uses the local `__cancelled__` placeholder instead).
+     */
+    emitStreamCancelled(reason?: string) {
+      emitToUser(userId, 'agent:chat:cancelled', { sessionId, reason: reason || 'user_stop' });
+    },
+
     emitStarted(mode: string, route: string, hidden?: boolean) {
       emitToUser(userId, 'agent:chat:started', { sessionId, mode, route, hidden });
     },

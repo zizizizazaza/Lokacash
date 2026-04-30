@@ -15,6 +15,14 @@ export interface StepEvent {
   content?: string;
   totalSteps?: number;
   error?: string;
+  /** Tool input args (e.g. {stock_code: 'BABA'}) — set on tool_start. Drives
+   *  per-tool pill subtitles in the chat thread. */
+  args?: Record<string, unknown>;
+  /** Parsed tool result JSON — set on tool_done. Drives per-tool result
+   *  cards (price card, MA card, news card, etc). Mirrors web3's rawData. */
+  result?: unknown;
+  /** Fallback when result wasn't JSON-parseable. */
+  rawText?: string;
   ts: number;
 }
 

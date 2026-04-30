@@ -5,6 +5,10 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const PUBLIC_MCP = 'https://mcp.api.coingecko.com/mcp';
 const PRO_MCP = 'https://mcp.pro-api.coingecko.com/mcp';
@@ -875,13 +879,33 @@ async function fetchCoinsMarkets(params: Record<string, string | number | undefi
   return Array.isArray(raw) ? raw : [];
 }
 
+// In-process cache for /coins/{id} (full detail). Within a single agent run
+// the LLM's `get_token_detail` tool call and the trailing `buildTokenSnapshot`
+// step BOTH invoke fetchCoinDetail for the same id — the second call is pure
+// waste (~1-2s of CoinGecko round-trip). A short TTL is enough to dedup these
+// without serving stale data across genuinely separate queries.
+const COIN_DETAIL_CACHE_TTL_MS = 30_000;
+const coinDetailCache = new Map<string, { data: CoinDetail | null; at: number }>();
+
 async function fetchCoinDetail(geckoId: string): Promise<CoinDetail | null> {
+  const cached = coinDetailCache.get(geckoId);
+  if (cached && Date.now() - cached.at < COIN_DETAIL_CACHE_TTL_MS) {
+    return cached.data;
+  }
   try {
-    return (await fetchRestJson(
+    const data = (await fetchRestJson(
       `/coins/${encodeURIComponent(
         geckoId,
       )}?localization=false&tickers=true&market_data=true&community_data=true&developer_data=true&sparkline=false`,
     )) as CoinDetail;
+    coinDetailCache.set(geckoId, { data, at: Date.now() });
+    // Best-effort eviction: cap the map at ~50 entries so a long-running
+    // process doesn't accumulate unbounded entries.
+    if (coinDetailCache.size > 50) {
+      const oldestKey = coinDetailCache.keys().next().value;
+      if (oldestKey) coinDetailCache.delete(oldestKey);
+    }
+    return data;
   } catch {
     return null;
   }
@@ -1087,6 +1111,144 @@ async function fetchOhlcData(geckoId: string, days: number): Promise<OhlcRow[]> 
     const raw = await fetchRestJson(`/coins/${encodeURIComponent(geckoId)}/ohlc?vs_currency=usd&days=${days}`);
     return Array.isArray(raw) ? (raw as OhlcRow[]) : [];
   } catch { return []; }
+}
+
+// ─── Technical indicators (computed locally from OHLC closes) ─────────────
+// Standard textbook formulas — the LLM doesn't reason well about raw 30-row
+// candle arrays, so we pre-aggregate into RSI / MACD / MA / Bollinger Bands.
+// Hands the agent a digestible "is this overbought/oversold/breakout" view
+// without burning context tokens on raw OHLC.
+function computeSMA(values: number[], period: number): number | null {
+  if (values.length < period) return null;
+  const slice = values.slice(values.length - period);
+  return slice.reduce((s, v) => s + v, 0) / period;
+}
+
+function computeEMA(values: number[], period: number): number | null {
+  if (values.length < period) return null;
+  const k = 2 / (period + 1);
+  // Seed with SMA of the first `period` values, then walk forward.
+  let ema = values.slice(0, period).reduce((s, v) => s + v, 0) / period;
+  for (let i = period; i < values.length; i++) {
+    ema = values[i] * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+function computeRSI(values: number[], period = 14): number | null {
+  if (values.length <= period) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = values[i] - values[i - 1];
+    if (diff >= 0) gains += diff; else losses -= diff;
+  }
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+  for (let i = period + 1; i < values.length; i++) {
+    const diff = values[i] - values[i - 1];
+    const g = diff > 0 ? diff : 0;
+    const l = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + g) / period;
+    avgLoss = (avgLoss * (period - 1) + l) / period;
+  }
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+function computeMACD(values: number[], fast = 12, slow = 26, signal = 9): { macd: number; signal: number; histogram: number } | null {
+  const emaFast = computeEMA(values, fast);
+  const emaSlow = computeEMA(values, slow);
+  if (emaFast == null || emaSlow == null) return null;
+  const macd = emaFast - emaSlow;
+  // Build the full MACD series so we can compute its signal EMA. Approximation:
+  // walk the values and recompute EMAs each step (acceptable for ≤200 points).
+  const macdSeries: number[] = [];
+  for (let i = slow; i <= values.length; i++) {
+    const sub = values.slice(0, i);
+    const ef = computeEMA(sub, fast);
+    const es = computeEMA(sub, slow);
+    if (ef != null && es != null) macdSeries.push(ef - es);
+  }
+  if (macdSeries.length < signal) return { macd, signal: macd, histogram: 0 };
+  const sig = computeEMA(macdSeries, signal);
+  if (sig == null) return { macd, signal: macd, histogram: 0 };
+  return { macd, signal: sig, histogram: macd - sig };
+}
+
+function computeBollingerBands(values: number[], period = 20, stdDevMult = 2): { upper: number; middle: number; lower: number } | null {
+  const middle = computeSMA(values, period);
+  if (middle == null) return null;
+  const slice = values.slice(values.length - period);
+  const variance = slice.reduce((s, v) => s + Math.pow(v - middle, 2), 0) / period;
+  const sd = Math.sqrt(variance);
+  return { upper: middle + stdDevMult * sd, middle, lower: middle - stdDevMult * sd };
+}
+
+interface TechnicalIndicatorPayload {
+  id: string;
+  days: number;
+  closes_used: number;
+  last_close: number | null;
+  sma_20: number | null;
+  sma_50: number | null;
+  ema_12: number | null;
+  ema_26: number | null;
+  rsi_14: number | null;
+  macd: { macd: number; signal: number; histogram: number } | null;
+  bollinger: { upper: number; middle: number; lower: number } | null;
+  /** Heuristic verdict ("overbought" / "oversold" / "neutral") so the LLM has
+   *  a one-shot summary without re-reasoning over the numbers. */
+  verdict: { rsi: 'overbought' | 'oversold' | 'neutral'; macd: 'bullish' | 'bearish' | 'neutral'; bb: 'upper' | 'lower' | 'middle' };
+  error?: string;
+}
+
+async function computeTechnicalIndicators(id: string, days: number): Promise<TechnicalIndicatorPayload> {
+  const safeDays = Math.min(90, Math.max(7, days));
+  const chart = await fetchCoinChart(id, safeDays);
+  const closes: number[] = Array.isArray(chart?.prices)
+    ? (chart.prices.map((p: number[]) => p[1]).filter((v: number) => Number.isFinite(v)) as number[])
+    : [];
+  const empty: TechnicalIndicatorPayload = {
+    id,
+    days: safeDays,
+    closes_used: closes.length,
+    last_close: null,
+    sma_20: null, sma_50: null, ema_12: null, ema_26: null, rsi_14: null,
+    macd: null, bollinger: null,
+    verdict: { rsi: 'neutral', macd: 'neutral', bb: 'middle' },
+  };
+  if (closes.length < 5) return { ...empty, error: 'insufficient_data' };
+  const last = closes[closes.length - 1];
+  const sma20 = computeSMA(closes, 20);
+  const sma50 = computeSMA(closes, 50);
+  const ema12 = computeEMA(closes, 12);
+  const ema26 = computeEMA(closes, 26);
+  const rsi = computeRSI(closes, 14);
+  const macd = computeMACD(closes);
+  const bb = computeBollingerBands(closes);
+  // Verdict heuristics — standard textbook thresholds.
+  const rsiVerdict: 'overbought' | 'oversold' | 'neutral' =
+    rsi == null ? 'neutral' : rsi >= 70 ? 'overbought' : rsi <= 30 ? 'oversold' : 'neutral';
+  const macdVerdict: 'bullish' | 'bearish' | 'neutral' =
+    macd == null ? 'neutral' : macd.histogram > 0 ? 'bullish' : macd.histogram < 0 ? 'bearish' : 'neutral';
+  const bbVerdict: 'upper' | 'lower' | 'middle' =
+    bb == null ? 'middle' : last >= bb.upper ? 'upper' : last <= bb.lower ? 'lower' : 'middle';
+  return {
+    id,
+    days: safeDays,
+    closes_used: closes.length,
+    last_close: last,
+    sma_20: sma20,
+    sma_50: sma50,
+    ema_12: ema12,
+    ema_26: ema26,
+    rsi_14: rsi,
+    macd,
+    bollinger: bb,
+    verdict: { rsi: rsiVerdict, macd: macdVerdict, bb: bbVerdict },
+  };
 }
 
 async function searchNftId(query: string): Promise<string | null> {
@@ -1440,6 +1602,95 @@ function formatToolResult(result: { content?: { type: string; text?: string }[];
   return body || JSON.stringify(result, null, 2);
 }
 
+// ─── OKX child-process bridge ─────────────────────────────────────────────────
+// The OKX subtool lives at server/tools/okx and exposes market_snapshot +
+// news_bundle (among other intents) via a stdin/stdout JSON contract. We spawn
+// it on demand whenever the LLM requests get_okx_derivatives or
+// get_okx_news_sentiment so the agent has access to derivatives / news /
+// sentiment data without bloating the web3 CLI with another transport layer.
+const __web3_filename = fileURLToPath(import.meta.url);
+const __web3_dirname = path.dirname(__web3_filename);
+const OKX_ROOT = path.join(__web3_dirname, '..', '..', 'okx');
+const OKX_CLI_JS = path.join(OKX_ROOT, 'dist', 'cli.js');
+const OKX_CLI_TS = path.join(OKX_ROOT, 'src', 'cli.ts');
+const OKX_TOOL_TIMEOUT_MS = Math.max(2_000, Number(process.env.WEB3_OKX_TOOL_TIMEOUT_MS || '8000'));
+
+interface OkxCliResponse {
+  ok: boolean;
+  intent?: string;
+  report?: string;
+  payload?: any;
+  error?: string;
+  logs?: string[];
+}
+
+function runOkxCli(payload: object, timeoutMs = OKX_TOOL_TIMEOUT_MS): Promise<OkxCliResponse> {
+  return new Promise((resolve) => {
+    const useCompiled = fs.existsSync(OKX_CLI_JS);
+    let cmd: string;
+    let args: string[];
+    let cwd: string;
+    if (useCompiled) {
+      cmd = process.execPath;
+      args = [OKX_CLI_JS];
+      cwd = OKX_ROOT;
+    } else {
+      cmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      args = ['tsx', OKX_CLI_TS];
+      cwd = OKX_ROOT;
+    }
+    const child = spawn(cmd, args, {
+      cwd,
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: process.platform === 'win32' && !useCompiled,
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch { /* noop */ }
+      resolve({ ok: false, error: `okx_timeout_${timeoutMs}ms` });
+    }, timeoutMs);
+    child.stdout.on('data', (buf) => { stdout += buf.toString('utf8'); });
+    child.stderr.on('data', (buf) => { stderr += buf.toString('utf8'); });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: `okx_spawn_err: ${err.message}` });
+    });
+    child.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const lines = stdout.trim().split('\n').filter(Boolean);
+      const last = lines[lines.length - 1];
+      if (!last) {
+        resolve({ ok: false, error: `okx_no_output stderr="${stderr.slice(0, 200)}"` });
+        return;
+      }
+      try {
+        resolve(JSON.parse(last) as OkxCliResponse);
+      } catch (err) {
+        resolve({ ok: false, error: `okx_bad_json: ${(err as Error).message}` });
+      }
+    });
+    try {
+      child.stdin.write(JSON.stringify(payload));
+      child.stdin.end();
+    } catch (err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch { /* noop */ }
+      resolve({ ok: false, error: `okx_stdin_err: ${(err as Error).message}` });
+    }
+  });
+}
+
 // ─── LLM Agent ────────────────────────────────────────────────────────────────
 
 const WEB3_TOOLS = [
@@ -1455,6 +1706,22 @@ const WEB3_TOOLS = [
   { type: 'function', function: { name: 'get_nft_collection', description: 'Get NFT collection floor price, market cap, 24h volume, holder count, and sales data.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'NFT collection name or search query' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'get_onchain_pools', description: 'Get DEX/on-chain liquidity pool data for a token via GeckoTerminal. Shows pool TVL, 24h volume, price.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Token name, symbol, or contract address' }, network: { type: 'string', description: 'Chain: eth, base, solana, bsc, arbitrum (optional, auto-detected)' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'get_category_coins', description: 'Get top coins in a crypto sector/category such as DeFi, AI, Gaming, RWA, Meme, Layer-1.', parameters: { type: 'object', properties: { category: { type: 'string', description: 'Category name, e.g. "defi", "ai", "meme", "gaming", "rwa", "layer-1"' }, top_n: { type: 'number', description: 'Number of results (default 10)' } }, required: ['category'] } } },
+  // ─── OKX-backed tools (derivatives + news/sentiment) ──────────────────
+  // These are distinct from the CoinGecko tools above:
+  //   • get_okx_derivatives — funding rate, open interest, orderbook depth,
+  //     30D OHLC. Use when the user asks about leverage, funding, perp data,
+  //     short squeeze risk, or wants K-line context beyond CoinGecko's
+  //     basic price snapshot.
+  //   • get_okx_news_sentiment — OKX orbit news + sentiment ratios
+  //     (bullish/bearish/neutral, mention counts). Use when the user asks
+  //     "why did X drop", "what's the news on Y", or wants social/news-side
+  //     market mood that CoinGecko alone doesn't surface.
+  // Both expect a base currency symbol (BTC, ETH, MON, ...) — NOT the
+  // CoinGecko slug. The OKX side does its own listing lookup.
+  { type: 'function', function: { name: 'get_okx_derivatives', description: 'Get OKX derivatives + spot snapshot for a coin: funding rate, open interest (USD), orderbook depth (±10 levels USD), 24h spot price/volume, 30 daily candles. Use for leverage/funding/perp questions or when you want OHLC context.', parameters: { type: 'object', properties: { baseCcy: { type: 'string', description: 'Base currency symbol, e.g. "BTC", "ETH", "MON" (NOT the CoinGecko slug)' } }, required: ['baseCcy'] } } },
+  { type: 'function', function: { name: 'get_okx_news_sentiment', description: 'Get OKX orbit news headlines + sentiment ratios (bullish/bearish/neutral, mention counts) for a coin. Use for "why did X move" / news-context / market-mood questions.', parameters: { type: 'object', properties: { baseCcy: { type: 'string', description: 'Base currency symbol, e.g. "BTC", "ETH", "MON"' }, limit: { type: 'number', description: 'News headlines to return (default 8, max 20)' } }, required: ['baseCcy'] } } },
+  { type: 'function', function: { name: 'get_token_technical_indicators', description: 'Compute RSI(14), MACD(12,26,9), MA(20/50), EMA(12/26), and Bollinger Bands (20, 2σ) from CoinGecko OHLC closes. Returns numeric values + heuristic verdict (overbought/oversold, bullish/bearish, BB position). Use when the user asks about momentum, trend, overbought/oversold, breakout, or technical setup.', parameters: { type: 'object', properties: { id: { type: 'string', description: 'CoinGecko id, e.g. "bitcoin", "aave"' }, days: { type: 'number', description: 'Lookback window in days (7-90, default 30). Longer window = more reliable RSI/MACD seed but slower.' } }, required: ['id'] } } },
+  { type: 'function', function: { name: 'get_okx_liquidations', description: 'Get recent OKX liquidation orders for a coin (perp/futures). Returns aggregate long/short notional liquidated, count, latest events. Use for "did anyone get liquidated", "long squeeze", "short squeeze" questions.', parameters: { type: 'object', properties: { baseCcy: { type: 'string', description: 'Base currency symbol, e.g. "BTC", "ETH"' }, limit: { type: 'number', description: 'Max events to summarize (default 50, max 200)' } }, required: ['baseCcy'] } } },
 ];
 
 type LLMMessage = {
@@ -1562,6 +1829,75 @@ async function executeWeb3Tool(name: string, args: Record<string, unknown>): Pro
         const rows = await fetchCoinsMarkets({ vs_currency: 'usd', category: resolved.categoryId, order: 'market_cap_desc', per_page: topN, page: 1, sparkline: 'false', price_change_percentage: '24h' });
         return JSON.stringify({ category: resolved.name, category_id: resolved.categoryId, coins: rows.map(r => ({ name: r.name, symbol: r.symbol, price_usd: r.current_price, market_cap_usd: r.market_cap, change_24h_pct: r.price_change_percentage_24h })) });
       }
+      case 'get_okx_derivatives': {
+        const baseCcy = String(args.baseCcy || '').trim().toUpperCase();
+        if (!baseCcy) return JSON.stringify({ error: 'missing_baseCcy' });
+        const r = await runOkxCli({ intent: 'market_snapshot', baseCcy, limit: 30 });
+        if (!r.ok) return JSON.stringify({ error: r.error || 'okx_market_failed' });
+        const p = r.payload || {};
+        // Trim the payload to what the LLM (and the result-card renderer) need.
+        // Drop the raw 30-row candles to keep the tool message under ~1KB —
+        // the LLM gets period high/low + last close from the summary, which
+        // is what it needs to talk about price action.
+        const candles: Array<[number, number, number, number, number]> = Array.isArray(p.candles) ? p.candles : [];
+        const high30d = candles.length ? Math.max(...candles.map((c) => c[2])) : null;
+        const low30d = candles.length ? Math.min(...candles.map((c) => c[3])) : null;
+        return JSON.stringify({
+          baseCcy: p.baseCcy,
+          spotInstId: p.spotInstId,
+          swapInstId: p.swapInstId,
+          spot: p.spot,
+          derivatives: p.derivatives,
+          orderbookDepthUsd: p.orderbookDepthUsd,
+          candleSummary: candles.length ? { rows: candles.length, high_30d: high30d, low_30d: low30d, last_close: candles[0]?.[4] } : null,
+        });
+      }
+      case 'get_token_technical_indicators': {
+        const id = String(args.id || '').trim();
+        const days = Math.min(90, Math.max(7, Number(args.days || 30)));
+        if (!id) return JSON.stringify({ error: 'missing_id' });
+        const result = await computeTechnicalIndicators(id, days);
+        return JSON.stringify(result);
+      }
+      case 'get_okx_liquidations': {
+        const baseCcy = String(args.baseCcy || '').trim().toUpperCase();
+        if (!baseCcy) return JSON.stringify({ error: 'missing_baseCcy' });
+        const limit = Math.min(200, Math.max(1, Number(args.limit || 50)));
+        const r = await runOkxCli({ intent: 'liquidations', baseCcy, limit });
+        if (!r.ok) return JSON.stringify({ error: r.error || 'okx_liquidations_failed' });
+        return JSON.stringify(r.payload || {});
+      }
+      case 'get_okx_news_sentiment': {
+        const baseCcy = String(args.baseCcy || '').trim().toUpperCase();
+        if (!baseCcy) return JSON.stringify({ error: 'missing_baseCcy' });
+        const limit = Math.min(20, Math.max(1, Number(args.limit || 8)));
+        const r = await runOkxCli({ intent: 'news_bundle', baseCcy, limit });
+        if (!r.ok) return JSON.stringify({ error: r.error || 'okx_news_failed' });
+        const p = r.payload || {};
+        // Trim each news item — the LLM doesn't need full body text, just
+        // title + url + sentiment + timestamp.
+        const news = Array.isArray(p.latestNews) ? p.latestNews.slice(0, limit).map((n: any) => ({
+          title: n.title,
+          url: n.url,
+          publishedAt: n.publishedAt,
+          source: n.source,
+          sentiment: n.sentiment,
+          importance: n.importance,
+        })) : [];
+        return JSON.stringify({
+          baseCcy: p.baseCcy,
+          news,
+          sentiment: p.sentiment ? {
+            label: p.sentiment.label,
+            bullishRatio: p.sentiment.bullishRatio,
+            bearishRatio: p.sentiment.bearishRatio,
+            neutralRatio: p.sentiment.neutralRatio,
+            hotness: p.sentiment.hotness,
+            newsMentionCnt: p.sentiment.newsMentionCnt,
+            xMentionCnt: p.sentiment.xMentionCnt,
+          } : null,
+        });
+      }
       default:
         return JSON.stringify({ error: `unknown_tool: ${name}` });
     }
@@ -1571,14 +1907,117 @@ async function executeWeb3Tool(name: string, args: Record<string, unknown>): Pro
 }
 
 const AGENT_SYSTEM = `You are a Web3 data collection agent for Loka investment research platform.
-Use the provided tools to gather cryptocurrency data, then write a structured data report in Chinese markdown.
-Rules:
-- ALWAYS call search_crypto_asset first to resolve a token before calling any other token tool
-- ALWAYS call get_token_price_and_market for every identified token — even for overview/intro queries — to include real-time price, market cap, volume, and 24h change
-- Call additional tools as needed for the specific query (e.g. get_token_detail for project info, get_price_history for trend)
-- Write your final report starting with "## Web3 数据" in Chinese markdown, with all key metrics
-- Do NOT give trading advice — report facts only
-- If data is unavailable, state so clearly`;
+
+# CRITICAL: Use parallel tool calls in ONE turn.
+
+The OpenAI tool-calling protocol lets you return multiple entries in the
+\`tool_calls\` array in a single turn — the runtime executes them concurrently.
+You MUST exploit this for any token-related query.
+
+## Why this matters
+
+A typical "analyse token X" query needs price, market detail, and price history.
+These tools have NO data dependency on each other (they all take the same
+CoinGecko id as input). Calling them sequentially across 3 turns wastes
+~14 seconds of LLM round-trips. Calling them in ONE turn finishes in ~3s.
+
+## Few-shot: how to plan correctly
+
+### Example 1 — User asks "分析 BTC 适合开多还是开空"
+
+[Pre-resolved by frontend] BTC → CoinGecko id = "bitcoin". Do NOT call search_crypto_asset.
+
+Your FIRST assistant turn MUST batch all three tools at once:
+
+  tool_calls = [
+    { name: "get_token_price_and_market", args: { ids: "bitcoin" } },
+    { name: "get_token_detail",           args: { id:  "bitcoin" } },
+    { name: "get_price_history",          args: { id:  "bitcoin", days: 30 } }
+  ]
+
+After the runtime returns all 3 results in one batch, write the final report.
+Total turns: 2 (one tool-calling turn + one report turn).
+
+### Example 2 — User asks "现在TAO值得买吗" with no pre-resolved id
+
+Since the id is unknown, your first turn calls only the resolver:
+
+  tool_calls = [
+    { name: "search_crypto_asset", args: { query: "TAO" } }
+  ]
+
+After receiving \`{ id: "bittensor", symbol: "TAO" }\`, your SECOND turn
+batches the remaining three tools at once:
+
+  tool_calls = [
+    { name: "get_token_price_and_market", args: { ids: "bittensor" } },
+    { name: "get_token_detail",           args: { id:  "bittensor" } },
+    { name: "get_price_history",          args: { id:  "bittensor", days: 30 } }
+  ]
+
+After the runtime returns the batch, write the final report.
+Total turns: 3 (resolver + batch + report).
+
+### Example 3 — User asks "今天哪些币热门"
+
+  tool_calls = [
+    { name: "get_trending_coins",        args: {} },
+    { name: "get_global_market_overview", args: {} }
+  ]
+
+Total turns: 2.
+
+### Example 4 — Specialised single-tool queries
+
+For NFT collections or exchange rankings, single tool calls are fine:
+
+  tool_calls = [{ name: "get_nft_collection", args: { query: "Pudgy Penguins" } }]
+
+## RULES (read every time)
+
+1. NEVER call tools sequentially across turns when they have no data dependency.
+   That wastes ~5s per turn.
+2. When you have a CoinGecko id (from hint or from search_crypto_asset),
+   the runtime AUTO-EXPANDS into a 7-tool deep-dive batch in parallel:
+     • get_token_price_and_market   (price, mcap, vol, rank)
+     • get_token_detail             (categories, links, description)
+     • get_price_history            (30d OHLC summary)
+     • get_token_technical_indicators (RSI/MACD/MA20/MA50/Bollinger)
+     • get_okx_derivatives          (funding rate, OI, depth, 30d candles)
+     • get_okx_news_sentiment       (news headlines + bullish/bearish ratios)
+     • get_okx_liquidations         (24h long/short notional, recent events)
+   You do NOT need to call any of these manually — they will be in the tool
+   message history. Just read the results and write the report.
+3. NEVER call the same tool twice with the same args. If the conversation
+   already contains tool results for a (tool, id) pair, DO NOT call that tool
+   again — read from the existing tool message instead.
+4. Reflect only if a result reveals a NEW dependency (e.g. detail says "this is on
+   Base chain" and user asked about DEX liquidity → THEN call get_onchain_pools).
+   Do NOT call extra tools "just in case".
+5. If you see that the deep-dive bundle is ALREADY present in the conversation
+   history (the runtime pre-fetches it), proceed directly to the final report
+   unless the user's specific question requires extended tools.
+
+## How to USE the deep-dive bundle in your report
+
+When the auto-fetched data is present, weave it into the answer:
+  • Technicals → call out RSI overbought/oversold, MACD bullish/bearish,
+    BB position. The verdict field gives you the one-shot summary.
+  • Derivatives → if funding rate is markedly +/- (>0.01% / 8h ≈ 11% APR),
+    mention it. OI trend hints at leverage build-up.
+  • Liquidations → if long_notional or short_notional is significant
+    (>$1M in 24h), call it out — that often explains sharp price moves.
+  • News & sentiment → quote the most relevant 1-2 headlines + the
+    bullish/bearish ratio for the sentiment narrative.
+Tools whose result is "{error: ...}" (e.g. asset not on OKX) — just skip
+them silently in the report. Don't apologize for missing data.
+
+## After tools complete
+
+Write the final report starting with "## Web3 数据" in Chinese markdown,
+covering price / market / technicals / derivatives / sentiment / community /
+dev / exchanges from the gathered data. Do NOT give trading advice — report
+facts only. State clearly if any data is unavailable.`;
 
 // PreResolvedHint comes from the upstream "Web3 trending card click" path. When
 // the user's chat is started by clicking a known trending coin, the frontend
@@ -1617,6 +2056,10 @@ const STAGE_TITLES: Record<string, { en: string; zh: string }> = {
   get_nft_collection:         { en: 'Reading NFT collection',    zh: '查看 NFT 数据' },
   get_onchain_pools:          { en: 'Scanning on-chain pools',   zh: '扫描链上流动性' },
   get_category_coins:         { en: 'Reading sector coins',      zh: '查看赛道代币' },
+  get_okx_derivatives:        { en: 'Reading OKX derivatives',   zh: '查看 OKX 衍生品' },
+  get_okx_news_sentiment:     { en: 'Reading OKX news & mood',   zh: '查看 OKX 新闻与情绪' },
+  get_token_technical_indicators: { en: 'Computing technicals', zh: '计算技术指标' },
+  get_okx_liquidations:       { en: 'Scanning liquidations',     zh: '扫描爆仓数据' },
 };
 function titleForTool(name: string): { en: string; zh: string } {
   return STAGE_TITLES[name] || { en: name.replace(/_/g, ' '), zh: name };
@@ -1634,12 +2077,62 @@ type StageEvent = {
   summary?: string;
   /** Optional error message when state=failed */
   error?: string;
+  /** Raw tool output (parsed JSON). Used by the frontend to render rich
+   *  per-tool cards (price card, sparkline, project profile, etc) inline in
+   *  the chat thread. Only set on `completed` events to keep `active` payloads
+   *  small. Trimmed to a safe size at emit time. */
+  rawData?: any;
+  /** Tool input args (the `arguments` field from the LLM tool_call). Used to
+   *  render "called: 解析代币 · pengu" style pills. Set on `active` events. */
+  argsData?: any;
 };
 
 function emitStageEvent(ev: StageEvent): void {
   // The `__WEB3_STAGE__` prefix lets the parent process distinguish event
   // lines from the existing free-form `[web3-agent] ...` log lines.
   process.stderr.write(`__WEB3_STAGE__ ${JSON.stringify(ev)}\n`);
+}
+
+/** Parse a tool's raw JSON output and trim oversized fields so the stage event
+ *  payload stays within reasonable size limits when forwarded through stderr.
+ *  We keep enough data for the frontend to render a rich card (price, market,
+ *  description, top tickers, sparkline) but drop anything cardless. */
+function buildRawDataForCard(toolName: string, raw: string): any {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return parsed;
+    if (parsed.error) return { error: parsed.error };
+
+    if (toolName === 'get_token_detail') {
+      // get_token_detail's tool output is already trimmed (see executeWeb3Tool
+      // line 1500-ish). Pass through.
+      return parsed;
+    }
+    if (toolName === 'get_price_history') {
+      // ohlc summary + raw days suffice for a sparkline; drop nothing.
+      return parsed;
+    }
+    if (toolName === 'get_token_price_and_market' && Array.isArray(parsed)) {
+      return parsed.slice(0, 5);
+    }
+    // trending_coins / market_rankings return raw arrays — normalize to
+    // `{ coins: [...] }` so the frontend renderer (which expects this shape
+    // across all rank-list tools) doesn't show 0 items.
+    if (toolName === 'get_market_rankings') {
+      const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.coins) ? parsed.coins : []);
+      return { coins: arr.slice(0, 10) };
+    }
+    if (toolName === 'get_trending_coins') {
+      const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.coins) ? parsed.coins : []);
+      return { coins: arr.slice(0, 12) };
+    }
+    if (toolName === 'get_category_coins' && parsed.coins) {
+      return { ...parsed, coins: (parsed.coins || []).slice(0, 10) };
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Best-effort one-line summary for the user-facing stage card. */
@@ -1700,13 +2193,502 @@ async function runAgentLoop(query: string, hint?: PreResolvedHint | null): Promi
     { role: 'system', content: AGENT_SYSTEM },
     { role: 'user', content: userContent },
   ];
-  let inferredIntent: Web3Intent = 'token_deep_dive';
+  // Cast widens the literal so TS keeps the full Web3Intent type — control-
+  // flow analysis can't see reassignments inside the Promise.all closures
+  // below, otherwise it narrows this to 'token_deep_dive' and breaks the
+  // `inferredIntent === 'onchain_scan'` check at the bottom.
+  let inferredIntent: Web3Intent = 'token_deep_dive' as Web3Intent;
   let resolvedId: string | undefined = hint?.coingeckoId;
   let spotPriceUsd: number | undefined;
   const resolvedAssets: Array<{ id?: string; symbol?: string; name?: string }> = [];
   if (hint) resolvedAssets.push({ id: hint.coingeckoId, symbol: hint.symbol, name: hint.name });
   const toolsUsed: string[] = [];
   let finalReport = '';
+
+  // ── Active expansion via rule registry ───────────────────────────────────
+  // DeepSeek V3 in tool-calling mode is fine-tuned to act in one-tool-per-turn
+  // mode (won't batch despite explicit prompt instructions). Instead of
+  // fighting the model, runtime "expansion rules" detect specific situations
+  // (token deep-dive, trending list, multi-token comparison, …) and eagerly
+  // parallel-fetch the standard companion tools, then inject the results as
+  // synthesized assistant.tool_calls + tool messages so the next LLM turn
+  // sees the data as if it had called them itself.
+  //
+  // Each rule is `{ id, name, trigger, action }`. Rules are evaluated AFTER
+  // every LLM turn's tool-call batch finishes. Each rule fires at most once
+  // per run (tracked via `firedRules: Set<id>`), so we don't double-expand.
+  // Adding a new "deep-dive pattern" = pushing one entry to EXPANSION_RULES,
+  // no changes to the main loop.
+  const firedRules = new Set<string>();
+  // Tools that use the CoinGecko id directly. Always safe to fan out.
+  const TOKEN_DEEP_DIVE_CG_TOOLS = [
+    'get_token_price_and_market',
+    'get_token_detail',
+    'get_price_history',
+    'get_token_technical_indicators',
+  ];
+  // Tools that require the base currency *symbol* (BTC, TRX, …). Only fan out
+  // when we have a resolved symbol. OKX-side calls — if the asset isn't
+  // listed on OKX, the tool returns {error:...} which the LLM ignores.
+  const TOKEN_DEEP_DIVE_OKX_TOOLS = [
+    'get_okx_derivatives',
+    'get_okx_news_sentiment',
+    'get_okx_liquidations',
+  ];
+  const TOKEN_DEEP_DIVE_TOOLS = [...TOKEN_DEEP_DIVE_CG_TOOLS, ...TOKEN_DEEP_DIVE_OKX_TOOLS];
+  const TRENDING_TOP_N = 5;
+  const MULTI_TOKEN_TOP_N = 6;
+
+  // Generate args for one of the standard deep-dive tools.
+  // CG tools take the slug (`id`); OKX tools take the uppercase base symbol.
+  const argsForDeepDiveTool = (name: string, id: string, symbol?: string): Record<string, unknown> | null => {
+    if (name === 'get_token_price_and_market') return { ids: id };
+    if (name === 'get_price_history') return { id, days: 30 };
+    if (name === 'get_token_detail') return { id };
+    if (name === 'get_token_technical_indicators') return { id, days: 30 };
+    // OKX tools need a symbol — bail out if we don't have one (caller filters).
+    const sym = (symbol || '').trim().toUpperCase();
+    if (!sym) return null;
+    if (name === 'get_okx_derivatives') return { baseCcy: sym };
+    if (name === 'get_okx_news_sentiment') return { baseCcy: sym, limit: 6 };
+    if (name === 'get_okx_liquidations') return { baseCcy: sym, limit: 50 };
+    return null;
+  };
+
+  // Run a single tool call: emit stage events, execute, capture side-effects.
+  // Used by both the LLM-driven path (in the main loop) and the active-
+  // expansion path. Returns the tool message ready to be pushed to messages[].
+  // (The LLM-driven path inlines this same logic in Promise.all because it
+  // also handles tc-name-specific intent-inference branches, but for active
+  // expansion we always hit the deep-dive intent so a simpler helper works.)
+  const runOneActiveTool = async (toolName: string, args: Record<string, unknown>, fakeTcId: string): Promise<LLMMessage> => {
+    console.error(`[web3-agent] auto-expand tool="${toolName}" args=${JSON.stringify(args)}`);
+    const stageTitle = titleForTool(toolName);
+    emitStageEvent({
+      _evt: 'web3_stage',
+      stage: toolName,
+      title_en: stageTitle.en,
+      title_zh: stageTitle.zh,
+      state: 'active',
+      argsData: args,
+    });
+    const stageStartMs = Date.now();
+    let toolFailed = false;
+    let result = '';
+    try {
+      result = await executeWeb3Tool(toolName, args);
+      try {
+        const parsedCheck = JSON.parse(result);
+        if (parsedCheck && typeof parsedCheck === 'object' && parsedCheck.error) toolFailed = true;
+      } catch { /* non-JSON OK */ }
+    } catch (toolErr) {
+      toolFailed = true;
+      result = JSON.stringify({ error: (toolErr as Error).message });
+    }
+    const stageDurMs = Date.now() - stageStartMs;
+    emitStageEvent({
+      _evt: 'web3_stage',
+      stage: toolName,
+      title_en: stageTitle.en,
+      title_zh: stageTitle.zh,
+      state: toolFailed ? 'failed' : 'completed',
+      durationMs: stageDurMs,
+      summary: toolFailed ? undefined : summarizeToolResult(toolName, result),
+      rawData: toolFailed ? undefined : buildRawDataForCard(toolName, result),
+    });
+    toolsUsed.push(toolName);
+    // Mirror the side-effect updates the LLM-driven path does, so downstream
+    // logic (resolvedId / spotPriceUsd / tokenSnapshot building) sees the data.
+    try {
+      const parsed = JSON.parse(result);
+      if (toolName === 'get_token_price_and_market' && Array.isArray(parsed) && parsed[0]?.price_usd) {
+        spotPriceUsd = spotPriceUsd ?? parsed[0].price_usd;
+        if (!resolvedId && parsed[0].id) {
+          resolvedId = parsed[0].id;
+          resolvedAssets.push({ id: parsed[0].id, symbol: parsed[0].symbol, name: parsed[0].name });
+        }
+      }
+    } catch { /* ignore */ }
+    return { role: 'tool' as const, tool_call_id: fakeTcId, content: result };
+  };
+
+  // Inject a parallel batch of synthetic tool_calls + tool results into
+  // messages, as if the LLM had requested them itself. OpenAI's API doesn't
+  // validate tool_call_id origin — it only requires
+  //   assistant.tool_calls[i].id === tool_message.tool_call_id
+  // which we satisfy by generating fresh ids for both sides.
+  // Returns the number of tools actually injected (0 = no-op).
+  const injectToolBatch = async (
+    label: string,
+    calls: Array<{ name: string; args: Record<string, unknown> }>,
+  ): Promise<number> => {
+    if (calls.length === 0) return 0;
+    console.error(`[web3-agent] expansion[${label}] parallel batch=${calls.map((c) => c.name).join(',')}`);
+    const startMs = Date.now();
+    const fakeToolCalls = calls.map((c) => ({
+      id: `auto_${c.name}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      type: 'function',
+      function: { name: c.name, arguments: JSON.stringify(c.args) },
+    }));
+    const toolMsgs = await Promise.all(
+      fakeToolCalls.map((tc) => runOneActiveTool(tc.function.name, JSON.parse(tc.function.arguments), tc.id)),
+    );
+    messages.push({ role: 'assistant', content: null, tool_calls: fakeToolCalls });
+    messages.push(...toolMsgs);
+    console.error(
+      `[web3-agent] expansion[${label}] finished in ${((Date.now() - startMs) / 1000).toFixed(2)}s (${calls.length} tools in parallel)`,
+    );
+    return calls.length;
+  };
+
+  // ── Expansion rule registry ──────────────────────────────────────────────
+  // Each rule has:
+  //   id      — stable string used for once-per-run dedup via firedRules
+  //   trigger — sync predicate, returns true if the rule wants to fire NOW
+  //             given (recentTurnCalled, recentToolMsgs, lifecycle state)
+  //   action  — async fn that calls injectToolBatch(...) to add new tools
+  //
+  // Rules are evaluated in array order on every "trigger point":
+  //   - before the first LLM turn (eager / hint path)
+  //   - after each LLM turn's tool-batch finishes
+  //
+  // Adding a new deep-dive pattern = push one entry to EXPANSION_RULES.
+  type RuleCtx = {
+    /** Tool names the LLM called in the most recent turn (empty for pre-turn). */
+    calledThisTurn: Set<string>;
+    /** Tool messages from the most recent turn (empty for pre-turn). */
+    recentToolMsgs: LLMMessage[];
+  };
+  type ExpansionRule = {
+    id: string;
+    /** Returns true if this rule wants to fire given current ctx + lifecycle. */
+    trigger: (ctx: RuleCtx) => boolean;
+    /** Run when triggered. Called via injectToolBatch internally. */
+    action: (ctx: RuleCtx) => Promise<void>;
+  };
+
+  // ─── Rule: token deep-dive ──────────────────────────────────────────────
+  // When we have a resolved CoinGecko id (from hint or from a recent
+  // search_crypto_asset call), eagerly fetch price+detail+history in parallel
+  // so the next LLM turn has everything to write a token-level report.
+  const tokenDeepDiveRule: ExpansionRule = {
+    id: 'token_deep_dive',
+    trigger: (ctx) => {
+      if (!resolvedId) return false;
+      // Pre-turn (eager hint path): always fire if we have an id from hint.
+      if (ctx.calledThisTurn.size === 0) return true;
+      // Post-turn: only fire if this turn was clearly a token-deep-dive turn.
+      // (The LLM called search or a token-deep-dive tool — not, say, an
+      // unrelated NFT/global-scan turn that happened to have an id around.)
+      const isDeepDiveTurn =
+        ctx.calledThisTurn.has('search_crypto_asset') ||
+        TOKEN_DEEP_DIVE_TOOLS.some((t) => ctx.calledThisTurn.has(t));
+      return isDeepDiveTurn;
+    },
+    action: async (ctx) => {
+      const missing = TOKEN_DEEP_DIVE_TOOLS.filter((t) => !ctx.calledThisTurn.has(t));
+      if (missing.length === 0 || !resolvedId) return;
+      const sym = resolvedAssets[0]?.symbol;
+      // Build the batch — drop entries where the args builder returned null
+      // (happens when an OKX tool was selected but we don't have a symbol).
+      const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+      for (const name of missing) {
+        const args = argsForDeepDiveTool(name, resolvedId!, sym);
+        if (args) calls.push({ name, args });
+      }
+      if (calls.length === 0) return;
+      await injectToolBatch('token_deep_dive', calls);
+    },
+  };
+
+  // ─── Rule: trending / market_rankings → top-N detail follow-up ──────────
+  // After get_trending_coins / get_market_rankings returns the list, the LLM
+  // has prices but no project metadata. Fetch get_token_detail for the top N
+  // ids in parallel so the next turn can write per-coin commentary.
+  const trendingDetailRule: ExpansionRule = {
+    id: 'trending_detail',
+    trigger: (ctx) =>
+      ctx.calledThisTurn.has('get_trending_coins') ||
+      ctx.calledThisTurn.has('get_market_rankings'),
+    action: async (ctx) => {
+      // Extract top-N ids from the most recent tool result.
+      let listIds: string[] = [];
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.coins) ? parsed.coins : null);
+          if (Array.isArray(arr) && arr.length > 0) {
+            listIds = arr
+              .map((row: any) => row?.id)
+              .filter((id: any): id is string => typeof id === 'string' && id.length > 0)
+              .slice(0, TRENDING_TOP_N);
+            if (listIds.length > 0) break;
+          }
+        } catch { /* skip non-JSON */ }
+      }
+      if (listIds.length === 0) return;
+      await injectToolBatch(
+        'trending_detail',
+        listIds.map((id) => ({ name: 'get_token_detail', args: { id } })),
+      );
+    },
+  };
+
+  // ─── Rule: multi-token comparison → per-id detail + history ─────────────
+  // When the LLM calls get_token_price_and_market with multiple comma-
+  // separated ids (e.g. "bitcoin,ethereum,solana" for "btc eth sol 哪个值得"),
+  // the response has prices but each id is shallow. Fetch get_token_detail
+  // for each so the next turn can give per-coin commentary.
+  const multiTokenRule: ExpansionRule = {
+    id: 'multi_token_detail',
+    trigger: (ctx) => {
+      if (!ctx.calledThisTurn.has('get_token_price_and_market')) return false;
+      // Need at least 2 ids in the response — single-token call is already
+      // handled by the token_deep_dive rule.
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          if (Array.isArray(parsed) && parsed.length >= 2) {
+            // Ensure entries actually have ids (the slim summary shape from
+            // buildRawDataForCard might drop them, but the raw tool output
+            // here is the un-trimmed JSON).
+            const ids = parsed.map((r: any) => r?.id).filter(Boolean);
+            if (ids.length >= 2) return true;
+          }
+        } catch { /* skip */ }
+      }
+      return false;
+    },
+    action: async (ctx) => {
+      let listIds: string[] = [];
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          if (Array.isArray(parsed) && parsed.length >= 2) {
+            listIds = parsed
+              .map((r: any) => r?.id)
+              .filter((id: any): id is string => typeof id === 'string' && id.length > 0)
+              .slice(0, MULTI_TOKEN_TOP_N);
+            if (listIds.length >= 2) break;
+          }
+        } catch { /* skip */ }
+      }
+      if (listIds.length < 2) return;
+      // For each id, fetch detail + history in parallel. This is more
+      // aggressive than trending (which only fetches detail) because the
+      // user explicitly asked for a comparison, so we want history-driven
+      // per-coin commentary.
+      const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+      for (const id of listIds) {
+        calls.push({ name: 'get_token_detail', args: { id } });
+        calls.push({ name: 'get_price_history', args: { id, days: 30 } });
+      }
+      await injectToolBatch('multi_token_detail', calls);
+    },
+  };
+
+  // ─── Rule: onchain pools chained on detail.platforms ───────────────────
+  // When the user query has "链上 / on-chain / DEX / pool / 流动性" intent
+  // AND get_token_detail reveals the token lives on an EVM chain we support,
+  // automatically fetch get_onchain_pools(network=<chain>) so the model can
+  // talk about real DEX liquidity / pool depth instead of just price.
+  //
+  // Skipped silently for non-EVM tokens (BTC, XRP, ADA, …) since the
+  // underlying GeckoTerminal API only covers EVM + Solana chains.
+  //
+  // CoinGecko's `platforms` keys → GeckoTerminal `network` ids. Order matters:
+  // we pick the first match, so the most "interesting" chains for liquidity
+  // analysis (Ethereum mainnet, then L2s, then alt-L1s) come first.
+  const COINGECKO_PLATFORM_TO_GECKOTERMINAL_NETWORK: Array<[string, string]> = [
+    ['ethereum',              'eth'],
+    ['solana',                'solana'],
+    ['base',                  'base'],
+    ['arbitrum-one',          'arbitrum'],
+    ['optimistic-ethereum',   'optimism'],
+    ['binance-smart-chain',   'bsc'],
+    ['polygon-pos',           'polygon_pos'],
+    ['avalanche',             'avax'],
+    ['fantom',                'ftm'],
+  ];
+  const ONCHAIN_INTENT_PATTERN = /链上|流动性|on[- ]?chain|\bdex\b|\bpool\b|\bliquidity\b|amm/i;
+  const onchainChainedRule: ExpansionRule = {
+    id: 'onchain_chained',
+    trigger: (ctx) => {
+      // Step 1: query must signal on-chain intent. Without this we skip the
+      // expansion (otherwise every token-deep-dive turn would chain it).
+      if (!ONCHAIN_INTENT_PATTERN.test(query)) return false;
+      // Step 2: this turn must include a get_token_detail call (so the
+      // recentToolMsgs contains a detail payload with platforms).
+      if (!ctx.calledThisTurn.has('get_token_detail')) return false;
+      // Step 3: at least one EVM/Solana platform in the detail's platforms map.
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          const platforms = parsed?.platforms;
+          if (!platforms || typeof platforms !== 'object') continue;
+          for (const [cgKey] of COINGECKO_PLATFORM_TO_GECKOTERMINAL_NETWORK) {
+            if (platforms[cgKey]) return true;
+          }
+        } catch { /* skip */ }
+      }
+      return false;
+    },
+    action: async (ctx) => {
+      // Pick the first matching chain across all detail tool messages this turn.
+      let chosenNetwork: string | null = null;
+      let tokenIdent: string | null = null; // id or symbol for the get_onchain_pools query
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          const platforms = parsed?.platforms;
+          if (!platforms || typeof platforms !== 'object') continue;
+          for (const [cgKey, gtNet] of COINGECKO_PLATFORM_TO_GECKOTERMINAL_NETWORK) {
+            if (platforms[cgKey]) {
+              chosenNetwork = gtNet;
+              tokenIdent = parsed.id || parsed.symbol || null;
+              break;
+            }
+          }
+          if (chosenNetwork) break;
+        } catch { /* skip */ }
+      }
+      if (!chosenNetwork || !tokenIdent) return;
+      await injectToolBatch(
+        'onchain_chained',
+        [{ name: 'get_onchain_pools', args: { query: tokenIdent, network: chosenNetwork } }],
+      );
+    },
+  };
+
+  // ─── Rule: drop-reason chained — pools + sector context ─────────────────
+  // When the user asks "why did X drop?" / "X 跌了为什么?" / "X 暴涨为什么?",
+  // a single token's price snapshot doesn't answer the question. The
+  // explanation usually lies in:
+  //   (a) on-chain liquidity (pool drained → price collapses) — needs
+  //       get_onchain_pools, only meaningful for EVM/Solana tokens.
+  //   (b) sector context (entire L1 sector down 15% → token's drop is
+  //       just sector beta) — needs get_category_coins for the token's
+  //       primary CoinGecko category.
+  //
+  // Triggers when:
+  //   - query contains a price-direction keyword (跌/涨/暴涨/暴跌/why drop/why up/etc.)
+  //   - this turn included get_token_detail (so we have categories + platforms)
+  //   - the detail has either platforms (EVM/Solana) OR categories[]
+  //
+  // Distinct from onchainChainedRule (which needs explicit "链上/DEX/pool"
+  // keywords) — drop-reason fires on the broader "why" intent and pulls
+  // sector data on top of pool data.
+  const DROP_REASON_PATTERN = /跌|涨|暴跌|暴涨|崩|拉盘|砸盘|为什么|为啥|原因|why\s+(?:did|is|has).*?(?:drop|fall|crash|dump|pump|surge|rally|rise)|why.*?down|why.*?up|reason\s+for|driving|today/i;
+  const dropReasonRule: ExpansionRule = {
+    id: 'drop_reason',
+    trigger: (ctx) => {
+      if (!DROP_REASON_PATTERN.test(query)) return false;
+      if (!ctx.calledThisTurn.has('get_token_detail')) return false;
+      // Need either a platform (for pools) or a category (for sector context).
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          const hasPlatform =
+            parsed?.platforms &&
+            typeof parsed.platforms === 'object' &&
+            COINGECKO_PLATFORM_TO_GECKOTERMINAL_NETWORK.some(([k]) => parsed.platforms[k]);
+          const hasCategory = Array.isArray(parsed?.categories) && parsed.categories.length > 0;
+          if (hasPlatform || hasCategory) return true;
+        } catch { /* skip */ }
+      }
+      return false;
+    },
+    action: async (ctx) => {
+      let chosenNetwork: string | null = null;
+      let tokenIdent: string | null = null;
+      let firstCategory: string | null = null;
+      for (const msg of ctx.recentToolMsgs) {
+        if (msg.role !== 'tool' || typeof msg.content !== 'string') continue;
+        try {
+          const parsed = JSON.parse(msg.content);
+          if (!chosenNetwork && parsed?.platforms && typeof parsed.platforms === 'object') {
+            for (const [cgKey, gtNet] of COINGECKO_PLATFORM_TO_GECKOTERMINAL_NETWORK) {
+              if (parsed.platforms[cgKey]) {
+                chosenNetwork = gtNet;
+                tokenIdent = parsed.id || parsed.symbol || null;
+                break;
+              }
+            }
+          }
+          if (!firstCategory && Array.isArray(parsed?.categories)) {
+            // Filter out generic / chain-name categories that produce noisy
+            // sector comparisons ("Ecosystem" / "BNB Chain Ecosystem"). Prefer
+            // a sector tag if available.
+            const filtered = parsed.categories.filter((c: any) =>
+              typeof c === 'string' && !/Ecosystem|Portfolio$/i.test(c)
+            );
+            if (filtered.length > 0) firstCategory = String(filtered[0]);
+            else if (parsed.categories.length > 0) firstCategory = String(parsed.categories[0]);
+          }
+          if (chosenNetwork && firstCategory) break;
+        } catch { /* skip */ }
+      }
+      const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+      if (chosenNetwork && tokenIdent && !ctx.calledThisTurn.has('get_onchain_pools')) {
+        calls.push({ name: 'get_onchain_pools', args: { query: tokenIdent, network: chosenNetwork } });
+      }
+      if (firstCategory && !ctx.calledThisTurn.has('get_category_coins')) {
+        calls.push({ name: 'get_category_coins', args: { category: firstCategory, top_n: 5 } });
+      }
+      if (calls.length === 0) return;
+      await injectToolBatch('drop_reason', calls);
+    },
+  };
+
+  const EXPANSION_RULES: ExpansionRule[] = [
+    tokenDeepDiveRule,
+    trendingDetailRule,
+    multiTokenRule,
+    onchainChainedRule,
+    dropReasonRule,
+    // Future rules go here. Examples:
+    //   - nft_followup: when query mentions floor + a project, fetch both
+    //     get_nft_collection AND get_token_detail for the underlying token.
+    //   - sector_drilldown: when category_coins reveals a hot sector, follow
+    //     up with detail for the top 3 coins in that sector.
+  ];
+
+  // Run all rules whose trigger fires now. Each rule fires at most once per
+  // run (tracked via firedRules). Rules execute serially so injected tool
+  // results from one rule are visible to the next rule's trigger — handy
+  // for chained expansions (rule A's output becomes rule B's input).
+  const runExpansionRules = async (ctx: RuleCtx): Promise<void> => {
+    for (const rule of EXPANSION_RULES) {
+      if (firedRules.has(rule.id)) continue;
+      try {
+        if (!rule.trigger(ctx)) continue;
+      } catch (err) {
+        console.error(`[web3-agent] expansion[${rule.id}] trigger threw: ${(err as Error).message}`);
+        continue;
+      }
+      firedRules.add(rule.id);
+      try {
+        await rule.action(ctx);
+      } catch (err) {
+        console.error(`[web3-agent] expansion[${rule.id}] action threw: ${(err as Error).message}`);
+        // Don't unmark — keep this rule "fired" so we don't loop on a
+        // persistent failure.
+      }
+    }
+  };
+
+  // Hint path: id is already known, so eagerly run rules BEFORE the first
+  // LLM round. token_deep_dive's trigger fires (calledThisTurn empty +
+  // resolvedId present) → fetches the full deep-dive set in parallel.
+  if (hint?.coingeckoId) {
+    await runExpansionRules({ calledThisTurn: new Set<string>(), recentToolMsgs: [] });
+  }
 
   for (let turn = 0; turn < AGENT_MAX_TURNS; turn++) {
     let resp: Awaited<ReturnType<typeof callLLMForWeb3>>;
@@ -1726,78 +2708,118 @@ async function runAgentLoop(query: string, hint?: PreResolvedHint | null): Promi
       break;
     }
 
-    const toolMsgs: LLMMessage[] = [];
-    for (const tc of resp.tool_calls) {
-      let args: Record<string, unknown> = {};
-      try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
-      // Detect the case where DeepSeek ignored our "skip search_crypto_asset"
-      // instruction and called it anyway. Useful for spotting prompt-following
-      // regressions when the model is upgraded.
-      if (hint && tc.function.name === 'search_crypto_asset') {
-        console.error(
-          `[web3-agent] WARN: LLM called search_crypto_asset despite pre-resolved hint (id=${hint.coingeckoId}). Optimization missed; check user-prompt wording.`,
-        );
-      }
-      console.error(`[web3-agent] turn=${turn} tool="${tc.function.name}" args=${JSON.stringify(args)}`);
-      // Frontend Process panel stage event: 'active' before the tool runs.
-      const stageTitle = titleForTool(tc.function.name);
-      emitStageEvent({
-        _evt: 'web3_stage',
-        stage: tc.function.name,
-        title_en: stageTitle.en,
-        title_zh: stageTitle.zh,
-        state: 'active',
-      });
-      const stageStartMs = Date.now();
-      let toolFailed = false;
-      let result = '';
-      try {
-        result = await executeWeb3Tool(tc.function.name, args);
+    // ── Parallel tool execution (Plan-then-Execute core) ──
+    // When the LLM batches multiple tool_calls in one turn (Plan phase), we
+    // run them all concurrently via Promise.all. If the model only returns one
+    // (legacy ReAct behaviour or Reflect-phase follow-up), Promise.all([single])
+    // is equivalent to the old `await` — backwards-compatible with no risk.
+    //
+    // Order semantics:
+    //   - Each tool's `active` event is emitted synchronously before its async
+    //     fetch starts, so the frontend timeline shows them all in flight
+    //     simultaneously (correctly representing parallelism).
+    //   - `completed`/`failed` events fire as each individual fetch settles —
+    //     fast tools resolve first regardless of array position.
+    //   - Returned tool messages preserve the original tool_calls[] order so
+    //     OpenAI's tool_call_id pairing stays correct.
+    const startedTurnTs = Date.now();
+    if (resp.tool_calls.length > 1) {
+      console.error(`[web3-agent] turn=${turn} parallel batch of ${resp.tool_calls.length} tools: ${resp.tool_calls.map(t => t.function.name).join(', ')}`);
+    }
+    const toolMsgs: LLMMessage[] = await Promise.all(
+      resp.tool_calls.map(async (tc) => {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+        // Detect the case where DeepSeek ignored our "skip search_crypto_asset"
+        // instruction and called it anyway. Useful for spotting prompt-following
+        // regressions when the model is upgraded.
+        if (hint && tc.function.name === 'search_crypto_asset') {
+          console.error(
+            `[web3-agent] WARN: LLM called search_crypto_asset despite pre-resolved hint (id=${hint.coingeckoId}). Optimization missed; check user-prompt wording.`,
+          );
+        }
+        console.error(`[web3-agent] turn=${turn} tool="${tc.function.name}" args=${JSON.stringify(args)}`);
+        // Frontend Process panel stage event: 'active' before the tool runs.
+        // For parallel batches, all 'active' events fire (near-)simultaneously,
+        // which is what we want — the timeline reflects real parallelism.
+        const stageTitle = titleForTool(tc.function.name);
+        emitStageEvent({
+          _evt: 'web3_stage',
+          stage: tc.function.name,
+          title_en: stageTitle.en,
+          title_zh: stageTitle.zh,
+          state: 'active',
+          argsData: args,
+        });
+        const stageStartMs = Date.now();
+        let toolFailed = false;
+        let result = '';
         try {
-          const parsedCheck = JSON.parse(result);
-          if (parsedCheck && typeof parsedCheck === 'object' && parsedCheck.error) {
-            toolFailed = true;
+          result = await executeWeb3Tool(tc.function.name, args);
+          try {
+            const parsedCheck = JSON.parse(result);
+            if (parsedCheck && typeof parsedCheck === 'object' && parsedCheck.error) {
+              toolFailed = true;
+            }
+          } catch { /* non-JSON result is fine */ }
+        } catch (toolErr) {
+          toolFailed = true;
+          result = JSON.stringify({ error: (toolErr as Error).message });
+        }
+        const stageDurMs = Date.now() - stageStartMs;
+        emitStageEvent({
+          _evt: 'web3_stage',
+          stage: tc.function.name,
+          title_en: stageTitle.en,
+          title_zh: stageTitle.zh,
+          state: toolFailed ? 'failed' : 'completed',
+          durationMs: stageDurMs,
+          summary: toolFailed ? undefined : summarizeToolResult(tc.function.name, result),
+          rawData: toolFailed ? undefined : buildRawDataForCard(tc.function.name, result),
+        });
+        // Side-effect updates on shared accumulators. Safe under Promise.all
+        // because all updates are either monotonic (push, ??=) or last-write-
+        // wins on independent fields. We never have two concurrent tools both
+        // setting `resolvedId` or `spotPriceUsd` (search_crypto_asset and
+        // get_token_price_and_market are typically the only writers, and they
+        // touch the field at most once each via the `||=` / `??=` guards).
+        toolsUsed.push(tc.function.name);
+        try {
+          const parsed = JSON.parse(result);
+          if (tc.function.name === 'search_crypto_asset' && parsed.id) {
+            resolvedId = resolvedId || parsed.id;
+            resolvedAssets.push({ id: parsed.id, symbol: parsed.symbol, name: parsed.name });
           }
-        } catch { /* non-JSON result is fine */ }
-      } catch (toolErr) {
-        toolFailed = true;
-        result = JSON.stringify({ error: (toolErr as Error).message });
-      }
-      const stageDurMs = Date.now() - stageStartMs;
-      emitStageEvent({
-        _evt: 'web3_stage',
-        stage: tc.function.name,
-        title_en: stageTitle.en,
-        title_zh: stageTitle.zh,
-        state: toolFailed ? 'failed' : 'completed',
-        durationMs: stageDurMs,
-        summary: toolFailed ? undefined : summarizeToolResult(tc.function.name, result),
-      });
-      toolsUsed.push(tc.function.name);
+          if (tc.function.name === 'get_token_price_and_market' && Array.isArray(parsed) && parsed[0]?.price_usd) {
+            spotPriceUsd = spotPriceUsd ?? parsed[0].price_usd;
+            if (!resolvedId && parsed[0].id) { resolvedId = parsed[0].id; resolvedAssets.push({ id: parsed[0].id, symbol: parsed[0].symbol, name: parsed[0].name }); }
+          }
+        } catch { /* ignore */ }
 
-      try {
-        const parsed = JSON.parse(result);
-        if (tc.function.name === 'search_crypto_asset' && parsed.id) {
-          resolvedId = resolvedId || parsed.id;
-          resolvedAssets.push({ id: parsed.id, symbol: parsed.symbol, name: parsed.name });
-        }
-        if (tc.function.name === 'get_token_price_and_market' && Array.isArray(parsed) && parsed[0]?.price_usd) {
-          spotPriceUsd = spotPriceUsd ?? parsed[0].price_usd;
-          if (!resolvedId && parsed[0].id) { resolvedId = parsed[0].id; resolvedAssets.push({ id: parsed[0].id, symbol: parsed[0].symbol, name: parsed[0].name }); }
-        }
-      } catch { /* ignore */ }
+        if (tc.function.name === 'get_global_market_overview') inferredIntent = 'global_scan';
+        else if (tc.function.name === 'get_institutional_holdings') inferredIntent = 'treasury_scan';
+        else if (tc.function.name === 'get_exchange_rankings') inferredIntent = 'exchange_scan';
+        else if (tc.function.name === 'get_market_rankings' || tc.function.name === 'get_trending_coins') inferredIntent = 'market_scan';
+        else if (tc.function.name === 'get_category_coins') inferredIntent = 'category_scan';
+        else if (tc.function.name === 'get_onchain_pools') inferredIntent = 'onchain_scan';
+        else if (tc.function.name === 'get_nft_collection') inferredIntent = 'nft_scan';
 
-      if (tc.function.name === 'get_global_market_overview') inferredIntent = 'global_scan';
-      else if (tc.function.name === 'get_institutional_holdings') inferredIntent = 'treasury_scan';
-      else if (tc.function.name === 'get_exchange_rankings') inferredIntent = 'exchange_scan';
-      else if (tc.function.name === 'get_market_rankings' || tc.function.name === 'get_trending_coins') inferredIntent = 'market_scan';
-      else if (tc.function.name === 'get_category_coins') inferredIntent = 'category_scan';
-      else if (tc.function.name === 'get_onchain_pools') inferredIntent = 'onchain_scan';
-      else if (tc.function.name === 'get_nft_collection') inferredIntent = 'nft_scan';
-
-      toolMsgs.push({ role: 'tool', tool_call_id: tc.id, content: result });
+        return { role: 'tool' as const, tool_call_id: tc.id, content: result };
+      }),
+    );
+    if (resp.tool_calls.length > 1) {
+      console.error(`[web3-agent] turn=${turn} parallel batch finished in ${((Date.now() - startedTurnTs) / 1000).toFixed(2)}s`);
     }
     messages.push(...toolMsgs);
+
+    // ── Run expansion rules ─────────────────────────────────────────────
+    // Each rule decides on its own whether to fire based on (a) what the
+    // LLM called this turn and (b) what's in the recent tool messages. See
+    // EXPANSION_RULES above for the rule definitions.
+    await runExpansionRules({
+      calledThisTurn: new Set(resp.tool_calls.map((tc) => tc.function.name)),
+      recentToolMsgs: toolMsgs,
+    });
   }
 
   if (!finalReport) finalReport = '## Web3 数据\n数据收集完成，但未能生成最终报告。';

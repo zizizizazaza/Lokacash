@@ -239,6 +239,11 @@ export type Web3StageEvent = {
   summary?: string;
   /** Error message when state=failed. */
   error?: string;
+  /** Tool input args (the LLM's tool_call.arguments). Powers ToolCallPills. */
+  argsData?: any;
+  /** Raw tool output (parsed JSON). Powers per-tool inline cards. Trimmed
+   *  server-side to bound payload size. */
+  rawData?: any;
 };
 
 /**
@@ -358,28 +363,41 @@ export async function runWeb3ResearchQuery(
       while ((nl = stderrBuf.indexOf('\n')) !== -1) {
         const line = stderrBuf.slice(0, nl);
         stderrBuf = stderrBuf.slice(nl + 1);
-        if (!onStage) continue;
-        if (!line.startsWith(STAGE_PREFIX)) continue;
-        try {
-          const ev = JSON.parse(line.slice(STAGE_PREFIX.length));
-          if (ev && ev._evt === 'web3_stage' && typeof ev.stage === 'string') {
-            try {
-              onStage({
-                stage: ev.stage,
-                title_en: String(ev.title_en || ev.stage),
-                title_zh: String(ev.title_zh || ev.stage),
-                state: (ev.state || 'active') as Web3StageEvent['state'],
-                durationMs: typeof ev.durationMs === 'number' ? ev.durationMs : undefined,
-                summary: typeof ev.summary === 'string' ? ev.summary : undefined,
-                error: typeof ev.error === 'string' ? ev.error : undefined,
-              });
-            } catch (cbErr) {
-              // Subscriber raised — log and keep the agent run alive.
-              console.warn(`[web3Research] onStage subscriber threw: ${(cbErr as Error).message}`);
+        // Stage-event lines (frontend Process panel timeline)
+        if (line.startsWith(STAGE_PREFIX)) {
+          if (!onStage) continue;
+          try {
+            const ev = JSON.parse(line.slice(STAGE_PREFIX.length));
+            if (ev && ev._evt === 'web3_stage' && typeof ev.stage === 'string') {
+              try {
+                onStage({
+                  stage: ev.stage,
+                  title_en: String(ev.title_en || ev.stage),
+                  title_zh: String(ev.title_zh || ev.stage),
+                  state: (ev.state || 'active') as Web3StageEvent['state'],
+                  durationMs: typeof ev.durationMs === 'number' ? ev.durationMs : undefined,
+                  summary: typeof ev.summary === 'string' ? ev.summary : undefined,
+                  error: typeof ev.error === 'string' ? ev.error : undefined,
+                  argsData: ev.argsData ?? undefined,
+                  rawData: ev.rawData ?? undefined,
+                });
+              } catch (cbErr) {
+                // Subscriber raised — log and keep the agent run alive.
+                console.warn(`[web3Research] onStage subscriber threw: ${(cbErr as Error).message}`);
+              }
             }
+          } catch {
+            /* malformed JSON line, skip */
           }
-        } catch {
-          /* malformed JSON line, skip */
+          continue;
+        }
+        // Diagnostic lines from the child process (web3-cli / web3-agent
+        // namespaces). Forward to parent stdout so they show up in log files
+        // and ops dashboards — without this, the child's reasoning trace
+        // (active expansion, parallel batches, prompt-following warnings,
+        // etc.) is invisible because stderr is only retained in-memory.
+        if (line.startsWith('[web3-agent]') || line.startsWith('[web3-cli]')) {
+          console.log(line);
         }
       }
     });

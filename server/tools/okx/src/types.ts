@@ -11,7 +11,8 @@ export type OkxIntent =
   | 'news_latest'
   | 'news_by_coin'
   | 'coin_sentiment'
-  | 'news_bundle';
+  | 'news_bundle'
+  | 'liquidations';
 
 export type OkxRequest = {
   intent: OkxIntent;
@@ -82,7 +83,16 @@ export type OkxInstrument = {
   quoteCcy?: string;
   settleCcy?: string;
   state?: string;
-  ctType?: string;
+  /** "linear" (USDT/USDC-margined) or "inverse" (coin-margined like BTC-USD-SWAP). */
+  ctType?: 'linear' | 'inverse' | string;
+  /** Contract value — number of base ccy per contract for linear (e.g. 0.01 BTC),
+   *  or USD per contract for inverse (e.g. 100 USD/contract). Returned as a
+   *  string by OKX, parsed to number on use. */
+  ctVal?: string;
+  /** Currency `ctVal` is denominated in. For BTC-USDT-SWAP this is "BTC".
+   *  For inverse BTC-USD-SWAP this is "USD". Used to disambiguate linear
+   *  vs inverse notional formulas. */
+  ctValCcy?: string;
   listTime?: string;
   expTime?: string;
 };

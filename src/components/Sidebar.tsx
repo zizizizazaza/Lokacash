@@ -174,6 +174,11 @@ export const Sidebar: React.FC<{
     socket.on('agent:chat:consensus_done', handleSocketDone);
     socket.on('agent:chat:stream_done', handleSocketDone);
     socket.on('agent:chat:error', handleSocketDone);
+    // User-initiated stop: backend acknowledges via agent:chat:cancelled, and
+    // every isAborted() early-return branch also fires this event. Without
+    // listening here, the spinner next to a stopped session keeps spinning
+    // because no stream_done ever arrives.
+    socket.on('agent:chat:cancelled', handleSocketDone);
 
     return () => {
       window.removeEventListener('session-started', handleStart);
@@ -184,6 +189,7 @@ export const Sidebar: React.FC<{
       socket.off('agent:chat:consensus_done', handleSocketDone);
       socket.off('agent:chat:stream_done', handleSocketDone);
       socket.off('agent:chat:error', handleSocketDone);
+      socket.off('agent:chat:cancelled', handleSocketDone);
     };
   }, []);
 

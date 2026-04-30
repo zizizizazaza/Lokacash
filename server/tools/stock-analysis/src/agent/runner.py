@@ -643,6 +643,22 @@ def run_agent_loop(
                     round_metrics["confidence_score"],
                     round_metrics["new_evidence_gain"],
                 )
+                if bool(loop_controls.get("suppress_final_answer", False)):
+                    logger.info(
+                        "Suppressing final answer generation at step %d (data_only mode)",
+                        step + 1,
+                    )
+                    return RunLoopResult(
+                        success=True,
+                        content="",
+                        tool_calls_log=tool_calls_log,
+                        total_steps=step + 1,
+                        total_tokens=total_tokens,
+                        provider=provider_used,
+                        models_used=models_used,
+                        error=None,
+                        messages=messages,
+                    )
                 if progress_callback:
                     progress_callback({
                         "type": "thinking",
@@ -806,7 +822,10 @@ def _execute_tools(
     if len(tool_calls) == 1:
         tc = tool_calls[0]
         if progress_callback:
-            progress_callback({"type": "tool_start", "step": step, "tool": tc.name})
+            # Pass tc.arguments through as `args` so the JSONL event stream
+            # can carry per-tool input (e.g. stock_code) for the frontend's
+            # pill subtitle ("get_realtime_quote · BABA").
+            progress_callback({"type": "tool_start", "step": step, "tool": tc.name, "args": tc.arguments})
         timeout_triggered = False
         if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0:
             pool = ThreadPoolExecutor(max_workers=1)
@@ -848,7 +867,7 @@ def _execute_tools(
     else:
         for tc in tool_calls:
             if progress_callback:
-                progress_callback({"type": "tool_start", "step": step, "tool": tc.name})
+                progress_callback({"type": "tool_start", "step": step, "tool": tc.name, "args": tc.arguments})
 
         pool = ThreadPoolExecutor(max_workers=min(len(tool_calls), 5))
         timeout_triggered = False
