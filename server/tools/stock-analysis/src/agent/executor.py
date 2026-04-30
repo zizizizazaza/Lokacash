@@ -650,6 +650,7 @@ class AgentExecutor:
             "low_gain_threshold": 0.08,
             "low_gain_streak_limit": 2,
             "min_steps_before_stop": execution_policy["min_steps"],
+            "suppress_final_answer": bool((context or {}).get("data_only", False)),
         }
 
         result = self._run_loop(

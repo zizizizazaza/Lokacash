@@ -118,28 +118,65 @@ def progress_callback(event: dict):
             "message": event.get("message", ""),
         })
     elif event_type == "tool_start":
-        emit_event({
+        # Pass through `args` (the tool input dict, e.g. {"stock_code": "BABA"})
+        # so the frontend can render a per-tool pill subtitle like
+        # "get_realtime_quote · BABA". Mirrors web3 CLI's __WEB3_STAGE__
+        # protocol and lets the same Web3ToolPill component render here.
+        evt = {
             "type": "tool_start",
             "step": event.get("step", 0),
             "tool": tool_name,
             "displayName": display_name,
-        })
+        }
+        args = event.get("args")
+        if args is not None:
+            evt["args"] = args
+        emit_event(evt)
     elif event_type == "tool_done":
-        emit_event({
+        # Pass through the parsed tool result so the frontend can render a
+        # per-tool result card (mirrors web3's rawData). Truncated downstream
+        # if the payload is large, but for typical stock tools <= 5KB it's
+        # cheaper to forward in full than to do per-tool extraction here.
+        evt = {
             "type": "tool_done",
             "step": event.get("step", 0),
             "tool": tool_name,
             "displayName": display_name,
             "success": event.get("success", True),
             "duration": event.get("duration", 0),
-        })
+        }
+        result_str = event.get("result_str", "")
+        # DEBUG (will remove): log to stderr so Node side can see Python's
+        # view of result_str. Helps diagnose why rawData is null in the chat.
+        import sys as _sys
+        _sys.stderr.write(
+            f"[DEBUG_TOOL_DONE] tool={tool_name} success={event.get('success')} "
+            f"result_str_type={type(result_str).__name__} "
+            f"result_str_len={len(result_str) if isinstance(result_str, str) else 'n/a'} "
+            f"result_str_preview={(result_str[:200] if isinstance(result_str, str) else str(result_str)[:200])!r}\n"
+        )
+        _sys.stderr.flush()
+        if event.get("success", True) and result_str:
+            try:
+                evt["result"] = json.loads(result_str)
+                _sys.stderr.write(f"[DEBUG_TOOL_DONE] tool={tool_name} -> evt['result'] SET, keys={list(evt['result'].keys()) if isinstance(evt['result'], dict) else type(evt['result']).__name__}\n")
+                _sys.stderr.flush()
+            except Exception as e:
+                # Result wasn't JSON — pass the truncated string as `rawText`
+                # so cards can still show something meaningful.
+                evt["rawText"] = result_str[:1500]
+                _sys.stderr.write(f"[DEBUG_TOOL_DONE] tool={tool_name} -> json.loads FAILED ({e}), set rawText\n")
+                _sys.stderr.flush()
+        else:
+            _sys.stderr.write(f"[DEBUG_TOOL_DONE] tool={tool_name} -> NEITHER set (success={event.get('success')} result_str_truthy={bool(result_str)})\n")
+            _sys.stderr.flush()
+        emit_event(evt)
 
         # Intercept tool returns to build [UI_METADATA]
         result_str = event.get("result_str", "")
         if event.get("success", True) and result_str:
             try:
                 import sys
-                import json
                 try:
                     parsed = json.loads(result_str)
                 except Exception:
@@ -315,7 +352,12 @@ def main():
             message=args.message,
             session_id=args.session_id,
             progress_callback=progress_callback,
-            context={"report_language": report_lang},
+            context={
+                "report_language": report_lang,
+                # SuperAgent performs the final cross-module synthesis already.
+                # Keep stock-agent in data-only mode to avoid duplicate writing.
+                "data_only": True,
+            },
         )
 
         emit_event({

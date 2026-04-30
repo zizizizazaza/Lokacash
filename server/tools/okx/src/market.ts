@@ -1,5 +1,5 @@
 import { okxGet } from './okxClient.js';
-import { resolveSpotInstId, resolveSwapInstId } from './instruments.js';
+import { getInstrumentsCache, resolveSpotInstId, resolveSwapInstId } from './instruments.js';
 import type {
   OkxCandleRow,
   OkxDerivativesSnapshot,
@@ -42,6 +42,164 @@ export async function fetchOpenInterest(
 ): Promise<OkxOpenInterest | null> {
   const rows = await okxGet<OkxOpenInterest[]>('/api/v5/public/open-interest', { instType, instId });
   return rows?.[0] || null;
+}
+
+/** OKX liquidation order row — V5 `/api/v5/public/liquidation-orders` returns
+ *  nested `{details: [{side, posSide, sz, bkPx, bkLoss, ts}, ...]}` per
+ *  instrument. The size (`sz`) is in CONTRACTS, NOT in coins — OKX SWAPs
+ *  have variable contract values (BTC-USDT-SWAP=0.01 BTC, ETH=0.1, alt
+ *  USDT-SWAPs typically =1, etc.). Without the per-instrument ctVal we
+ *  cannot precisely compute USD notional, so we approximate using
+ *  `sz * bkPx` and surface a hint to the LLM that "size is in contracts". */
+export interface OkxLiquidationDetailRow {
+  /** "buy" | "sell" — opposite-side fill that liquidated the position. */
+  side?: string;
+  /** "long" | "short" | "net" — actual position side that got wiped out.
+   *  In one-way mode this is "net" and we derive from `side` (sell = long
+   *  liquidation, buy = short liquidation). */
+  posSide?: string;
+  sz?: string;
+  bkPx?: string;     // bankruptcy price (REAL field name)
+  bkLoss?: string;   // bankruptcy loss
+  ts?: string;
+}
+
+export interface OkxLiquidationGroup {
+  instId: string;
+  instType?: string;
+  instFamily?: string;
+  uly?: string;
+  details?: OkxLiquidationDetailRow[];
+}
+
+/**
+ * Aggregate liquidation orders for a given base currency. Walks both SWAP
+ * (perp) and FUTURES instrument types and returns long/short notional totals,
+ * event count, plus the most recent N events for the LLM to read.
+ */
+export async function fetchLiquidationsAggregate(
+  baseCcy: string,
+  limit = 50,
+): Promise<{
+  baseCcy: string;
+  totalEvents: number;
+  longNotionalUsd: number;
+  shortNotionalUsd: number;
+  longCount: number;
+  shortCount: number;
+  recentEvents: Array<{ side: string; instId: string; notionalUsd: number; price: number; ts: number }>;
+  windowHours: number;
+  logs: string[];
+}> {
+  const base = baseCcy.toUpperCase();
+  const logs: string[] = [];
+  const windowMs = 24 * 60 * 60 * 1000; // OKX returns ~24h of liquidations
+  const aggregate = {
+    long: { notionalUsd: 0, count: 0 },
+    short: { notionalUsd: 0, count: 0 },
+  };
+  const events: Array<{ side: string; instId: string; notionalUsd: number; price: number; ts: number }> = [];
+
+  // Pre-warm the instruments cache so we can look up ctVal per instId
+  // without hitting OKX once per liquidation event.
+  let instrumentsCache: Awaited<ReturnType<typeof getInstrumentsCache>> | null = null;
+  try {
+    instrumentsCache = await getInstrumentsCache();
+  } catch (err) {
+    logs.push(`instruments_err:${(err as Error)?.message || 'unknown'}`);
+  }
+
+  /**
+   * Compute USD notional for one liquidation event.
+   *
+   *   • Linear (USDT/USDC-margined SWAP): ctValCcy === baseCcy.
+   *     notional_usd = sz × ctVal × bkPx
+   *     — sz is in contracts, ctVal is the base-ccy per contract
+   *       (BTC-USDT-SWAP: 0.01 BTC, ETH: 0.1, XRP: 100, DOGE: 1000…).
+   *
+   *   • Inverse (USD-margined SWAP, e.g. BTC-USD-SWAP): ctValCcy === 'USD'.
+   *     notional_usd = sz × ctVal
+   *     — ctVal is already USD per contract (e.g. 100 USD), price not used.
+   *
+   *   • Unknown contract / cache miss: fall back to sz × bkPx (assumes
+   *     ctVal=1 — accurate for SOL/XRP-style alts, off for BTC/ETH).
+   */
+  const computeNotional = (instId: string, sz: number, bkPx: number): number => {
+    const inst = instrumentsCache?.swap.get(instId);
+    const ctValStr = inst?.ctVal;
+    const ctValCcy = (inst?.ctValCcy || '').toUpperCase();
+    const ctVal = ctValStr != null ? Number(ctValStr) : NaN;
+    if (Number.isFinite(ctVal) && ctVal > 0) {
+      // Inverse contract: ctVal is denominated in the quote (USD).
+      if (ctValCcy === 'USD' || ctValCcy === 'USDT' || ctValCcy === 'USDC') {
+        return sz * ctVal;
+      }
+      // Linear contract (USDT/USDC-margined): ctVal in base ccy.
+      return sz * ctVal * bkPx;
+    }
+    // Cache miss / unknown contract — best-effort fallback.
+    return sz * bkPx;
+  };
+
+  // Pull both SWAP and FUTURES; OKX `liquidation-orders` requires uly OR
+  // instFamily. Easiest path: filter client-side by instId prefix.
+  const instTypes: Array<'SWAP' | 'FUTURES'> = ['SWAP', 'FUTURES'];
+  await Promise.all(instTypes.map(async (instType) => {
+    try {
+      const groups = await okxGet<OkxLiquidationGroup[]>('/api/v5/public/liquidation-orders', {
+        instType,
+        state: 'filled',
+        uly: `${base}-USDT`, // OKX liquidation-orders accepts uly (underlying) for filtering
+        limit: 100,
+      });
+      for (const g of groups || []) {
+        // Filter by instId prefix if uly filter didn't bite.
+        if (!g.instId || !g.instId.toUpperCase().startsWith(base)) continue;
+        for (const d of g.details || []) {
+          // V5 fields: `sz` (contracts) and `bkPx` (bankruptcy price).
+          // The fillPx/fillSz used here previously were a misread of the
+          // OKX docs — they don't exist on this endpoint, so every event
+          // got silently skipped (Number.isFinite(NaN) → false).
+          const sz = toNum(d.sz);
+          const px = toNum(d.bkPx);
+          const ts = toNum(d.ts);
+          if (!Number.isFinite(sz) || !Number.isFinite(px) || sz <= 0 || px <= 0) continue;
+          // Position side that got liquidated. In hedge mode posSide is
+          // already "long"/"short". In one-way mode it's "net", and we
+          // derive from `side`: sell = long got liquidated (forced to sell
+          // out), buy = short got liquidated (forced to buy back).
+          let sideKey: 'long' | 'short' | null = null;
+          if (d.posSide === 'long' || d.posSide === 'short') {
+            sideKey = d.posSide;
+          } else if (d.side === 'sell') {
+            sideKey = 'long';
+          } else if (d.side === 'buy') {
+            sideKey = 'short';
+          }
+          if (!sideKey) continue;
+          const notional = computeNotional(g.instId, sz, px);
+          aggregate[sideKey].notionalUsd += notional;
+          aggregate[sideKey].count += 1;
+          events.push({ side: sideKey, instId: g.instId, notionalUsd: notional, price: px, ts });
+        }
+      }
+    } catch (err) {
+      logs.push(`liq_${instType.toLowerCase()}_err:${(err as Error)?.message || 'unknown'}`);
+    }
+  }));
+
+  events.sort((a, b) => b.ts - a.ts);
+  return {
+    baseCcy: base,
+    totalEvents: aggregate.long.count + aggregate.short.count,
+    longNotionalUsd: aggregate.long.notionalUsd,
+    shortNotionalUsd: aggregate.short.notionalUsd,
+    longCount: aggregate.long.count,
+    shortCount: aggregate.short.count,
+    recentEvents: events.slice(0, limit),
+    windowHours: windowMs / (60 * 60 * 1000),
+    logs,
+  };
 }
 
 export function tickerToSnapshot(t: OkxTicker): OkxSpotSnapshot {

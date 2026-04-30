@@ -12,6 +12,11 @@ import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
 import { isCryptoSymbol, isAmbiguousSymbol, filterOutCryptoTickers } from '../constants/cryptoAssets.js';
 import {
+  validateTickersAgainstCoinGecko,
+  isHighConfidenceCryptoMatch,
+  type CryptoTickerMatch,
+} from '../services/routingValidator.service.js';
+import {
   formatConsensusAgentLabel,
   runConsensusEngine,
   sortConsensusAgentEntries,
@@ -1251,10 +1256,22 @@ Text: "${query}"`;
         console.log(`[agent:chat:stop] User-initiated abort for session ${sid}`);
         ctrl.abort();
         chatAbortControllers.delete(sid);
+        // Acknowledge to ALL listening clients (chat thread + sidebar) so
+        // their loading indicators clear immediately. The downstream abort
+        // branches in agent:chat will also call emitStreamCancelled when they
+        // wind down — duplicate emission is harmless (the client treats this
+        // as idempotent).
+        const sockUserId = (socket as any).userId as string | undefined;
+        if (sockUserId) {
+          emitToUser(sockUserId, 'agent:chat:cancelled', {
+            sessionId: sid,
+            reason: 'user_stop',
+          });
+        }
       }
     });
 
-    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[]; assetHint?: { sym?: string; name?: string; kind?: string; coingeckoId?: string } }) => {
+    socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[]; assetHint?: { sym?: string; name?: string; kind?: string; coingeckoId?: string }; domain?: 'stocks' | 'web3' }) => {
       const userContent = typeof data?.content === 'string' ? data.content : '';
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
@@ -1619,7 +1636,12 @@ Text: "${query}"`;
         typeof (incomingHint as any)?.coingeckoId === 'string'
           ? ((incomingHint as any).coingeckoId as string).trim()
           : '';
-      const web3Hint =
+      // Mutable so Layer 2 (CoinGecko ticker validator) can populate it when the
+      // LLM router put a long-tail crypto into analysis.tickers without triggering
+      // the frontend assetHint path (e.g. user typed "分析pengu").
+      let web3Hint:
+        | { coingeckoId: string; symbol?: string; name?: string }
+        | null =
         incomingHint?.kind === 'crypto' && hintCgId
           ? { coingeckoId: hintCgId, symbol: hintSym || undefined, name: hintName || undefined }
           : null;
@@ -1653,6 +1675,103 @@ Text: "${query}"`;
         console.log(
           `[agent:chat] assetHint override applied: sym=${hintSym} name=${hintName || '∅'} cgId=${hintCgId || '∅'} → web3.needed=true, analysis=false${searchOn ? '' : ', search=on'}${web3Hint ? ' [will skip search_crypto_asset]' : ' [no cgId — agent will call search]'}`,
         );
+      }
+
+      // ── domain override (explicit Stocks/Web3 page selection) ─────────────
+      // The home page Stocks⇆Web3 toggle is an explicit user signal: whatever
+      // the user is asking, they want it answered as a {stocks|web3} query.
+      // This trumps the LLM router's guess. Without this, "分析 PENGU" in the
+      // Web3 tab still got routed to the equity datasource pipeline (PENGU is
+      // not in the hardcoded crypto whitelist), wasting 30+s on invalid_symbol
+      // before falling back to web search. Symmetric: a small-cap A-share
+      // asked in the Stocks tab won't get mis-routed to web3 just because
+      // the LLM doesn't recognize the ticker.
+      //
+      // Skipped when:
+      //   - no domain provided (older clients, direct API, history restore)
+      //   - assetHint already forced web3 (frontend trending click)
+      //   - simpleChat path
+      const incomingDomain = data.domain === 'stocks' || data.domain === 'web3' ? data.domain : null;
+      // Collected by domain override (web3 branch) for downstream Layer 2 to
+      // resolve. Empty when domain is stocks / unset / when domain didn't
+      // need to lift any tickers.
+      let liftedWeb3Tickers: string[] = [];
+      if (incomingDomain && !plan.isSimpleChat && !web3Hint) {
+        const cleanDomainSearchQuery = (raw: string | undefined): string => {
+          if (!raw) return '';
+          if (incomingDomain === 'web3') {
+            // Strip equity-flavored words the LLM may have injected.
+            return raw
+              .replace(/\bstocks?\b/gi, '')
+              .replace(/\bequit(?:y|ies)\b/gi, '')
+              .replace(/\bshares?\b/gi, '')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
+          // domain === 'stocks'
+          return raw
+            .replace(/\bcrypto(?:currency|currencies)?\b/gi, '')
+            .replace(/\btokens?\b/gi, '')
+            .replace(/\bcoins?\b/gi, '')
+            .replace(/\bweb3\b/gi, '')
+            .replace(/\bon[-\s]?chain\b/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        };
+
+        if (incomingDomain === 'web3') {
+          // Pull any tickers the LLM put into analysis/simulate into the web3
+          // query so the downstream web3 agent has something to resolve.
+          const liftedTickers = [
+            ...(plan.capabilities.analysis.tickers || []),
+            ...(plan.capabilities.simulate?.tickers || []),
+          ].map((t) => t.toUpperCase()).filter(Boolean);
+          const uniqueLifted = [...new Set(liftedTickers)];
+          liftedWeb3Tickers = uniqueLifted;
+
+          const existingWeb3Query = (plan.capabilities.web3?.query || '').trim();
+          const liftedHint = uniqueLifted.length > 0 ? uniqueLifted.join(' ') + ' crypto price market' : '';
+          const fallbackQuery = existingWeb3Query || liftedHint || `${userContent} crypto price market`;
+
+          plan.capabilities.web3 = {
+            needed: true,
+            query: fallbackQuery,
+          };
+          plan.capabilities.analysis = { needed: false, tickers: undefined };
+          if (plan.capabilities.simulate) {
+            plan.capabilities.simulate = { needed: false, tickers: undefined };
+          }
+          // Keep search on for sentiment/news, but scrub equity-flavored words.
+          const dirtySearch = plan.capabilities.search.query;
+          const cleanSearch = cleanDomainSearchQuery(dirtySearch);
+          plan.capabilities.search = {
+            needed: true,
+            query: cleanSearch || (uniqueLifted.length > 0 ? `${uniqueLifted.join(' ')} crypto sentiment news` : `${userContent} crypto sentiment news`),
+            showXAccountProfile: !!plan.capabilities.search?.showXAccountProfile,
+          };
+          if (plan.queryType === 'general' || !plan.queryType) {
+            plan.queryType = 'market-brief';
+          }
+          console.log(
+            `[agent:chat] domain override → web3: lifted_tickers=[${uniqueLifted.join(',') || '∅'}] analysis=off simulate=off web3.query="${(plan.capabilities.web3.query || '').slice(0, 80)}"`,
+          );
+        } else {
+          // domain === 'stocks'
+          plan.capabilities.web3 = { needed: false };
+          // search stays on but scrub web3-flavored words.
+          const dirtySearch = plan.capabilities.search.query;
+          const cleanSearch = cleanDomainSearchQuery(dirtySearch);
+          if (plan.capabilities.search.needed) {
+            plan.capabilities.search = {
+              needed: true,
+              query: cleanSearch || userContent,
+              showXAccountProfile: !!plan.capabilities.search?.showXAccountProfile,
+            };
+          }
+          console.log(
+            `[agent:chat] domain override → stocks: web3=off, analysis untouched (tickers=[${(plan.capabilities.analysis.tickers || []).join(',') || '∅'}])`,
+          );
+        }
       }
 
       // Guests are capped at the simple-chat path regardless of what the
@@ -1896,7 +2015,16 @@ Text: "${query}"`;
       }
 
       // ── Layer 1: strip known crypto symbols from analysis.tickers ──────────
-      if (plan.capabilities.analysis.needed && plan.capabilities.analysis.tickers?.length) {
+      // Skipped when an explicit domain is set: the home toggle is the source
+      // of truth, not the hardcoded whitelist. In stocks mode the user wants
+      // BTC asked as "what's BTC doing to equities" answered as a stocks
+      // query (search-only fallback); in web3 mode the domain override above
+      // already moved everything to web3, so Layer 1 has nothing to do.
+      if (
+        !incomingDomain &&
+        plan.capabilities.analysis.needed &&
+        plan.capabilities.analysis.tickers?.length
+      ) {
         const cryptoHits = plan.capabilities.analysis.tickers.filter(isCryptoSymbol);
         if (cryptoHits.length > 0) {
           const filtered = filterOutCryptoTickers(plan.capabilities.analysis.tickers);
@@ -1917,11 +2045,69 @@ Text: "${query}"`;
         }
       }
 
+      // ── Layer 2: web3 token resolver / hint accelerator ────────────────────
+      // After the domain override (or a frontend assetHint), web3.needed is
+      // true but we may still lack a CoinGecko id for the target token. The
+      // web3 agent would otherwise spend ~7s on its own search_crypto_asset
+      // turn. Resolve here in parallel with the rest of the routing pipeline
+      // and inject the result into web3Hint so the agent can skip that turn.
+      //
+      // Sources of candidate tickers, in priority order:
+      //   a) liftedWeb3Tickers — symbols moved out of analysis/simulate by
+      //      the domain override (most authoritative, the LLM already named
+      //      these as the subject).
+      //   b) analysis.tickers — when no domain was provided (legacy/API),
+      //      fall back to the same logic the previous Layer 2 used.
+      //
+      // Skip when:
+      //   - simpleChat / guest path
+      //   - assetHint already supplied a CoinGecko id (web3Hint set)
+      //   - web3 not needed (stocks domain or LLM said no crypto)
+      //   - no candidates to resolve
+      if (
+        !plan.isSimpleChat &&
+        !isGuest &&
+        !web3Hint &&
+        plan.capabilities.web3?.needed
+      ) {
+        const candidates: string[] =
+          liftedWeb3Tickers.length > 0
+            ? liftedWeb3Tickers
+            : (plan.capabilities.analysis.tickers || []);
+
+        if (candidates.length > 0) {
+          const layer2Started = Date.now();
+          const checks = await validateTickersAgainstCoinGecko(candidates);
+          const matched = checks.find((c) => isHighConfidenceCryptoMatch(c.cgMatch));
+          if (matched && matched.cgMatch) {
+            const top: CryptoTickerMatch = matched.cgMatch;
+            web3Hint = { coingeckoId: top.id, symbol: top.symbol, name: top.name };
+            // Tighten web3.query around the resolved token so the agent has a
+            // clean handle even if the LLM's original query was vague.
+            plan.capabilities.web3 = {
+              needed: true,
+              query: `${top.symbol} ${top.name} crypto price market analysis`,
+            };
+            console.log(
+              `[routing:layer2] CoinGecko resolver hit: ${matched.ticker} → ${top.id} (rank=${top.marketCapRank}, elapsed=${Date.now() - layer2Started}ms) — web3Hint injected`,
+            );
+          } else {
+            console.log(
+              `[routing:layer2] CoinGecko resolver miss for [${candidates.join(', ')}] (elapsed=${Date.now() - layer2Started}ms) — web3 agent will run search_crypto_asset itself`,
+            );
+          }
+        }
+      }
+
       // ── Layer 3: ambiguous ticker → ask user to clarify (crypto vs stock) ──
-      const allMentionedTickers = [
-        ...(plan.capabilities.analysis.tickers || []),
-        ...(plan.capabilities.simulate?.tickers || []),
-      ];
+      // Skipped when an explicit domain is set: the user already chose the
+      // domain on the home page, so COIN/MSTR-style ambiguity is resolved.
+      const allMentionedTickers = !incomingDomain
+        ? [
+            ...(plan.capabilities.analysis.tickers || []),
+            ...(plan.capabilities.simulate?.tickers || []),
+          ]
+        : [];
       const ambiguous = allMentionedTickers.find(t => isAmbiguousSymbol(t) && !plan.capabilities.web3?.needed);
       if (ambiguous) {
         const asset = ambiguous.toUpperCase();
@@ -2034,6 +2220,7 @@ Text: "${query}"`;
 
           const simpleDur = Math.round((Date.now() - simpleStart) / 1000);
           if (isAborted()) {
+            emitter.emitStreamCancelled();
             activeChatSessions.delete(sessionId);
         chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
@@ -2134,6 +2321,12 @@ Text: "${query}"`;
       let finalWeb3Providers: NonNullable<Web3ResearchResult['raw']['providers']> | undefined;
       let finalWeb3Assets: NonNullable<Web3ResearchResult['raw']['assets']> | undefined;
       let finalWeb3Via: Web3ResearchResult['raw']['via'];
+      // Snapshot of the per-tool sub-stage timeline (one entry per stage:
+      // title, state, duration, summary, rawData). Surfaced both at runtime
+      // (live updates while tools run) and persisted into thinkingFlow so
+      // history-restored sessions can rebuild the Process panel + recompute
+      // the LangGraph-style "X tools · Y sources" pill correctly.
+      let finalWeb3Stages: any[] = [];
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
@@ -2295,6 +2488,8 @@ Text: "${query}"`;
           durationMs?: number;
           summary?: string;
           error?: string;
+          argsData?: any;
+          rawData?: any;
         }> = [];
         const web3OnStage = (event: import('../services/web3Research.service.js').Web3StageEvent) => {
           const idx = web3Stages.findIndex((s) => s.stage === event.stage && s.state === 'active');
@@ -2308,6 +2503,7 @@ Text: "${query}"`;
               title_zh: event.title_zh,
               state: 'active' as const,
               startedAt: Date.now(),
+              argsData: event.argsData,
             };
             if (dupIdx >= 0) web3Stages[dupIdx] = entry;
             else web3Stages.push(entry);
@@ -2318,6 +2514,7 @@ Text: "${query}"`;
               durationMs: event.durationMs,
               summary: event.summary,
               error: event.error,
+              rawData: event.rawData ?? web3Stages[idx].rawData,
             };
           } else {
             // Completion event without a matching active (shouldn't happen, but
@@ -2331,6 +2528,8 @@ Text: "${query}"`;
               durationMs: event.durationMs,
               summary: event.summary,
               error: event.error,
+              argsData: event.argsData,
+              rawData: event.rawData,
             });
           }
           emitter.emitModule('web3', 'active', {
@@ -2344,6 +2543,8 @@ Text: "${query}"`;
               durationMs: s.durationMs,
               summary: s.summary,
               error: s.error,
+              argsData: s.argsData,
+              rawData: s.rawData,
             })),
           });
         };
@@ -2362,6 +2563,19 @@ Text: "${query}"`;
               finalWeb3Providers = result.raw.providers;
               finalWeb3Assets = result.raw.assets;
               finalWeb3Via = result.raw.via;
+              // Snapshot the stage timeline for persistence + tools-count
+              // recomputation on history restore.
+              finalWeb3Stages = web3Stages.map((s) => ({
+                stage: s.stage,
+                title_en: s.title_en,
+                title_zh: s.title_zh,
+                state: s.state,
+                durationMs: s.durationMs,
+                summary: s.summary,
+                error: s.error,
+                argsData: s.argsData,
+                rawData: s.rawData,
+              }));
               const focusTokens = web3FocusTokens(result.raw);
 
               // ── Push TokenCard to client (single-asset crypto intents) ──
@@ -2422,6 +2636,8 @@ Text: "${query}"`;
                   durationMs: s.durationMs,
                   summary: s.summary,
                   error: s.error,
+                  argsData: s.argsData,
+                  rawData: s.rawData,
                 })),
               });
               return { type: 'WEB3', data: result.report };
@@ -2443,7 +2659,46 @@ Text: "${query}"`;
           { id: 'technical', label: 'Technical analysis', status: 'pending', result: [] as any[] },
           { id: 'sentiment', label: 'Sentiment analysis', status: 'pending' }
         ];
-        emitter.emitModule('analysis', 'active', { stages: analysisStages });
+        // Per-tool stages — mirrors web3's `Web3ModuleData.stages`. Each tool
+        // call emits one entry that progresses 'active' → 'completed'/'failed'
+        // with argsData/rawData, so the frontend can render per-tool pills +
+        // result cards (Web3ToolPill / Web3ToolResultCard) just like web3
+        // mode. The legacy 3-section `stages` array stays alongside for the
+        // aggregated fundamental/technical/sentiment summary view.
+        const stocksToolStages: Array<{
+          stage: string;
+          title_en: string;
+          title_zh: string;
+          state: 'active' | 'completed' | 'failed' | 'skipped';
+          durationMs?: number;
+          argsData?: any;
+          rawData?: any;
+        }> = [];
+        // Pretty stage titles — mirrors web3 cli.ts STAGE_TITLES table.
+        const stocksStageTitle = (toolName: string): { en: string; zh: string } => {
+          const t: Record<string, { en: string; zh: string }> = {
+            get_realtime_quote:           { en: 'Realtime quote',           zh: '获取实时行情' },
+            get_daily_history:            { en: 'Daily history',            zh: '日 K 历史' },
+            get_chip_distribution:        { en: 'Chip distribution',        zh: '筹码分布' },
+            get_analysis_context:         { en: 'Analysis context',         zh: '分析上下文' },
+            get_stock_info:               { en: 'Stock profile',            zh: '股票资料' },
+            get_portfolio_snapshot:       { en: 'Portfolio snapshot',       zh: '组合快照' },
+            get_capital_flow:             { en: 'Capital flow',             zh: '资金流向' },
+            analyze_trend:                { en: 'Trend analysis',           zh: '趋势分析' },
+            calculate_ma:                 { en: 'Moving averages',          zh: '均线计算' },
+            get_volume_analysis:          { en: 'Volume analysis',          zh: '成交量分析' },
+            analyze_pattern:              { en: 'Pattern recognition',      zh: '形态识别' },
+            search_stock_news:            { en: 'Stock news search',        zh: '搜索新闻' },
+            search_comprehensive_intel:   { en: 'Comprehensive intel',      zh: '综合情报搜索' },
+            get_market_indices:           { en: 'Market indices',           zh: '大盘指数' },
+            get_sector_rankings:          { en: 'Sector rankings',          zh: '板块排名' },
+            get_skill_backtest_summary:   { en: 'Skill backtest',           zh: '技能回测' },
+            get_strategy_backtest_summary:{ en: 'Strategy backtest',        zh: '策略回测' },
+            get_stock_backtest_summary:   { en: 'Stock backtest',           zh: '个股回测' },
+          };
+          return t[toolName] || { en: toolName.replace(/_/g, ' '), zh: toolName };
+        };
+        emitter.emitModule('analysis', 'active', { stages: analysisStages, toolStages: stocksToolStages });
 
         promises.push(
           new Promise(resolve => {
@@ -2457,6 +2712,88 @@ Text: "${query}"`;
               (step: any) => {
                 recordChatToolTraceStep(sessionId, step);
                 emitToUser(userId, 'agent:chat:tool_trace', { sessionId, step });
+
+                // ── Per-tool stages: mirror web3's __WEB3_STAGE__ pattern.
+                // Each tool_start/tool_done from Python becomes one entry in
+                // stocksToolStages that progresses active → completed/failed,
+                // carrying argsData/rawData. Pushed under analysis.toolStages
+                // so the frontend can render the same pill+card UI as web3.
+                if (step.type === 'tool_start' && typeof step.tool === 'string') {
+                  const title = stocksStageTitle(step.tool);
+                  // De-dup: same tool may be called twice if the agent retries.
+                  // Match by (toolName, args) to keep the Promise.race-style
+                  // transition unambiguous; if the existing entry is already
+                  // 'completed' just append a new one (rare).
+                  // Note: findLast isn't in our TS lib target — walk backwards.
+                  let existing: typeof stocksToolStages[number] | undefined;
+                  const argsKey = JSON.stringify(step.args);
+                  for (let k = stocksToolStages.length - 1; k >= 0; k--) {
+                    const s = stocksToolStages[k];
+                    if (s.stage === step.tool && JSON.stringify(s.argsData) === argsKey) {
+                      existing = s;
+                      break;
+                    }
+                  }
+                  if (!existing || existing.state !== 'active') {
+                    stocksToolStages.push({
+                      stage: step.tool,
+                      title_en: title.en,
+                      title_zh: title.zh,
+                      state: 'active',
+                      argsData: step.args,
+                    });
+                    emitter.emitModule('analysis', 'active', { stages: analysisStages, toolStages: stocksToolStages });
+                  }
+                } else if (step.type === 'tool_done' && typeof step.tool === 'string') {
+                  // DEBUG: log all keys present in the step + whether result is set.
+                  // Will remove once we confirm rawData flows end-to-end.
+                  console.log(
+                    `[stocks:tool_done] tool=${step.tool} success=${step.success} duration=${step.duration} ` +
+                    `keys=[${Object.keys(step).join(',')}] hasResult=${step.result != null} ` +
+                    `resultPreview=${step.result ? JSON.stringify(step.result).slice(0, 200) : 'null'}`,
+                  );
+                  // Find the most recent 'active' entry for this tool and
+                  // promote it. Python may emit tool_done out of order in
+                  // parallel-batch mode, so we walk back to find the right one.
+                  for (let i = stocksToolStages.length - 1; i >= 0; i--) {
+                    const s = stocksToolStages[i];
+                    if (s.stage === step.tool && s.state === 'active') {
+                      s.state = step.success === false ? 'failed' : 'completed';
+                      s.durationMs = typeof step.duration === 'number' ? Math.round(step.duration * 1000) : undefined;
+                      // Trim large rawData payloads (e.g. 60-row OHLC) so the
+                      // event stream + replay buffer don't bloat. Keep meta
+                      // fields and a head sample of array data.
+                      let raw = step.result;
+                      // Fallback: older/failed Python emit paths may only carry
+                      // `rawText` (JSON string) without `result`. Parse it here
+                      // so cards still render instead of disappearing.
+                      if ((raw == null) && typeof (step as any).rawText === 'string' && (step as any).rawText.trim()) {
+                        const rawText = (step as any).rawText.trim();
+                        try {
+                          raw = JSON.parse(rawText);
+                        } catch {
+                          raw = { rawText };
+                        }
+                      }
+                      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+                        const trimmed: Record<string, any> = {};
+                        for (const [k, v] of Object.entries(raw as Record<string, any>)) {
+                          if (Array.isArray(v) && v.length > 8) {
+                            trimmed[k] = { _truncated: true, sample: v.slice(0, 8), total: v.length };
+                          } else {
+                            trimmed[k] = v;
+                          }
+                        }
+                        s.rawData = trimmed;
+                      } else {
+                        s.rawData = raw;
+                      }
+                      break;
+                    }
+                  }
+                  emitter.emitModule('analysis', 'active', { stages: analysisStages, toolStages: stocksToolStages });
+                }
+
                 if (step.type === 'generating' && step.message === '[UI_METADATA]' && step.content) {
                   try {
                     const meta = JSON.parse(step.content);
@@ -2515,7 +2852,11 @@ Text: "${query}"`;
                       }
                       (analysisStages[2] as any).result = sr;
                     }
-                    emitter.emitModule('analysis', 'active', { stages: analysisStages });
+                    // IMPORTANT: include toolStages on every emit — leaving
+                    // it off would overwrite the per-tool stages collected
+                    // from tool_start/tool_done events upstream, causing
+                    // the cards (rawData) to disappear from the chat thread.
+                    emitter.emitModule('analysis', 'active', { stages: analysisStages, toolStages: stocksToolStages });
                     // Forward stock quote card data to frontend
                     if (meta.quote && meta.quote.symbol && meta.quote.price != null) {
                       const q = meta.quote;
@@ -2618,13 +2959,68 @@ Text: "${query}"`;
               (report) => {
                 analysisStages.forEach(s => { s.status = 'done'; });
                 finalAnalysisStages = analysisStages;
-                emitter.emitModule('analysis', 'completed', { stages: analysisStages });
-                resolve({ type: 'ANALYSIS', data: report });
+                emitter.emitModule('analysis', 'completed', { stages: analysisStages, toolStages: stocksToolStages });
+                const compactFromStages = () => {
+                  const completed = stocksToolStages.filter((s) => s.state === 'completed');
+                  const byTool = new Map<string, any>();
+                  for (const s of completed) {
+                    if (s.rawData != null) byTool.set(s.stage, s.rawData);
+                  }
+
+                  const quote = byTool.get('get_realtime_quote');
+                  const history = byTool.get('get_daily_history');
+                  const trend = byTool.get('analyze_trend');
+                  const news = byTool.get('search_stock_news') || byTool.get('search_comprehensive_intel');
+
+                  const summary: Record<string, any> = {
+                    market_snapshot: {
+                      code: quote?.code ?? history?.code ?? null,
+                      name: quote?.name ?? null,
+                      source: quote?.source ?? history?.source ?? null,
+                      price: quote?.price ?? null,
+                      change_pct: quote?.change_pct ?? null,
+                      open: quote?.open ?? null,
+                      high: quote?.high ?? null,
+                      low: quote?.low ?? null,
+                      pre_close: quote?.pre_close ?? null,
+                      pe_ratio: quote?.pe_ratio ?? null,
+                      pb_ratio: quote?.pb_ratio ?? null,
+                    },
+                    trend_context: {
+                      total_records: history?.total_records ?? (Array.isArray(history?.data) ? history.data.length : null),
+                      latest_kline: Array.isArray(history?.data) ? history.data[0] ?? null : null,
+                      kline_sample: Array.isArray(history?.data) ? history.data.slice(0, 8) : null,
+                      trend_status: trend?.trend_status ?? null,
+                      buy_signal: trend?.buy_signal ?? null,
+                      ma_alignment: trend?.ma_alignment ?? null,
+                    },
+                    news_context: {
+                      provider: news?.provider ?? null,
+                      items_sample: Array.isArray(news?.results) ? news.results.slice(0, 5) : null,
+                      total_items: Array.isArray(news?.results) ? news.results.length : null,
+                    },
+                    tool_coverage: completed.map((s) => ({
+                      tool: s.stage,
+                      duration_ms: s.durationMs,
+                      has_raw_data: s.rawData != null,
+                    })),
+                  };
+
+                  return [
+                    'Structured stock dataset for final synthesis:',
+                    '- This is data-first output (no inner stock narrative).',
+                    '- Use these fields as primary evidence for your final investment summary.',
+                    '',
+                    JSON.stringify(summary, null, 2),
+                  ].join('\n');
+                };
+                const normalizedReport = (report || '').trim() || compactFromStages();
+                resolve({ type: 'ANALYSIS', data: normalizedReport });
               },
               (error) => {
                 analysisStages.forEach(s => { s.status = 'done'; });
                 finalAnalysisStages = analysisStages;
-                emitter.emitModule('analysis', 'completed', { stages: analysisStages });
+                emitter.emitModule('analysis', 'completed', { stages: analysisStages, toolStages: stocksToolStages });
                 resolve({ type: 'ANALYSIS', data: 'Error: ' + error });
               }
             );
@@ -2687,11 +3083,19 @@ Text: "${query}"`;
 
       const toolsWaitStartedAt = Date.now();
       const results = await Promise.allSettled(promises);
+      // Capture the tools-phase duration (from request start through tools
+      // completion, NOT including the synthesis stream that follows). This
+      // is the "honest" wait number we want shown in the trigger pill on
+      // history restore — frontend's live timer freezes at this exact moment
+      // when synthesis kicks off, so persisting it keeps history sessions
+      // consistent with their original live display.
+      const toolsPhaseDurationS = Math.max(0, Math.round((Date.now() - requestStartedAt) / 1000));
       console.log(
         `[agent:chat:timing] tools_parallel_wait_s=${asSeconds(Date.now() - toolsWaitStartedAt)} total_s=${asSeconds(sinceRequestStart())} sessionId=${sessionId}`,
       );
       if (isAborted()) {
         console.log(`[agent:chat] Aborted after Promise.allSettled for session ${sessionId}`);
+        emitter.emitStreamCancelled();
         activeChatSessions.delete(sessionId);
         chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
@@ -3611,6 +4015,12 @@ Reserve granular data for follow-up — don't over-deliver on first pass.
         let synthesisFirstTokenAt: number | null = null;
         if (!isDeepResearch) {
           console.log('[agent:chat] Starting synthesis stream (queryType=%s), prompt length:', queryType, synthesizePrompt.length);
+          // Tell the client the agent has moved into the synthesis phase.
+          // Without this, the inline trigger has no `active` module after
+          // tools complete and falls back to the default "Searching the web"
+          // label — making it look like the run is stuck for the 10-15s
+          // it takes Claude to prefill a 20k-token prompt.
+          emitter.emitModule('synthesis', 'active', { phase: 'drafting_response' });
           const synthesisStream = await aiService.chatStream(
             [{ role: 'user', content: synthesizePrompt }],
             'superagent',
@@ -3651,7 +4061,16 @@ Reserve granular data for follow-up — don't over-deliver on first pass.
                   const parsed = JSON.parse(sseData);
                   const delta = parsed.choices?.[0]?.delta?.content || '';
                   if (delta) {
-                    if (synthesisFirstTokenAt === null) synthesisFirstTokenAt = Date.now();
+                    if (synthesisFirstTokenAt === null) {
+                      synthesisFirstTokenAt = Date.now();
+                      // First token: drop the inline pills/cards on the
+                      // client. Marking `synthesis` complete here lets the
+                      // inline trigger label switch from "Synthesizing
+                      // report" to a generic "Drafting…" tail and the chat
+                      // thread's hasStreamedContent gate kicks in to hide
+                      // the cards.
+                      emitter.emitModule('synthesis', 'completed', {});
+                    }
                     synFullContent += delta;
                     streamToChat(delta);
                   }
@@ -3668,6 +4087,7 @@ Reserve granular data for follow-up — don't over-deliver on first pass.
 
         if (isAborted()) {
           console.log(`[agent:chat] Aborted after synthesis stream for session ${sessionId}`);
+          emitter.emitStreamCancelled();
           activeChatSessions.delete(sessionId);
         chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);
@@ -3689,6 +4109,9 @@ Reserve granular data for follow-up — don't over-deliver on first pass.
               okx: finalWeb3Okx || [],
               okxNews: finalWeb3OkxNews || [],
               providers: finalWeb3Providers || [],
+              // Persist the per-tool stage timeline so history restore can
+              // rebuild the Process panel + recompute toolsCount correctly.
+              stages: finalWeb3Stages,
             },
           });
         }
@@ -4379,6 +4802,13 @@ ${synFullContent || contextString}${langFooter}`;
                   isActive: false,
                   route: 'Super Agent Orchestrator',
                   ...(isDeepResearch ? { routedMode: 'roundtable' } : {}),
+                  // Persist the tools-phase duration (request → tools done,
+                  // NOT including the synthesis stream). On history restore
+                  // the trigger pill renders "Done · X tools · Y sources · Zs"
+                  // using this Z, so the displayed seconds matches what the
+                  // user originally saw mid-stream — instead of the inflated
+                  // end-to-end duration `done.duration` records.
+                  toolsPhaseDurationS,
                 },
                 consensusResult: savedConsensusResult ?? undefined,
                 // Live SSE debate log — every per-agent-per-round event
@@ -4467,6 +4897,7 @@ ${synFullContent || contextString}${langFooter}`;
         console.error('[agent:chat] SYNTHESIS ERROR:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
         if (isAborted()) {
           console.log(`[agent:chat] Aborted during synthesis error handling for session ${sessionId}`);
+          emitter.emitStreamCancelled();
           activeChatSessions.delete(sessionId);
         chatSessionStartTimes.delete(sessionId);
         finishChatReplayBuffer(sessionId);

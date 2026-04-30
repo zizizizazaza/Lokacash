@@ -206,14 +206,38 @@ export async function fetchCoinSentiment(
   } as OkxCoinSentiment;
 }
 
-/** Convenience: fetch news + sentiment for a single base currency. */
+/** Coins → fallback keywords used when OKX's coin-tagged news filter returns
+ *  empty. Many real news articles about a coin don't carry that coin in
+ *  OKX's `ccyList` tag, so we retry without the filter and grep titles. */
+const FALLBACK_KEYWORDS: Record<string, string[]> = {
+  BTC: ['bitcoin', 'btc'],
+  ETH: ['ethereum', 'ether', 'eth'],
+  SOL: ['solana', 'sol'],
+  XRP: ['xrp', 'ripple'],
+  DOGE: ['dogecoin', 'doge'],
+  BNB: ['bnb', 'binance coin'],
+  ADA: ['cardano', 'ada'],
+  AVAX: ['avalanche', 'avax'],
+  LINK: ['chainlink', 'link'],
+  TRX: ['tron', 'trx'],
+  HYPE: ['hyperliquid', 'hype'],
+  PENGU: ['pudgy penguins', 'pengu'],
+  AAVE: ['aave'],
+};
+
+/** Convenience: fetch news + sentiment for a single base currency.
+ *  Tries the coin-tagged filter first; if OKX returns nothing, falls back
+ *  to a global news pull + client-side title-keyword match. This addresses
+ *  cases where OKX's editorial team hasn't tagged a recent article with
+ *  the specific coin (common for mid-cap alts and breaking news). */
 export async function fetchNewsBundle(baseCcy: string, newsLimit = 8): Promise<OkxNewsBundle> {
   const logs: string[] = [];
+  const base = baseCcy.toUpperCase();
   const [newsSettled, sentSettled] = await Promise.allSettled([
-    fetchLatestNews({ coins: baseCcy, limit: newsLimit }),
-    fetchCoinSentiment(baseCcy, { period: '24h' }),
+    fetchLatestNews({ coins: base, limit: newsLimit }),
+    fetchCoinSentiment(base, { period: '24h' }),
   ]);
-  const latestNews = newsSettled.status === 'fulfilled' ? newsSettled.value : [];
+  let latestNews = newsSettled.status === 'fulfilled' ? newsSettled.value : [];
   const sentiment = sentSettled.status === 'fulfilled' ? sentSettled.value : null;
   if (newsSettled.status === 'rejected') {
     logs.push(`news_err:${clip((newsSettled.reason as Error)?.message || '', 120)}`);
@@ -221,5 +245,27 @@ export async function fetchNewsBundle(baseCcy: string, newsLimit = 8): Promise<O
   if (sentSettled.status === 'rejected') {
     logs.push(`sent_err:${clip((sentSettled.reason as Error)?.message || '', 120)}`);
   }
-  return { baseCcy: baseCcy.toUpperCase(), latestNews, sentiment, logs };
+
+  // Fallback: if the tagged filter returned nothing AND we know fallback
+  // keywords for this coin, pull global news and match by title.
+  if (latestNews.length === 0) {
+    const keywords = FALLBACK_KEYWORDS[base] || [base.toLowerCase()];
+    try {
+      const global = await fetchLatestNews({ limit: 30 });
+      const matched = global.filter((n) => {
+        const haystack = `${n.title || ''} ${n.summary || ''}`.toLowerCase();
+        return keywords.some((kw) => haystack.includes(kw));
+      });
+      if (matched.length > 0) {
+        latestNews = matched.slice(0, newsLimit);
+        logs.push(`news_fallback:${matched.length}_via_title_match`);
+      } else {
+        logs.push('news_fallback_empty');
+      }
+    } catch (err) {
+      logs.push(`news_fallback_err:${clip((err as Error)?.message || '', 120)}`);
+    }
+  }
+
+  return { baseCcy: base, latestNews, sentiment, logs };
 }
