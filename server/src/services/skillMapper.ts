@@ -368,6 +368,17 @@ export type SkillConsensus = {
 export function mapConsensusToSkill(question: string, raw: unknown): SkillConsensus | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as {
+    consensus?: {
+      finalAnswer?: string;
+      confidence?: number;
+      agentResponses?: Array<{
+        agentId?: string;
+        answer?: string;
+        confidence?: number;
+      }>;
+      roundsUsed?: number;
+      consensusReached?: boolean;
+    };
     final_answer?: string;
     final_verdict?: string;
     final_confidence?: number;
@@ -382,27 +393,49 @@ export function mapConsensusToSkill(question: string, raw: unknown): SkillConsen
     rounds?: unknown[];
   };
 
-  const summaryText = r.final_answer || '';
+  const summaryText = r.final_answer || r.consensus?.finalAnswer || '';
   // Derive verdict from agents if not explicitly set
   let finalVerdict = r.final_verdict || '';
   if (!finalVerdict) {
     const match = summaryText.match(/\*\*Verdict:\*\*\s*(\w+)/i);
-    finalVerdict = match?.[1] || 'Neutral';
+    if (match?.[1]) {
+      finalVerdict = match[1];
+    } else if (r.consensus && r.consensus.consensusReached === false) {
+      finalVerdict = 'No Consensus';
+    } else {
+      finalVerdict = 'Neutral';
+    }
   }
 
-  return {
-    question,
-    finalVerdict,
-    finalConfidence: typeof r.final_confidence === 'number' ? r.final_confidence : 0,
-    summary: summaryText,
-    agents: (r.agents || []).map((a) => ({
+  const mergedAgents = (r.agents && r.agents.length > 0)
+    ? r.agents.map((a) => ({
       name: a.agent_name || a.agent_id || 'Agent',
       role: a.role || '',
       verdict: a.verdict || 'Neutral',
       confidence: typeof a.confidence === 'number' ? a.confidence : 0,
       reasoning: a.reasoning || '',
-    })),
-    roundsRun: Array.isArray(r.rounds) ? r.rounds.length : 1,
+    }))
+    : (r.consensus?.agentResponses || []).map((a) => ({
+      name: a.agentId || 'Agent',
+      role: '',
+      verdict: '',
+      confidence: typeof a.confidence === 'number' ? a.confidence : 0,
+      reasoning: a.answer || '',
+    }));
+
+  return {
+    question,
+    finalVerdict,
+    finalConfidence:
+      typeof r.final_confidence === 'number'
+        ? r.final_confidence
+        : (typeof r.consensus?.confidence === 'number' ? r.consensus.confidence : 0),
+    summary: summaryText,
+    agents: mergedAgents,
+    roundsRun:
+      Array.isArray(r.rounds)
+        ? r.rounds.length
+        : (typeof r.consensus?.roundsUsed === 'number' ? r.consensus.roundsUsed : 1),
     asOf: Date.now(),
   };
 }

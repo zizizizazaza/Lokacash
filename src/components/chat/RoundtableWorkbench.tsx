@@ -1276,30 +1276,138 @@ const TerminalLogPanel: React.FC<{ thinking: ThinkingFlow | null }> = ({ thinkin
         </div>
     );
 };
-const ROUNDTABLE_AGENT_PROFILES: Record<string, { bio: string; tags: string[]; skills: string[]; framework: string }> = {
-    fundamental_specialist: { bio: 'Deep-dives into financial statements, earnings quality, and intrinsic value.', tags: ['Financials', 'Earnings', 'Valuation'], skills: ['DCF Modeling', 'Ratio Analysis', 'Earnings Quality'], framework: 'Bottom-up fundamental analysis with emphasis on margin of safety.' },
-    valuation_specialist:    { bio: 'Builds multi-scenario valuation models to determine fair value ranges.', tags: ['DCF', 'Comparable', 'Models'], skills: ['DCF', 'Relative Valuation', 'Sum-of-Parts'], framework: 'Multi-model convergence with scenario-weighted fair value.' },
-    macro_specialist:        { bio: 'Tracks macro trends, interest rates, and policy shifts that move markets.', tags: ['Macro', 'Rates', 'Policy'], skills: ['Macro Forecasting', 'Cross-Asset', 'Policy Analysis'], framework: 'Top-down macro overlay with cross-asset correlation analysis.' },
-    risk_specialist:         { bio: 'Identifies tail risks, stress-tests portfolios, and models downside scenarios.', tags: ['Risk', 'Hedging', 'Stress Test'], skills: ['VaR', 'Stress Testing', 'Scenario Analysis'], framework: 'Risk-first approach with pre-mortem analysis and Monte Carlo simulations.' },
-    allocation_specialist:   { bio: 'Optimizes asset allocation across ETFs, sectors, and geographies.', tags: ['ETF', 'Allocation', 'Diversification'], skills: ['MPT', 'Factor Exposure', 'Rebalancing'], framework: 'Modern portfolio theory with factor-based tilts.' },
-    fund_specialist:         { bio: 'Evaluates fund performance, manager quality, and fee structures.', tags: ['Funds', 'Alpha', 'Selection'], skills: ['Fund Screening', 'Alpha Analysis', 'Fee Optimization'], framework: 'Quantitative fund selection with qualitative manager assessment.' },
-    options_specialist:      { bio: 'Designs options strategies and analyzes Greeks for risk/reward optimization.', tags: ['Options', 'Greeks', 'Volatility'], skills: ['Options Pricing', 'Greeks Analysis', 'Vol Surface'], framework: 'Volatility-driven strategy selection with Greeks-based risk management.' },
-    crypto_specialist:       { bio: 'Analyzes crypto assets, on-chain data, and DeFi protocol metrics.', tags: ['Crypto', 'On-Chain', 'DeFi'], skills: ['On-Chain Analysis', 'Token Economics', 'Protocol Metrics'], framework: 'On-chain data analysis combined with token economic modeling.' },
-    macro_enhanced:          { bio: 'Advanced macro analysis with emphasis on regime changes and cross-asset flows.', tags: ['Deep Macro', 'Regimes', 'Flows'], skills: ['Regime Detection', 'Flow Analysis', 'Cycle Mapping'], framework: 'Multi-layer macro regime identification with flow-of-funds tracking.' },
-    risk_enhanced:           { bio: 'Fractal risk modeling with advanced tail-risk and correlation-breakdown detection.', tags: ['Fractal', 'Tail Risk', 'Correlation'], skills: ['Fractal Analysis', 'Extreme Value Theory', 'Contagion Modeling'], framework: 'Non-linear risk modeling using fractal geometry and extreme value theory.' },
-    event_driven:            { bio: 'Identifies catalysts, earnings surprises, and event-driven trading opportunities.', tags: ['Events', 'Catalysts', 'M&A'], skills: ['Event Detection', 'Catalyst Mapping', 'Timeline Analysis'], framework: 'Event timeline analysis with probability-weighted outcome modeling.' },
-    sentiment_focus:         { bio: 'Gauges market sentiment from social media, news flow, and positioning data.', tags: ['Sentiment', 'Social', 'NLP'], skills: ['NLP Sentiment', 'Social Listening', 'Positioning Analysis'], framework: 'Multi-source sentiment aggregation with contrarian signal detection.' },
-    portfolio_view:          { bio: 'Evaluates how positions fit within an overall portfolio context.', tags: ['Portfolio', 'Fit', 'Impact'], skills: ['Position Sizing', 'Correlation Analysis', 'Rebalancing'], framework: 'Portfolio-aware evaluation with correlation-adjusted sizing.' },
-    buffett_style:           { bio: 'Value-investing lens — wide moats, durable economics, and margin of safety.', tags: ['Value', 'Moats', 'Long-term'], skills: ['Moat Analysis', 'Owner Earnings', 'Margin of Safety'], framework: 'Buy wonderful businesses at fair prices, hold forever.' },
-    munger_style:            { bio: 'Mental-models multidisciplinary thinking with inversion and circle of competence.', tags: ['Mental Models', 'Inversion', 'Quality'], skills: ['Inversion', 'Lollapalooza Effects', 'Circle of Competence'], framework: 'Multidisciplinary mental models with inversion checks.' },
-    dalio_style:             { bio: 'All-weather regime thinking — balance risk across macro environments.', tags: ['All-Weather', 'Regime', 'Macro'], skills: ['Risk Parity', 'Macro Cycles', 'Diversification'], framework: 'Balance risk across growth/inflation regimes — all-weather.' },
-    soros_style:             { bio: 'Reflexivity-driven macro bets when market beliefs and fundamentals diverge.', tags: ['Reflexivity', 'Macro', 'Asymmetric'], skills: ['Reflexivity Detection', 'Macro Thesis', 'Asymmetric Bets'], framework: 'Find reflexive feedback loops — bet when conviction is high.' },
-    lynch_style:             { bio: 'Invest in what you know — find fast growers at reasonable prices.', tags: ['GARP', 'Growth', 'Stock Picking'], skills: ['Fast Grower Detection', 'PEG Analysis', 'Stock Categories'], framework: 'Invest in what you understand — find fast growers at reasonable valuation.' },
-    graham_style:            { bio: 'Classic deep-value screening — NCAV, net-net, Mr. Market psychology.', tags: ['Deep Value', 'NCAV', 'Mr. Market'] , skills: ['Net-Net Screening', 'Margin of Safety', 'Mr. Market Discipline'], framework: 'Defensive investing — wide margin of safety, Mr. Market as servant.' },
+// Bilingual persona profile catalog. Each field has zh and en variants so
+// the Workbench can render in the user's question language without a static
+// English fallback. The Chinese translations are intentionally concise to
+// match the same card width as English.
+type LangText = { en: string; zh: string };
+type LangList = { en: string[]; zh: string[] };
+interface RoundtableAgentProfile { bio: LangText; tags: LangList; skills: LangList; framework: LangText }
+
+const ROUNDTABLE_AGENT_PROFILES: Record<string, RoundtableAgentProfile> = {
+    fundamental_specialist: {
+        bio: { en: 'Deep-dives into financial statements, earnings quality, and intrinsic value.', zh: '深挖财务报表、盈利质量与内在价值。' },
+        tags: { en: ['Financials', 'Earnings', 'Valuation'], zh: ['财务', '盈利', '估值'] },
+        skills: { en: ['DCF Modeling', 'Ratio Analysis', 'Earnings Quality'], zh: ['DCF 建模', '财务比率分析', '盈利质量'] },
+        framework: { en: 'Bottom-up fundamental analysis with emphasis on margin of safety.', zh: '自下而上的基本面分析，重视安全边际。' },
+    },
+    valuation_specialist: {
+        bio: { en: 'Builds multi-scenario valuation models to determine fair value ranges.', zh: '搭建多情景估值模型，给出公允价值区间。' },
+        tags: { en: ['DCF', 'Comparable', 'Models'], zh: ['DCF', '可比公司', '估值模型'] },
+        skills: { en: ['DCF', 'Relative Valuation', 'Sum-of-Parts'], zh: ['DCF', '相对估值', '分部估值'] },
+        framework: { en: 'Multi-model convergence with scenario-weighted fair value.', zh: '多模型交叉验证，按情景加权得出公允价值。' },
+    },
+    macro_specialist: {
+        bio: { en: 'Tracks macro trends, interest rates, and policy shifts that move markets.', zh: '跟踪宏观趋势、利率与政策转向。' },
+        tags: { en: ['Macro', 'Rates', 'Policy'], zh: ['宏观', '利率', '政策'] },
+        skills: { en: ['Macro Forecasting', 'Cross-Asset', 'Policy Analysis'], zh: ['宏观预测', '跨资产分析', '政策研究'] },
+        framework: { en: 'Top-down macro overlay with cross-asset correlation analysis.', zh: '自上而下的宏观叠加，结合跨资产相关性分析。' },
+    },
+    risk_specialist: {
+        bio: { en: 'Identifies tail risks, stress-tests portfolios, and models downside scenarios.', zh: '识别尾部风险，压力测试组合，建模下行情景。' },
+        tags: { en: ['Risk', 'Hedging', 'Stress Test'], zh: ['风险', '对冲', '压力测试'] },
+        skills: { en: ['VaR', 'Stress Testing', 'Scenario Analysis'], zh: ['VaR', '压力测试', '情景分析'] },
+        framework: { en: 'Risk-first approach with pre-mortem analysis and Monte Carlo simulations.', zh: '风险优先，结合"事前复盘"与蒙特卡洛模拟。' },
+    },
+    allocation_specialist: {
+        bio: { en: 'Optimizes asset allocation across ETFs, sectors, and geographies.', zh: '在 ETF、行业与地区间优化资产配置。' },
+        tags: { en: ['ETF', 'Allocation', 'Diversification'], zh: ['ETF', '配置', '分散化'] },
+        skills: { en: ['MPT', 'Factor Exposure', 'Rebalancing'], zh: ['现代组合理论', '因子敞口', '再平衡'] },
+        framework: { en: 'Modern portfolio theory with factor-based tilts.', zh: '现代组合理论，叠加因子倾斜。' },
+    },
+    fund_specialist: {
+        bio: { en: 'Evaluates fund performance, manager quality, and fee structures.', zh: '评估基金业绩、经理质量与费率结构。' },
+        tags: { en: ['Funds', 'Alpha', 'Selection'], zh: ['基金', 'Alpha', '筛选'] },
+        skills: { en: ['Fund Screening', 'Alpha Analysis', 'Fee Optimization'], zh: ['基金筛选', 'Alpha 分析', '费率优化'] },
+        framework: { en: 'Quantitative fund selection with qualitative manager assessment.', zh: '量化筛选叠加定性经理评估。' },
+    },
+    options_specialist: {
+        bio: { en: 'Designs options strategies and analyzes Greeks for risk/reward optimization.', zh: '设计期权策略，分析 Greeks 优化风险收益。' },
+        tags: { en: ['Options', 'Greeks', 'Volatility'], zh: ['期权', 'Greeks', '波动率'] },
+        skills: { en: ['Options Pricing', 'Greeks Analysis', 'Vol Surface'], zh: ['期权定价', 'Greeks 分析', '波动率曲面'] },
+        framework: { en: 'Volatility-driven strategy selection with Greeks-based risk management.', zh: '以波动率驱动策略选择，用 Greeks 做风险管理。' },
+    },
+    crypto_specialist: {
+        bio: { en: 'Analyzes crypto assets, on-chain data, and DeFi protocol metrics.', zh: '分析加密资产、链上数据与 DeFi 协议指标。' },
+        tags: { en: ['Crypto', 'On-Chain', 'DeFi'], zh: ['加密', '链上', 'DeFi'] },
+        skills: { en: ['On-Chain Analysis', 'Token Economics', 'Protocol Metrics'], zh: ['链上分析', '代币经济学', '协议指标'] },
+        framework: { en: 'On-chain data analysis combined with token economic modeling.', zh: '链上数据分析叠加代币经济学建模。' },
+    },
+    macro_enhanced: {
+        bio: { en: 'Advanced macro analysis with emphasis on regime changes and cross-asset flows.', zh: '强化宏观分析，关注体制切换与跨资产资金流。' },
+        tags: { en: ['Deep Macro', 'Regimes', 'Flows'], zh: ['深度宏观', '体制', '资金流'] },
+        skills: { en: ['Regime Detection', 'Flow Analysis', 'Cycle Mapping'], zh: ['体制识别', '资金流分析', '周期映射'] },
+        framework: { en: 'Multi-layer macro regime identification with flow-of-funds tracking.', zh: '多层宏观体制识别，叠加资金流追踪。' },
+    },
+    risk_enhanced: {
+        bio: { en: 'Fractal risk modeling with advanced tail-risk and correlation-breakdown detection.', zh: '分形风险建模，识别尾部风险与相关性崩溃。' },
+        tags: { en: ['Fractal', 'Tail Risk', 'Correlation'], zh: ['分形', '尾部风险', '相关性'] },
+        skills: { en: ['Fractal Analysis', 'Extreme Value Theory', 'Contagion Modeling'], zh: ['分形分析', '极值理论', '传染建模'] },
+        framework: { en: 'Non-linear risk modeling using fractal geometry and extreme value theory.', zh: '非线性风险建模，结合分形几何与极值理论。' },
+    },
+    event_driven: {
+        bio: { en: 'Identifies catalysts, earnings surprises, and event-driven trading opportunities.', zh: '识别催化剂、业绩惊喜与事件驱动交易机会。' },
+        tags: { en: ['Events', 'Catalysts', 'M&A'], zh: ['事件', '催化剂', '并购'] },
+        skills: { en: ['Event Detection', 'Catalyst Mapping', 'Timeline Analysis'], zh: ['事件识别', '催化剂映射', '时间线分析'] },
+        framework: { en: 'Event timeline analysis with probability-weighted outcome modeling.', zh: '事件时间线分析，按概率加权建模结果。' },
+    },
+    sentiment_focus: {
+        bio: { en: 'Gauges market sentiment from social media, news flow, and positioning data.', zh: '从社交媒体、新闻流与持仓数据测度市场情绪。' },
+        tags: { en: ['Sentiment', 'Social', 'NLP'], zh: ['情绪', '社交', 'NLP'] },
+        skills: { en: ['NLP Sentiment', 'Social Listening', 'Positioning Analysis'], zh: ['NLP 情绪', '社交聆听', '持仓分析'] },
+        framework: { en: 'Multi-source sentiment aggregation with contrarian signal detection.', zh: '多源情绪聚合，挖掘逆向信号。' },
+    },
+    portfolio_view: {
+        bio: { en: 'Evaluates how positions fit within an overall portfolio context.', zh: '评估单一头寸在整体组合中的契合度。' },
+        tags: { en: ['Portfolio', 'Fit', 'Impact'], zh: ['组合', '契合度', '影响'] },
+        skills: { en: ['Position Sizing', 'Correlation Analysis', 'Rebalancing'], zh: ['仓位规模', '相关性分析', '再平衡'] },
+        framework: { en: 'Portfolio-aware evaluation with correlation-adjusted sizing.', zh: '组合感知评估，按相关性调整仓位。' },
+    },
+    buffett_style: {
+        bio: { en: 'Value-investing lens — wide moats, durable economics, and margin of safety.', zh: '价值投资视角——宽护城河、持久经济性、安全边际。' },
+        tags: { en: ['Value', 'Moats', 'Long-term'], zh: ['价值', '护城河', '长期'] },
+        skills: { en: ['Moat Analysis', 'Owner Earnings', 'Margin of Safety'], zh: ['护城河分析', '股东盈余', '安全边际'] },
+        framework: { en: 'Buy wonderful businesses at fair prices, hold forever.', zh: '以合理价格买入伟大企业，长期持有。' },
+    },
+    munger_style: {
+        bio: { en: 'Mental-models multidisciplinary thinking with inversion and circle of competence.', zh: '多元思维模型，强调逆向思考与能力圈。' },
+        tags: { en: ['Mental Models', 'Inversion', 'Quality'], zh: ['思维模型', '逆向', '质量'] },
+        skills: { en: ['Inversion', 'Lollapalooza Effects', 'Circle of Competence'], zh: ['逆向思考', 'Lollapalooza 效应', '能力圈'] },
+        framework: { en: 'Multidisciplinary mental models with inversion checks.', zh: '多学科思维模型，叠加逆向检验。' },
+    },
+    dalio_style: {
+        bio: { en: 'All-weather regime thinking — balance risk across macro environments.', zh: '全天候体制思维——在宏观环境间平衡风险。' },
+        tags: { en: ['All-Weather', 'Regime', 'Macro'], zh: ['全天候', '体制', '宏观'] },
+        skills: { en: ['Risk Parity', 'Macro Cycles', 'Diversification'], zh: ['风险平价', '宏观周期', '分散化'] },
+        framework: { en: 'Balance risk across growth/inflation regimes — all-weather.', zh: '在增长/通胀体制间平衡风险——全天候。' },
+    },
+    soros_style: {
+        bio: { en: 'Reflexivity-driven macro bets when market beliefs and fundamentals diverge.', zh: '反身性驱动的宏观下注——市场信念与基本面背离时出手。' },
+        tags: { en: ['Reflexivity', 'Macro', 'Asymmetric'], zh: ['反身性', '宏观', '不对称'] },
+        skills: { en: ['Reflexivity Detection', 'Macro Thesis', 'Asymmetric Bets'], zh: ['反身性识别', '宏观论点', '不对称下注'] },
+        framework: { en: 'Find reflexive feedback loops — bet when conviction is high.', zh: '寻找反身性反馈回路——确信度高时重仓。' },
+    },
+    lynch_style: {
+        bio: { en: 'Invest in what you know — find fast growers at reasonable prices.', zh: '投资你了解的——以合理价格寻找快速成长者。' },
+        tags: { en: ['GARP', 'Growth', 'Stock Picking'], zh: ['GARP', '成长', '选股'] },
+        skills: { en: ['Fast Grower Detection', 'PEG Analysis', 'Stock Categories'], zh: ['快速成长股识别', 'PEG 分析', '股票分类'] },
+        framework: { en: 'Invest in what you understand — find fast growers at reasonable valuation.', zh: '投资你能理解的——以合理估值寻找快速成长者。' },
+    },
+    graham_style: {
+        bio: { en: 'Classic deep-value screening — NCAV, net-net, Mr. Market psychology.', zh: '经典深度价值筛选——NCAV、净净股、市场先生心理学。' },
+        tags: { en: ['Deep Value', 'NCAV', 'Mr. Market'], zh: ['深度价值', 'NCAV', '市场先生'] },
+        skills: { en: ['Net-Net Screening', 'Margin of Safety', 'Mr. Market Discipline'], zh: ['净净股筛选', '安全边际', '驾驭市场先生'] },
+        framework: { en: 'Defensive investing — wide margin of safety, Mr. Market as servant.', zh: '防御型投资——宽厚安全边际，把市场先生当仆人。' },
+    },
 };
 
+/** Helper to choose zh / en field based on the user's query language. */
+function pickLang(label: string | undefined): 'en' | 'zh' {
+    return /[一-鿿]/.test(label || '') ? 'zh' : 'en';
+}
+
 // ─── RoundtableAgentModal — click an agent card to expand full details ──
-const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> = ({ agentId, onClose }) => {
+const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void; lang?: 'en' | 'zh' }> = ({ agentId, onClose, lang = 'en' }) => {
     const agent = SUMMON_POOL.find(a => a.id === agentId);
     const profile = ROUNDTABLE_AGENT_PROFILES[agentId];
     useEffect(() => {
@@ -1329,8 +1437,8 @@ const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> =
                             </div>
                         </div>
                         <div className="flex-1 min-w-0">
-                            <h3 className="text-[15px] font-bold text-gray-900 truncate">{agent.name}</h3>
-                            <p className="text-[11px] text-gray-500 mt-0.5">{agent.role}</p>
+                            <h3 className="text-[15px] font-bold text-gray-900 truncate">{lang === 'zh' ? (agent.nameCN || agent.name) : agent.name}</h3>
+                            <p className="text-[11px] text-gray-500 mt-0.5">{lang === 'zh' ? ((agent as any).roleCN || agent.role) : agent.role}</p>
                         </div>
                     </div>
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
@@ -1338,8 +1446,14 @@ const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> =
                             agent.group === 'system' ? 'bg-blue-50 text-blue-500 border border-blue-100' :
                             isMaster ? 'bg-amber-50 text-amber-600 border border-amber-200' :
                             'bg-emerald-50 text-emerald-600 border border-emerald-100'
-                        }`}>{agent.group === 'system' ? 'Core' : isMaster ? 'Master' : 'Specialist'}</span>
-                        {profile?.tags.map((tag, i) => (
+                        }`}>{
+                            agent.group === 'system'
+                                ? (lang === 'zh' ? '核心' : 'Core')
+                                : isMaster
+                                    ? (lang === 'zh' ? '大师' : 'Master')
+                                    : (lang === 'zh' ? '专家' : 'Specialist')
+                        }</span>
+                        {profile?.tags[lang].map((tag, i) => (
                             <span key={i} className="text-[9.5px] px-1.5 py-[2px] rounded-md bg-gray-100 text-gray-500 font-medium">{tag}</span>
                         ))}
                     </div>
@@ -1347,20 +1461,20 @@ const RoundtableAgentModal: React.FC<{ agentId: string; onClose: () => void }> =
                 {profile && (
                     <div className="px-5 py-4 space-y-4 overflow-y-auto max-h-[60vh]">
                         <div>
-                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">About</h4>
-                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.bio}</p>
+                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">{lang === 'zh' ? '简介' : 'About'}</h4>
+                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.bio[lang]}</p>
                         </div>
                         <div>
-                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">Skills</h4>
+                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">{lang === 'zh' ? '专长' : 'Skills'}</h4>
                             <div className="flex flex-wrap gap-1.5">
-                                {profile.skills.map((s, i) => (
+                                {profile.skills[lang].map((s, i) => (
                                     <span key={i} className="px-2 py-[3px] bg-blue-50 border border-blue-100 rounded-md text-[10.5px] text-blue-600 font-medium">{s}</span>
                                 ))}
                             </div>
                         </div>
                         <div>
-                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">Thinking Framework</h4>
-                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.framework}</p>
+                            <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-[0.08em] mb-1.5">{lang === 'zh' ? '思考框架' : 'Thinking Framework'}</h4>
+                            <p className="text-[12.5px] text-gray-700 leading-relaxed">{profile.framework[lang]}</p>
                         </div>
                     </div>
                 )}
@@ -1497,6 +1611,10 @@ export const RoundtableWorkbench: React.FC<{
     isLive: boolean;
     topicLabel?: string;
 }> = ({ thinking, isLive, topicLabel }) => {
+    // Detect user query language so the Workbench renders in zh/en. Without
+    // this every persona card shows English bio/tags even when the user
+    // asked in Chinese, producing a visibly inconsistent panel.
+    const lang = pickLang(topicLabel);
     const agentIds = thinking.selectedAgentIds || [];
     const systemAgents = SUMMON_POOL.filter(a => a.group === 'system');
     const pickedExtras = SUMMON_POOL.filter(a => agentIds.includes(a.id) && a.group !== 'system');
@@ -1601,7 +1719,7 @@ export const RoundtableWorkbench: React.FC<{
             <div className="w-full md:w-[260px] shrink-0 border-b md:border-b-0 md:border-r border-slate-200/70 flex flex-col bg-slate-100/50 backdrop-blur-sm h-[152px] md:h-auto">
                 <div className="px-4 pt-3 pb-2 flex items-center gap-2 shrink-0">
                     <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
-                    <span className="text-[11px] font-semibold tracking-[0.06em] uppercase text-gray-700">Agent Room</span>
+                    <span className="text-[11px] font-semibold tracking-[0.06em] uppercase text-gray-700">{lang === 'zh' ? '专家席' : 'Agent Room'}</span>
                     <span className="text-[10px] font-semibold text-gray-400 tabular-nums">({allAgents.length})</span>
                 </div>
                 <div className="flex-1 min-h-0 overflow-x-auto md:overflow-x-hidden md:overflow-y-auto py-2 px-2 flex md:block gap-1.5 md:gap-0 md:space-y-1.5">
@@ -1611,6 +1729,9 @@ export const RoundtableWorkbench: React.FC<{
                             : (isLive ? 'active' : 'pending');
                         const profile = ROUNDTABLE_AGENT_PROFILES[a.id];
                         const isMaster = a.group === 'master';
+                        // Pick the persona's localized display name. SUMMON_POOL
+                        // entries carry both `name` (en) and `nameCN` (zh).
+                        const displayName = lang === 'zh' ? (a.nameCN || a.name) : a.name;
                         return (
                             <div
                                 key={a.id}
@@ -1633,13 +1754,13 @@ export const RoundtableWorkbench: React.FC<{
                                         </div>
                                     </div>
                                     <div className="min-w-0 flex-1">
-                                        <p className="text-[12px] font-bold truncate text-gray-800">{a.name}</p>
+                                        <p className="text-[12px] font-bold truncate text-gray-800">{displayName}</p>
                                         {profile?.bio && (
-                                            <p className="text-[10.5px] text-gray-500 leading-snug mt-0.5 line-clamp-2">{profile.bio}</p>
+                                            <p className="text-[10.5px] text-gray-500 leading-snug mt-0.5 line-clamp-2">{profile.bio[lang]}</p>
                                         )}
-                                        {profile?.tags && profile.tags.length > 0 && (
+                                        {profile?.tags && profile.tags[lang].length > 0 && (
                                             <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-                                                {profile.tags.slice(0, 3).map(t => (
+                                                {profile.tags[lang].slice(0, 3).map(t => (
                                                     <span key={t} className="text-[9px] font-medium px-1.5 py-[1px] rounded-full bg-gray-100 text-gray-500">{t}</span>
                                                 ))}
                                             </div>
@@ -1657,7 +1778,9 @@ export const RoundtableWorkbench: React.FC<{
                 <div className="flex items-center border-b border-gray-100 px-3 shrink-0">
                     {(['graph', 'debate', 'log'] as const).map(t => {
                         const isActive = tab === t;
-                        const label = t === 'graph' ? 'Graph' : t === 'debate' ? 'Debate' : 'Activity Log';
+                        const label = lang === 'zh'
+                            ? (t === 'graph' ? '关系图' : t === 'debate' ? '辩论' : '日志')
+                            : (t === 'graph' ? 'Graph' : t === 'debate' ? 'Debate' : 'Activity Log');
                         return (
                             <button
                                 key={t}
@@ -1727,20 +1850,23 @@ export const RoundtableWorkbench: React.FC<{
                             ) : (
                                 <div className={fullscreen ? "space-y-8" : "space-y-5"}>
                                     {rounds.map(round => {
-                                        const roundLabel = round.round === 1 ? 'Thesis Formation' : round.round === 2 ? 'Cross Validation' : `Round ${round.round}`;
+                                        const roundLabel = lang === 'zh'
+                                            ? (round.round === 1 ? '立场形成' : round.round === 2 ? '交叉验证' : `第 ${round.round} 轮`)
+                                            : (round.round === 1 ? 'Thesis Formation' : round.round === 2 ? 'Cross Validation' : `Round ${round.round}`);
+                                        const roundPrefix = lang === 'zh' ? `第 ${round.round} 轮 · ` : `Round ${round.round} · `;
                                         return (
                                         <div key={round.round}>
                                             <div className="flex items-center gap-2 mb-2.5 sticky top-0 py-1 z-10">
                                                 <span className="text-[10px] font-semibold tracking-[0.08em] uppercase text-gray-500">
-                                                    <span className="text-gray-400">Round {round.round} · </span>{roundLabel}
+                                                    <span className="text-gray-400">{roundPrefix}</span>{roundLabel}
                                                 </span>
                                                 {round.status === 'active' && (
                                                     <span className="inline-flex items-center gap-1 text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-blue-500/10 text-blue-600">
-                                                        <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />live
+                                                        <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />{lang === 'zh' ? '进行中' : 'live'}
                                                     </span>
                                                 )}
                                                 {round.status === 'done' && (
-                                                    <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-emerald-500/10 text-emerald-700">done</span>
+                                                    <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-emerald-500/10 text-emerald-700">{lang === 'zh' ? '完成' : 'done'}</span>
                                                 )}
                                             </div>
                                             <div className={fullscreen ? "space-y-5" : "space-y-3"}>
@@ -1763,7 +1889,7 @@ export const RoundtableWorkbench: React.FC<{
                                                                 onClick={() => setActiveAgentId(a.agentId)}
                                                                 className="shrink-0 rounded-full p-[2px]"
                                                                 style={{ background: `linear-gradient(135deg, ${accentColor}, ${accentColor}88)` }}
-                                                                title={pool?.name || a.agentName}
+                                                                title={(lang === 'zh' ? pool?.nameCN : pool?.name) || a.agentName}
                                                             >
                                                                 <div className="rounded-full border-2 border-white overflow-hidden">
                                                                     <AgentAvatarImg nameOrId={a.agentId} size={30} />
@@ -1772,14 +1898,16 @@ export const RoundtableWorkbench: React.FC<{
                                                             <div className={`min-w-0 max-w-[78%] pt-0.5 flex flex-col ${side === 'right' ? 'items-end' : 'items-start'}`}>
                                                                 {/* Name + meta row (outside bubble, social-chat style) */}
                                                                 <div className={`flex items-center gap-1.5 mb-1 px-1 flex-wrap leading-none ${side === 'right' ? 'flex-row-reverse' : ''}`}>
-                                                                    <span className="text-[11px] font-semibold text-gray-700">{pool?.name || a.agentName}</span>
+                                                                    <span className="text-[11px] font-semibold text-gray-700">{(lang === 'zh' ? pool?.nameCN : pool?.name) || a.agentName}</span>
                                                                     {a.verdict && (
                                                                         <span className={`text-[9.5px] font-bold px-1.5 py-[1px] rounded-full ${verdictPillCls(a.verdict)}`}>
-                                                                            {a.verdict}
+                                                                            {lang === 'zh'
+                                                                                ? (a.verdict === 'Bullish' ? '看多' : a.verdict === 'Bearish' ? '看空' : a.verdict === 'Neutral' ? '中性' : a.verdict)
+                                                                                : a.verdict}
                                                                         </span>
                                                                     )}
                                                                     {a.changedMind && (
-                                                                        <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-amber-500/10 text-amber-700">changed mind</span>
+                                                                        <span className="text-[9.5px] font-semibold px-1.5 py-[1px] rounded-full bg-amber-500/10 text-amber-700">{lang === 'zh' ? '改变立场' : 'changed mind'}</span>
                                                                     )}
                                                                 </div>
                                                                 {/* Bubble — content only */}
@@ -1825,7 +1953,7 @@ export const RoundtableWorkbench: React.FC<{
                                                                             </div>
                                                                         </div>
                                                                         <span className="text-[11.5px] font-medium text-gray-600 shrink-0">
-                                                                            {a.name}
+                                                                            {lang === 'zh' ? (a.nameCN || a.name) : a.name}
                                                                         </span>
                                                                         <span className="inline-flex gap-0.5 ml-0.5 shrink-0">
                                                                             {[0, 1, 2].map(d => (
@@ -1879,7 +2007,7 @@ export const RoundtableWorkbench: React.FC<{
                                 <div
                                     key={a.id}
                                     className="w-5 h-5 rounded-full border-[1.5px] border-white overflow-hidden shadow-sm"
-                                    title={a.name}
+                                    title={lang === 'zh' ? (a.nameCN || a.name) : a.name}
                                     style={{ background: `linear-gradient(135deg, ${a.color}, ${a.color}88)` }}
                                 >
                                     <AgentAvatarImg nameOrId={a.id} size={18} />
@@ -1902,7 +2030,7 @@ export const RoundtableWorkbench: React.FC<{
                 );
             })()}
             {expandedAgent && (
-                <RoundtableAgentModal agentId={expandedAgent} onClose={() => setExpandedAgent(null)} />
+                <RoundtableAgentModal agentId={expandedAgent} onClose={() => setExpandedAgent(null)} lang={lang} />
             )}
         </div>
     );

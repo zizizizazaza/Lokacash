@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import crypto from 'crypto';
 import prisma from '../db.js';
 import { authRequired, authOptional, type AuthRequest } from '../middleware/auth.js';
 import { z } from 'zod';
@@ -254,6 +255,103 @@ router.delete('/conversations/:sessionId', authRequired, async (req: AuthRequest
     await prisma.chatMessage.deleteMany({
       where: { userId: req.userId, sessionId: req.params.sessionId as string },
     });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Shared chat links ────────────────────────────────────────────────
+// Generate a URL-safe short token (no padding, no slashes). 12 bytes →
+// 16 base64url chars, ~96 bits of entropy. Plenty for unguessable links.
+function makeShareToken(): string {
+  return crypto.randomBytes(12).toString('base64url');
+}
+
+// Create a share link for one of the caller's own sessions.
+const createShareSchema = z.object({ sessionId: z.string().min(1) });
+
+router.post('/share', authRequired, async (req: AuthRequest, res, next) => {
+  try {
+    const { sessionId } = createShareSchema.parse(req.body);
+
+    // Verify the session belongs to this user (and exists).
+    const own = await prisma.chatMessage.findFirst({
+      where: { userId: req.userId, sessionId },
+      select: { id: true },
+    });
+    if (!own) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    // Reuse an active token for the same session if one exists, so users
+    // who click "Share" repeatedly get a stable link.
+    const existing = await prisma.sharedChat.findFirst({
+      where: { userId: req.userId!, sessionId, revoked: false },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existing) {
+      res.json({ token: existing.id, createdAt: existing.createdAt });
+      return;
+    }
+
+    const token = makeShareToken();
+    const created = await prisma.sharedChat.create({
+      data: { id: token, userId: req.userId!, sessionId },
+    });
+    res.json({ token: created.id, createdAt: created.createdAt });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Public read-only fetch. No auth — anyone with the link can view.
+// Returns the conversation messages with personal fields stripped.
+router.get('/share/:token', async (req, res, next) => {
+  try {
+    const token = req.params.token;
+    const link = await prisma.sharedChat.findUnique({ where: { id: token } });
+    if (!link || link.revoked) {
+      res.status(404).json({ error: 'Share link not found or revoked' });
+      return;
+    }
+
+    const rows = await prisma.chatMessage.findMany({
+      where: { userId: link.userId, sessionId: link.sessionId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        agentId: true,
+        metadata: true,
+        createdAt: true,
+      },
+      take: 500,
+    });
+
+    res.json({
+      token,
+      sessionId: link.sessionId,
+      createdAt: link.createdAt,
+      messages: rows,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Owner can revoke any of their own share links.
+router.delete('/share/:token', authRequired, async (req: AuthRequest, res, next) => {
+  try {
+    const token = req.params.token as string;
+    const link = await prisma.sharedChat.findUnique({ where: { id: token } });
+    if (!link || link.userId !== req.userId) {
+      res.status(404).json({ error: 'Share link not found' });
+      return;
+    }
+    await prisma.sharedChat.update({ where: { id: token }, data: { revoked: true } });
     res.json({ ok: true });
   } catch (err) {
     next(err);

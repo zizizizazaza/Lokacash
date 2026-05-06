@@ -4510,19 +4510,57 @@ ${synFullContent || contextString}${langFooter}`;
               });
 
               // Pull a 1-2 sentence "rationale" tagline from each answer.
-              // Prefer an explicit RATIONALE: section, fall back to the first
-              // non-trivial sentence; cap the length so the table stays compact.
+              // Prefer an explicit RATIONALE: section, fall back to whatever
+              // free-form prose follows. Cap the length so the table stays
+              // compact but visible — earlier 120-char limit + naive single-
+              // sentence regex was producing visibly truncated rows like
+              // "FIL 当前价格存在三重背离：1）技术面超买（RSI 73." (cut off
+              // at the period after "73"). New rules:
+              //   • Allow up to ~340 chars so the typical 2-3 sentence
+              //     RATIONALE survives (chinese sentences are dense).
+              //   • Treat a period as a sentence end ONLY when followed by
+              //     whitespace / newline / end-of-string — so "RSI 73." or
+              //     "0.5x" no longer cuts mid-thought.
+              //   • If the body still exceeds the cap after that, trim at
+              //     the last sentence boundary <= cap (preserves grammar)
+              //     instead of mid-word.
               const extractTagline = (answer: string): string => {
                 if (!answer) return '';
                 const m = answer.match(/RATIONALE:\s*([\s\S]+?)(?:\n[A-Z_]+:|\n\n|$)/i);
                 let raw = (m && m[1].trim()) ? m[1].trim() : answer.trim();
                 raw = raw.replace(/SIGNAL:\s*\w+/gi, '').replace(/CONFIDENCE:\s*[\d.]+%?/gi, '').trim();
-                // First sentence in latin or CJK
-                const firstSentence = raw.match(/^[^.。!?！？\n]{4,180}[.。!?！？]?/);
-                let snippet = firstSentence ? firstSentence[0].trim() : raw.split('\n')[0].trim();
-                snippet = snippet.replace(/\s+/g, ' ');
-                if (snippet.length > 120) snippet = snippet.slice(0, 117).replace(/[\s,。,]+$/, '') + '…';
-                return snippet || (isZhQuery ? '(无核心论据)' : '(no rationale)');
+                // Collapse internal whitespace first.
+                raw = raw.replace(/\s+/g, ' ').trim();
+
+                const HARD_CAP = 340;
+                if (raw.length <= HARD_CAP) {
+                  // Short enough — use the whole RATIONALE.
+                  return raw || (isZhQuery ? '(无核心论据)' : '(no rationale)');
+                }
+
+                // Too long. Find the last sentence boundary at or before
+                // the cap. Sentence terminators: 。！？!? — but a Latin "."
+                // only qualifies when followed by space or end-of-string,
+                // so abbreviations / decimals don't trigger an early stop.
+                const window = raw.slice(0, HARD_CAP);
+                let cutAt = -1;
+                for (let i = 0; i < window.length; i++) {
+                  const ch = window[i];
+                  if (ch === '。' || ch === '！' || ch === '？' || ch === '!' || ch === '?') {
+                    cutAt = i + 1;
+                  } else if (ch === '.') {
+                    const next = window[i + 1];
+                    if (next === undefined || next === ' ' || next === '\t') {
+                      cutAt = i + 1;
+                    }
+                  }
+                }
+                if (cutAt < 60) {
+                  // Sentence boundary too early — fall back to the cap and
+                  // append an ellipsis. Don't end on punctuation.
+                  return window.replace(/[\s,，。]+$/, '') + '…';
+                }
+                return raw.slice(0, cutAt).trim() + (cutAt < raw.length ? ' …' : '');
               };
 
               // Localized verdict label

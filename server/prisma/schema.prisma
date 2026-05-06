@@ -364,6 +364,22 @@ model ChatMessage {
   @@index([agentId])
 }
 
+// ─── Shared chat links ────────────────────────────────────────────────
+// Public read-only share tokens for chat sessions. A user clicks the
+// Share button on a conversation; we mint a short token and persist
+// (token → userId + sessionId). Anyone with the URL can view; the
+// owner can revoke at any time.
+model SharedChat {
+  id        String   @id              // short nanoid token used in the URL
+  userId    String
+  sessionId String
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
 model EnterpriseVerification {
   id                    String                @id @default(cuid())
   userId                String

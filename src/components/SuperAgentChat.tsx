@@ -13,6 +13,7 @@ import { stripInternalResearchCitations } from '../utils/researchCitations';
 import { IFlytekStreamer } from '../services/iflytek';
 import { I } from './Icons';
 import PlanUpgradeEntry from './PlanUpgradeEntry';
+import ShareChatButton from './chat/ShareChatButton';
 import ModeSelector from './chat/ModeSelector';
 import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { RoundtableWorkbench, KnowledgeGraphView, buildKnowledgeGraph } from './chat/RoundtableWorkbench';
@@ -1371,6 +1372,35 @@ interface SuperAgentChatProps {
      *  page selection instead. Undefined when this chat was opened directly
      *  from a session URL (history restore) without a home-page context. */
     initialDomain?: 'stocks' | 'web3';
+    /** Demo replay mode: when set, load `/demo/${id}.json`, hydrate state
+     *  directly, and skip ALL backend interactions (no socket.emit, no
+     *  history fetch, no replay buffer pull). Drives the "Roundtable Live
+     *  Demo" button on the home page so new users can see a finished
+     *  Roundtable render instantly without burning quota or waiting for
+     *  real LLMs. The fixture id maps to a JSON file under public/demo/. */
+    demoFixture?: string;
+}
+
+/** Shape of a demo fixture under public/demo/{id}.json. Mirrors a subset
+ *  of ThinkingFlow + the user/assistant message pair so SuperAgentChat
+ *  can hydrate state directly without going through the socket. */
+interface DemoFixture {
+    id: string;
+    title?: string;
+    recordedAt?: string;
+    domain?: 'stocks' | 'web3';
+    mode?: 'auto' | 'fast' | 'roundtable';
+    userQuestion: string;
+    userTimestamp?: string;
+    assistantTimestamp?: string;
+    assistantContent: string;
+    htmlReport?: string;
+    sources?: SearchSource[];
+    thinkingFlow: ThinkingFlow;
+    /** Optional TokenSnapshotData for crypto demos. */
+    tokenCard?: TokenSnapshotData;
+    /** Optional QuoteCard for stock demos. */
+    quoteCard?: any;
 }
 
 /** Replace bare [Source Name] citations with [Source Name](url) using the sources list,
@@ -1484,7 +1514,7 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     return result;
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable, initialAssetHint, initialDomain }) => {
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable, initialAssetHint, initialDomain, demoFixture }) => {
     const navigate = useNavigate();
     const { ready: privyReady, authenticated: privyAuthenticated } = usePrivy();
     const [sessionId] = useState(() => {
@@ -3323,13 +3353,88 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     // ─── Push URL / Sync Session ID ────────────────────────
     useEffect(() => {
+        // Demo mode: keep the ?demo=... URL the user came in on, don't
+        // overwrite it with a fake sessionId.
+        if (demoFixture) return;
         if (!initialSessionId && !window.location.search.includes('session=')) {
             window.history.replaceState(null, '', `/?session=${sessionId}`);
         }
-    }, [sessionId, initialSessionId]);
+    }, [sessionId, initialSessionId, demoFixture]);
+
+    // ─── Demo fixture loader ───────────────────────────────
+    // When `demoFixture` is set, fetch the static JSON under public/demo/
+    // and hydrate state directly — no socket.emit, no history fetch, no
+    // replay buffer pull. The fixture carries a finished user/assistant
+    // exchange + complete ThinkingFlow (Roundtable rounds, consensus,
+    // module summaries) so the chat thread renders the same way it would
+    // after a real run that just completed.
+    useEffect(() => {
+        if (!demoFixture) return;
+        if (hasSentInitial.current) return;
+        hasSentInitial.current = true;
+        saLog('demo: loading fixture', { fixture: demoFixture });
+        const ac = new AbortController();
+        (async () => {
+            try {
+                const r = await fetch(`/demo/${demoFixture}.json`, { signal: ac.signal });
+                if (!r.ok) {
+                    console.error(`[SuperAgentChat] demo fixture ${demoFixture} HTTP ${r.status}`);
+                    return;
+                }
+                const fx = (await r.json()) as DemoFixture;
+                // Hydrate user + assistant message pair.
+                const userMsg: Message = {
+                    role: 'user',
+                    content: fx.userQuestion || '',
+                    timestamp: fx.userTimestamp || new Date().toLocaleTimeString(),
+                };
+                const assistantMsg: Message = {
+                    role: 'assistant',
+                    content: fx.assistantContent || '',
+                    timestamp: fx.assistantTimestamp || new Date().toLocaleTimeString(),
+                    sources: fx.sources,
+                };
+                setMessages([userMsg, assistantMsg]);
+                // The assistant slot is index 1.
+                activeMsgIdxRef.current = 1;
+                setActiveGraphMsgIdx(1);
+                // Hydrate thinking flow so the right-side panel + the
+                // Roundtable Workbench come up populated.
+                setThinkingProcesses({ 1: fx.thinkingFlow });
+                // Hydrate HTML report if present, but keep the view mode on
+                // 'docs' (the markdown-rendered native chat surface). The user
+                // can still toggle to 'web' via the Docs / Web tabs if they
+                // want to see the polished HTML — but the default first-run
+                // experience for the demo is the docs view, matching the look
+                // a normal Roundtable result has when synthesis just finished.
+                if (fx.htmlReport) {
+                    setHtmlReports({ 1: fx.htmlReport });
+                    setMsgViewMode({ 1: 'docs' });
+                }
+                // Hydrate token / quote cards if the fixture is a crypto demo.
+                if (fx.tokenCard) setTokenCards({ 1: fx.tokenCard });
+                if (fx.quoteCard) setQuoteCards({ 1: fx.quoteCard });
+                // Sync routedMode + chatMode from fixture so PlanPipeline
+                // and Workbench render the right variant.
+                if (fx.mode === 'roundtable') setChatMode('roundtable');
+                saLog('demo: fixture loaded', {
+                    fixture: demoFixture,
+                    rounds: fx.thinkingFlow?.rtRounds?.length ?? 0,
+                    sources: fx.sources?.length ?? 0,
+                });
+            } catch (err: any) {
+                if (err?.name === 'AbortError') return;
+                console.error('[SuperAgentChat] demo fixture load failed:', err);
+            }
+        })();
+        return () => ac.abort();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [demoFixture]);
 
     // ─── Auto-send initial message ──────────────────────────
     useEffect(() => {
+        // Demo mode: skip — the fixture loader above hydrated everything.
+        if (demoFixture) { hasSentInitial.current = true; return; }
         if (hasSentInitial.current) return;
         if (initialSessionId) {
             hasSentInitial.current = true;
@@ -3704,6 +3809,76 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         setTimeout(scrollUserMsgToTop, 150);
     };
 
+    /**
+     * Dev-only fixture exporter. Reads the current chat state (the user/
+     * assistant message pair, sources, ThinkingFlow, HTML report) and
+     * downloads a JSON file shaped like a DemoFixture, ready to drop into
+     * public/demo/<id>.json. Used once after a fresh real Roundtable run to
+     * capture a high-quality replay; the Roundtable Live Demo button on
+     * the home page then loads that file so visitors see the same render
+     * instantly without burning quota.
+     *
+     * Visible only when `import.meta.env.DEV` is true (i.e. local dev), so
+     * it never ships to production users. Lives next to handleStop so it
+     * can grab a snapshot mid-stream too if you click before stream_done.
+     */
+    const handleExportDemoFixture = () => {
+        const userMsg = messages.find((m) => m.role === 'user');
+        // Prefer the last assistant message that actually has content.
+        const assistantMsg = [...messages].reverse().find((m) => m.role === 'assistant' && m.content?.trim());
+        const assistantIdx = assistantMsg ? messages.lastIndexOf(assistantMsg) : -1;
+        const flow = assistantIdx >= 0 ? thinkingProcesses[assistantIdx] : undefined;
+        const html = assistantIdx >= 0 ? htmlReports[assistantIdx] : undefined;
+        const tokenCard = assistantIdx >= 0 ? tokenCards[assistantIdx] : undefined;
+        const quoteCard = assistantIdx >= 0 ? quoteCards[assistantIdx] : undefined;
+
+        const fixture = {
+            $schema: 'loka-demo-fixture-v1',
+            id: `roundtable-${(userMsg?.content || 'untitled').slice(0, 30).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`,
+            title: userMsg?.content?.slice(0, 60) || 'Untitled demo',
+            recordedAt: new Date().toISOString().slice(0, 10),
+            domain: initialDomain || 'stocks',
+            mode: chatMode,
+            userQuestion: userMsg?.content || '',
+            userTimestamp: userMsg?.timestamp,
+            assistantTimestamp: assistantMsg?.timestamp,
+            assistantContent: assistantMsg?.content || '',
+            htmlReport: html || '',
+            sources: assistantMsg?.sources || [],
+            thinkingFlow: flow || { modules: [], isActive: false },
+            tokenCard,
+            quoteCard,
+        };
+        const blob = new Blob([JSON.stringify(fixture, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${fixture.id}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        saLog('demo: exported fixture', { id: fixture.id, sizeKb: Math.round(blob.size / 1024) });
+    };
+
+    // Dev-only: expose the exporter on `window` so the on-screen button
+    // doesn't have to ship. To capture a new demo fixture during local dev:
+    //   1. Run a real Roundtable session through to completion
+    //   2. Open browser DevTools console
+    //   3. Call: window.__lokaExportDemoFixture()
+    //   4. JSON downloads → drop into public/demo/<id>.json
+    // The branch is gated by import.meta.env.DEV so Vite tree-shakes it out
+    // of production builds entirely (string + function both gone from the
+    // shipped bundle).
+    useEffect(() => {
+        if (!import.meta.env.DEV) return;
+        (window as any).__lokaExportDemoFixture = handleExportDemoFixture;
+        return () => {
+            try { delete (window as any).__lokaExportDemoFixture; } catch { /* ignore */ }
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [messages, thinkingProcesses, htmlReports, tokenCards, quoteCards, chatMode, initialDomain]);
+
     const handleStop = () => {
         if (!isStreaming) return;
         // Tell backend to abort
@@ -3765,7 +3940,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     {/* Chat column header (above chat content only) */}
                     <div className="flex items-center justify-between px-5 py-4 shrink-0">
                         <h1 className="text-[13px] font-semibold text-gray-800 truncate flex-1 min-w-0 mr-4">{chatTitle}</h1>
-                        <PlanUpgradeEntry size="sm" hideIfMax />
+                        <div className="flex items-center gap-1 shrink-0">
+                            <ShareChatButton
+                                sessionId={demoFixture ? null : sessionId}
+                                hasContent={!demoFixture && messages.some(m => m.role === 'assistant' && (m.content || '').trim().length > 0)}
+                                staticShareUrl={demoFixture ? `${window.location.origin}/?demo=${encodeURIComponent(demoFixture)}` : undefined}
+                                lang="en"
+                            />
+                            <PlanUpgradeEntry size="sm" hideIfMax />
+                        </div>
                     </div>
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overscroll-y-contain px-4 md:px-6 xl:px-8 py-8 pb-28">
                         <div className={`mx-auto w-full ${showToc ? 'max-w-[1380px]' : 'max-w-4xl'}`}>
@@ -4715,6 +4898,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     </button>
                                 </div>
                             )}
+                            {/* Dev-only: export current chat state as a demo
+                                fixture JSON. The visible button has been removed
+                                to eliminate any risk of leaking into production.
+                                The function `handleExportDemoFixture` is still
+                                available — to capture a new fixture, open the
+                                browser console after a session completes and run:
+                                  window.__lokaExportDemoFixture?.()
+                                (the hook is set up just below in a useEffect). */}
+                            {/* Demo-mode banner: replaces the input area's prompt
+                                line so the visitor knows this is a replay. */}
+                            {/* Demo-mode pill removed for production polish — the
+                                fixture replay is now silent. Re-enable here if a
+                                visible badge is ever desired. */}
                             <div
                                 className="group/composer bg-white backdrop-blur-xl border border-gray-200/80 rounded-[20px] relative ring-1 ring-black/[0.04] transition-all duration-200 focus-within:border-gray-300 focus-within:ring-gray-300/30 focus-within:shadow-[0_20px_60px_-12px_rgba(15,23,42,0.25),0_6px_20px_-4px_rgba(15,23,42,0.12)]"
                                 style={{
@@ -4780,9 +4976,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     value={inputText}
                                     onChange={e => setInputText(e.target.value)}
                                     onPaste={handleChatPaste}
-                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isStreaming) handleSend(); } }}
-                                    placeholder={voiceState !== 'idle' ? '' : isStreaming ? 'Waiting for reply… type your next message' : 'Ask a follow-up…'}
-                                    disabled={voiceState !== 'idle'}
+                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isStreaming && !demoFixture) handleSend(); } }}
+                                    placeholder={
+                                        voiceState !== 'idle'
+                                            ? ''
+                                            : demoFixture
+                                                ? '🎬 Demo replay — start a new chat above to ask your own questions'
+                                                : isStreaming
+                                                    ? 'Waiting for reply… type your next message'
+                                                    : 'Ask a follow-up…'
+                                    }
+                                    disabled={voiceState !== 'idle' || !!demoFixture}
                                     className="w-full bg-transparent outline-none resize-none text-[14.5px] text-gray-900 placeholder:text-gray-400 px-5 pt-4 pb-1 leading-relaxed overflow-y-auto"
                                     style={{ minHeight: '50px', maxHeight: '180px', visibility: voiceState !== 'idle' ? 'hidden' : 'visible' }}
                                 />
@@ -4822,8 +5026,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         </button>
                                         <button
                                             onClick={isStreaming ? handleStop : handleSend}
-                                            disabled={!isStreaming && !inputText.trim()}
-                                            title={isStreaming ? 'Stop generating' : 'Send'}
+                                            disabled={!!demoFixture || (!isStreaming && !inputText.trim())}
+                                            title={demoFixture ? 'Demo mode — input disabled' : isStreaming ? 'Stop generating' : 'Send'}
                                             aria-label={isStreaming ? 'Stop generating' : 'Send'}
                                             className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-all ml-1 ${isStreaming
                                                     ? 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'

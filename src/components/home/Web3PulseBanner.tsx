@@ -60,12 +60,56 @@ const sparkPath = (values: number[], w: number, h: number): string => {
     }).join(' ');
 };
 
+// Unicode subscript digits — used to compact memecoin prices that have a
+// long run of zeros after the decimal. Industry standard: CoinGecko,
+// Dexscreener and GMGN all show "$0.0₇5" instead of "$0.00000005" because
+// the latter overflows narrow card cells (and gets truncated to "$0.000…"
+// behind a `truncate` class, which is the bug we hit on the trending grid).
+const SUBSCRIPT_DIGITS = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+const toSubscript = (n: number): string =>
+    String(n).split('').map((d) => SUBSCRIPT_DIGITS[Number(d)] ?? d).join('');
+
 const fmtPrice = (n: number) => {
     if (!isFinite(n)) return '—';
-    if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    if (n >= 1)    return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
-    if (n >= 0.01) return n.toLocaleString('en-US', { maximumFractionDigits: 4 });
-    return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+    if (n === 0) return '0';
+    const abs = Math.abs(n);
+    if (abs >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+    if (abs >= 1)    return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    if (abs >= 0.01) return n.toLocaleString('en-US', { maximumFractionDigits: 4 });
+    // The boundary at 0.0001 is the highest price we still render with the
+    // "0.00012" plain form. Below that, switch to subscript-zero notation
+    // so "$0.0000005" becomes "$0.0₆5" — fits the card cell with no
+    // truncation and is the convention serious memecoin traders expect.
+    if (abs >= 0.0001) return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+
+    // Subscript-zero rendering (memecoin tier).
+    //   1) Convert to fixed-point with enough precision to keep ~4 sig figs
+    //   2) Count the run of zeros immediately after the decimal point
+    //   3) Take the next 3-4 significant digits as the tail (drop trailing zeros)
+    //   4) Stitch into "0.0<subscript-zeros>tail"
+    if (abs >= 1e-15) {
+        // 18 decimals is enough headroom for any practical token price.
+        const fixed = abs.toFixed(18);
+        // fixed looks like "0.000000050000000000" — split off whole vs fractional.
+        const [whole, frac = ''] = fixed.split('.');
+        // Count leading zeros in the fractional portion.
+        const leading = frac.match(/^0+/)?.[0].length ?? 0;
+        // Significant digits start right after those zeros.
+        const tail = frac.slice(leading).replace(/0+$/, '').slice(0, 4) || '0';
+        const sign = n < 0 ? '-' : '';
+        // Subscript only makes the format compact when there are >= 4 zeros.
+        // 0.0001-0.0003 is already handled by the branch above; below that,
+        // we're in territory where the subscript is a clear win.
+        if (leading >= 4) {
+            return `${sign}${whole}.0${toSubscript(leading - 1)}${tail}`;
+        }
+        // Edge case (very rare given the >= 0.0001 branch above): fall back
+        // to plain decimal rendering so we never produce "0.0₂..." which
+        // looks weird for shallow zeros.
+        return abs.toFixed(leading + 4).replace(/(\.\d*?[1-9])0+$/, '$1');
+    }
+    // Below 1e-15: ultra-dust / data error. Scientific keeps the cell sane.
+    return n.toExponential(2);
 };
 
 // AssetHint travels from a Web3 trending-card click into the backend

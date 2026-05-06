@@ -258,6 +258,35 @@ export async function runConsensusEngine(
     throw new Error('No agents could be added to the group. The Python consensus engine rejected all agent registrations.');
   }
 
+  // ── Language lock: prepend a directive to the user message so each
+  //    persona LLM produces RATIONALE / KEY_EVIDENCE in the user's language.
+  //    Without this, even with the language rule baked into the persona
+  //    system prompt (analysts.ts), the LLM tends to default to English
+  //    when its English-heavy character description outweighs a short
+  //    Chinese question. The schema FIELD LABELS (SIGNAL/CONFIDENCE/...)
+  //    must stay English so socket/index.ts regex parsers keep working,
+  //    so we explicitly carve that out.
+  //
+  //    Detection: any CJK ideograph in [一-鿿] → Chinese mode.
+  //    English mode is the default when no CJK is present (handles pure
+  //    English / Korean / Japanese / mixed romanized queries).
+  const isZhMessage = /[一-鿿]/.test(message || '');
+  // Bookend the user's actual question with TWO language-lock blocks: one
+  // before (sets context), one after (last-thing-the-LLM-saw recency bias).
+  // DeepSeek V3 routinely ignored a single-prefix lock when the persona
+  // system prompt was heavily English; the post-message reminder bumps
+  // compliance materially.
+  const lockBefore = isZhMessage
+    ? `[语言锁定 — 重要]\n请用中文回答。所有 KEY_EVIDENCE 子弹点、RATIONALE 段落、WOULD_CHANGE_MY_MIND 全部使用中文,不要混入英文段落。schema 字段名 (SIGNAL / CONFIDENCE / KEY_EVIDENCE / RATIONALE / WOULD_CHANGE_MY_MIND) 保持英文不变。代码 (BTC, NVDA, BABA 等) 和数字单位 (USD, %, bps) 原样保留。\n\n用户问题:\n`
+    : `[LANGUAGE LOCK — IMPORTANT]\nReply in English. All KEY_EVIDENCE bullets, RATIONALE prose, and WOULD_CHANGE_MY_MIND must be in English — do NOT mix in any other language. Schema field labels (SIGNAL / CONFIDENCE / KEY_EVIDENCE / RATIONALE / WOULD_CHANGE_MY_MIND) stay English (unchanged). Tickers (BTC, NVDA, BABA) and numeric units (USD, %, bps) are kept as-is.\n\nUser question:\n`;
+  const lockAfter = isZhMessage
+    ? `\n\n[再次确认 — 输出语言]\n上述问题是中文。请严格用中文回写 KEY_EVIDENCE / RATIONALE / WOULD_CHANGE_MY_MIND。任何英文回答会被视为格式错误。schema 字段名仍保持英文。`
+    : `\n\n[FINAL REMINDER — OUTPUT LANGUAGE]\nThe question above is in English. Reply with KEY_EVIDENCE / RATIONALE / WOULD_CHANGE_MY_MIND entirely in English. Schema field labels stay English.`;
+  const lockedMessage = `${lockBefore}${message}${lockAfter}`;
+  console.log(
+    `[Consensus] Language lock: ${isZhMessage ? 'zh' : 'en'} (msg.len=${message.length}, prefixed.len=${lockedMessage.length})`,
+  );
+
   // ── Step 3: Post user message ────────────────────────────
   console.log(`[Consensus] Step 3: Posting user message...`);
   const msgResult = await pyFetch(`/groups/${groupId}/messages`, {
@@ -265,7 +294,7 @@ export async function runConsensusEngine(
     body: JSON.stringify({
       sender_id: userId,
       sender_type: 'user',
-      content: message,
+      content: lockedMessage,
     }),
   });
   const messageId = msgResult.message_id;
@@ -297,7 +326,10 @@ export async function runConsensusEngine(
     `[Consensus] Step 4: Executing consensus (members=${members.length} max_rounds=${dynamicMaxRounds} stability_horizon=${stabilityHorizon} streaming=${options.onLiveEvent ? 'yes' : 'no'})...`,
   );
   const consensusBody = {
-    task: message,
+    // Use the language-locked variant so the consensus task description
+    // also carries the directive — some aegean code paths feed `task` into
+    // per-agent prompts directly, bypassing the `messages` channel.
+    task: lockedMessage,
     message_id: messageId,
     quorum_threshold: 0.6,
     stability_horizon: stabilityHorizon,

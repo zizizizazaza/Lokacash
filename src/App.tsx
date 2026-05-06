@@ -15,6 +15,7 @@ import ApiLanding from './components/ApiLanding';
 import AuthModal from './components/AuthModal';
 import TxModal from './components/TxModal';
 import OAuthCallbackHandler from './components/OAuthCallbackHandler';
+import SharedChatView from './components/SharedChatView';
 import { PAGE_PATHS } from './constants';
 import { api } from './services/api';
 import { socket } from './services/socket';
@@ -218,6 +219,18 @@ const App: React.FC = () => {
             <Route path="/developers/*" element={<ApiLanding />} />
           </Routes>
         </div>
+      </div>
+    );
+  }
+
+  // Public read-only share view — no sidebar, no auth required.
+  if (location.pathname.startsWith('/share/')) {
+    return (
+      <div className="min-h-screen w-screen bg-white">
+        <AnimStyles />
+        <Routes>
+          <Route path="/share/:token" element={<SharedChatView />} />
+        </Routes>
       </div>
     );
   }
