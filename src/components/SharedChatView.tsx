@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
-import { renderMarkdownContent } from '../utils/markdown';
+import { renderMarkdownContent, QuoteCard, TokenCard, type TokenSnapshotData } from '../utils/markdown';
+import { RoundtableWorkbench } from './chat/RoundtableWorkbench';
+import type { ThinkingFlow } from './SuperAgentChat';
 
 interface ShareMsg {
   id: string;
@@ -17,6 +19,22 @@ interface SharePayload {
   sessionId: string;
   createdAt: string;
   messages: ShareMsg[];
+}
+
+interface ParsedMeta {
+  thinkingFlow?: ThinkingFlow;
+  consensusResult?: any;
+  liveDebateLog?: any;
+  analystIds?: string[];
+  htmlReport?: string;
+  sources?: any[];
+  quoteCard?: any;
+  tokenCard?: TokenSnapshotData;
+}
+
+function parseMeta(raw: string | null | undefined): ParsedMeta | null {
+  if (!raw) return null;
+  try { return JSON.parse(raw) as ParsedMeta; } catch { return null; }
 }
 
 const SharedChatView: React.FC = () => {
@@ -42,10 +60,19 @@ const SharedChatView: React.FC = () => {
     ? { brand: 'Loka', readonly: '只读分享', cta: '在 Loka 开始你的对话', tryIt: '前往 Loka', notFound: '链接不存在或已被作者撤销', loading: '加载中…' }
     : { brand: 'Loka', readonly: 'Read-only share', cta: 'Start your own conversation on Loka', tryIt: 'Open Loka', notFound: 'Link not found or revoked by the author', loading: 'Loading…' };
 
+  // Look up the most recent user message preceding `idx` to use as the
+  // RoundtableWorkbench topic label.
+  const topicLabelBefore = (msgs: ShareMsg[], idx: number) => {
+    for (let i = idx - 1; i >= 0; i--) {
+      if (msgs[i]?.role === 'user') return msgs[i].content || '';
+    }
+    return '';
+  };
+
   return (
     <div className="min-h-screen w-full bg-white text-gray-900">
       <header className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm border-b border-gray-100">
-        <div className="max-w-3xl mx-auto px-5 py-3 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-5 py-3 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <span className="w-7 h-7 rounded-lg bg-gray-900 text-white flex items-center justify-center text-[13px] font-bold">L</span>
             <span className="text-[14px] font-semibold tracking-tight">{t.brand}</span>
@@ -60,7 +87,7 @@ const SharedChatView: React.FC = () => {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-5 py-8">
+      <main className="max-w-6xl mx-auto px-5 py-8">
         {loading && (
           <div className="text-[13px] text-gray-400">{t.loading}</div>
         )}
@@ -73,10 +100,10 @@ const SharedChatView: React.FC = () => {
 
         {!loading && data && (
           <div className="space-y-8">
-            {data.messages.map(m => {
+            {data.messages.map((m, idx) => {
               if (m.role === 'user') {
                 return (
-                  <div key={m.id} className="flex justify-end">
+                  <div key={m.id} className="max-w-3xl mx-auto flex justify-end">
                     <div className="max-w-[85%] px-4 py-3 bg-gray-100 rounded-2xl rounded-br-sm border border-gray-200/70 text-[13.5px] text-gray-900 whitespace-pre-wrap break-words">
                       {m.content}
                     </div>
@@ -84,11 +111,44 @@ const SharedChatView: React.FC = () => {
                 );
               }
               if (m.role === 'assistant') {
+                const meta = parseMeta(m.metadata);
+                const flow = meta?.thinkingFlow;
+                const isRoundtable =
+                  flow?.routedMode === 'roundtable' ||
+                  !!meta?.consensusResult ||
+                  (flow?.rtRounds?.length ?? 0) > 0;
+                const showWorkbench = isRoundtable && !!flow;
+
                 return (
-                  <div key={m.id} className="space-y-2">
-                    <div className="text-[11px] uppercase tracking-wider text-gray-400">{m.agentId || 'Loka'}</div>
-                    <div className="text-[13.5px] text-gray-800 leading-relaxed markdown-content">
-                      {renderMarkdownContent(m.content || '')}
+                  <div key={m.id} className="space-y-4">
+                    {showWorkbench && (
+                      <div className="w-full">
+                        <RoundtableWorkbench
+                          thinking={flow!}
+                          isLive={false}
+                          topicLabel={topicLabelBefore(data.messages, idx)}
+                        />
+                      </div>
+                    )}
+                    <div className="max-w-3xl mx-auto space-y-3">
+                      <div className="text-[11px] uppercase tracking-wider text-gray-400">{m.agentId || 'Loka'}</div>
+                      {meta?.quoteCard && (
+                        <QuoteCard
+                          quote={{
+                            ...meta.quoteCard,
+                            // Re-derive lang from user question so labels match
+                            // the language of the conversation rather than
+                            // whatever was captured at recording time.
+                            lang: meta.quoteCard.lang || (isZh ? 'zh' : 'en'),
+                          }}
+                        />
+                      )}
+                      {meta?.tokenCard && meta.tokenCard.id && (
+                        <TokenCard token={meta.tokenCard} lang={isZh ? 'zh' : 'en'} />
+                      )}
+                      <div className="text-[13.5px] text-gray-800 leading-relaxed markdown-content">
+                        {renderMarkdownContent(m.content || '')}
+                      </div>
                     </div>
                   </div>
                 );
