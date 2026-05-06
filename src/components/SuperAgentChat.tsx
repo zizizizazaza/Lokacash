@@ -14,6 +14,8 @@ import { IFlytekStreamer } from '../services/iflytek';
 import { I } from './Icons';
 import PlanUpgradeEntry from './PlanUpgradeEntry';
 import ShareChatButton from './chat/ShareChatButton';
+import ImageLightbox from './chat/ImageLightbox';
+import ImageCapToast from './chat/ImageCapToast';
 import ModeSelector from './chat/ModeSelector';
 import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { RoundtableWorkbench, KnowledgeGraphView, buildKnowledgeGraph } from './chat/RoundtableWorkbench';
@@ -1379,6 +1381,10 @@ interface SuperAgentChatProps {
      *  Roundtable render instantly without burning quota or waiting for
      *  real LLMs. The fixture id maps to a JSON file under public/demo/. */
     demoFixture?: string;
+    /** Images (data URLs) the user pasted on the home screen before
+     *  navigating into chat. Attached to the very first user turn alongside
+     *  `initialMessage` so the vision model sees them on the kickoff send. */
+    initialImages?: string[];
 }
 
 /** Shape of a demo fixture under public/demo/{id}.json. Mirrors a subset
@@ -1514,7 +1520,7 @@ function injectSourceUrls(text: string, sources?: SearchSource[]): string {
     return result;
 }
 
-const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable, initialAssetHint, initialDomain, demoFixture }) => {
+const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack, agentCount = 2, selectedAgentId, initialSessionId, initialChatMode, autoStartRoundtable, initialAssetHint, initialDomain, demoFixture, initialImages }) => {
     const navigate = useNavigate();
     const { ready: privyReady, authenticated: privyAuthenticated } = usePrivy();
     const [sessionId] = useState(() => {
@@ -1678,20 +1684,39 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const agentPickerRef = useRef<HTMLDivElement>(null);
     const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
     const voiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const [chatPastedImages, setChatPastedImages] = useState<string[]>([]);
+    const [chatPastedImages, setChatPastedImages] = useState<string[]>(() => initialImages || []);
+    const [chatLightboxSrc, setChatLightboxSrc] = useState<string | null>(null);
+    const [imageCapToast, setImageCapToast] = useState<string | null>(null);
     const chatFileRef = useRef<HTMLInputElement>(null);
+
+    /** Backend caps multimodal turns at 4 images (server/socket/index.ts
+     *  normalizeIncomingImages). Enforce client-side too so the user gets
+     *  immediate feedback instead of having extras silently dropped. */
+    const MAX_IMAGES = 4;
 
     const handleChatPaste = (e: React.ClipboardEvent) => {
         const items = Array.from(e.clipboardData.items);
         const imageItems = items.filter(it => it.type.startsWith('image/'));
         if (!imageItems.length) return;
         e.preventDefault();
+        let dropped = 0;
         imageItems.forEach(item => {
             const file = item.getAsFile();
             if (!file) return;
             const reader = new FileReader();
             reader.onload = ev => {
-                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
+                if (!ev.target?.result) return;
+                setChatPastedImages(prev => {
+                    if (prev.length >= MAX_IMAGES) {
+                        dropped += 1;
+                        return prev;
+                    }
+                    return [...prev, ev.target!.result as string];
+                });
+                // Defer the toast so it fires after the state update batch.
+                if (dropped > 0) {
+                    setImageCapToast(`Up to ${MAX_IMAGES} images per message.`);
+                }
             };
             reader.readAsDataURL(file);
         });
@@ -1699,10 +1724,21 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     const handleChatFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
+        let dropped = 0;
         files.forEach(file => {
             const reader = new FileReader();
             reader.onload = ev => {
-                if (ev.target?.result) setChatPastedImages(prev => [...prev, ev.target!.result as string]);
+                if (!ev.target?.result) return;
+                setChatPastedImages(prev => {
+                    if (prev.length >= MAX_IMAGES) {
+                        dropped += 1;
+                        return prev;
+                    }
+                    return [...prev, ev.target!.result as string];
+                });
+                if (dropped > 0) {
+                    setImageCapToast(`Up to ${MAX_IMAGES} images per message.`);
+                }
             };
             reader.readAsDataURL(file);
         });
@@ -3056,7 +3092,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         };
     }, [sessionId, chatMode, chatSelectedAgent]);
 
-    const sendToAI = useCallback((text: string, existingMessages?: Message[], analystIds?: string[], assetHint?: SuperAgentChatProps['initialAssetHint']) => {
+    const sendToAI = useCallback((text: string, existingMessages?: Message[], analystIds?: string[], assetHint?: SuperAgentChatProps['initialAssetHint'], imagesArg?: string[]) => {
         // Bump generation so stale events from a previous run are dropped
         chatGenRef.current += 1;
         activeChatGenRef.current = chatGenRef.current;
@@ -3141,6 +3177,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             // Backend uses this to bypass the LLM "stock or crypto?" guess and
             // route deterministically — see socket/index.ts domain override.
             ...(initialDomain ? { domain: initialDomain } : {}),
+            // Vision attachments — backend's normalizeIncomingImages expects
+            // `{ url }[]`. The data: URL captured from clipboard/file is a
+            // valid `url` value, so we send it as-is (capped at 4 server-side).
+            ...(imagesArg && imagesArg.length > 0
+                ? { images: imagesArg.slice(0, 4).map((url) => ({ url })) }
+                : {}),
         });
         saLog('sendToAI emit agent:chat done (see [LokaSocket] for queued vs live)');
 
@@ -3479,7 +3521,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             detail: { id: sessionId, title: summarizeTitle(initialMessage), agentId: chatSelectedAgent || 'auto' }
         }));
 
-        const userMsg: Message = { role: 'user', content: initialMessage, timestamp: new Date().toLocaleTimeString() };
+        const initialImgs = (initialImages || []).slice(0, 4);
+        const userMsg: Message = {
+            role: 'user',
+            content: initialMessage,
+            timestamp: new Date().toLocaleTimeString(),
+            ...(initialImgs.length ? { images: initialImgs } : {}),
+        };
         const initialMessages = [userMsg];
         setMessages(initialMessages);
 
@@ -3532,9 +3580,15 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             return;
         }
 
-        saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), ...socket.getDebugState() });
-        setTimeout(() => { sendToAI(initialMessage, initialMessages, undefined, initialAssetHint); setTimeout(scrollUserMsgToTop, 150); }, 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode, initialAssetHint]);
+        saLog('initial: schedule sendToAI in 50ms', { initialPreview: initialMessage.slice(0, 80), imageCount: initialImgs.length, ...socket.getDebugState() });
+        setTimeout(() => {
+            sendToAI(initialMessage, initialMessages, undefined, initialAssetHint, initialImgs.length ? initialImgs : undefined);
+            // Clear the seeded preview strip — initialImages was a one-shot
+            // hand-off from the home page, not a sticky attachment.
+            if (initialImgs.length) setChatPastedImages([]);
+            setTimeout(scrollUserMsgToTop, 150);
+        }, 50);
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode, initialAssetHint, initialImages]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSummonConfirm = useCallback(() => {
@@ -3780,15 +3834,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     }, [autoConfirmTick]);
 
     const handleSend = () => {
-        if (!inputText.trim() || isStreaming) return;
+        if ((!inputText.trim() && chatPastedImages.length === 0) || isStreaming) return;
         const text = inputText.trim();
-        saLog('handleSend', { textPreview: text.slice(0, 80), isStreaming, ...socket.getDebugState() });
+        const imgs = chatPastedImages.slice(0, 4);
+        saLog('handleSend', { textPreview: text.slice(0, 80), imageCount: imgs.length, isStreaming, ...socket.getDebugState() });
 
         // Roundtable mode: intercept to show summon character selection inline
         if (chatMode === 'roundtable' && !summonBypassRef.current) {
-            const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
+            const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString(), ...(imgs.length ? { images: imgs } : {}) };
             setMessages(prev => [...prev, userMsg]);
             setInputText('');
+            setChatPastedImages([]);
             setPendingRtText(text);
             setSummonPhase('loading');
             setSelectedSummonIds(new Set(DEFAULT_SUMMON_IDS));
@@ -3800,11 +3856,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         }
 
         summonBypassRef.current = false;
-        const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
+        const userMsg: Message = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString(), ...(imgs.length ? { images: imgs } : {}) };
         const newMessages = [...messages, userMsg];
         setMessages(newMessages);
         setInputText('');
-        sendToAI(text, newMessages);
+        setChatPastedImages([]);
+        sendToAI(text, newMessages, undefined, undefined, imgs.length ? imgs : undefined);
         // Scroll so the user’s question appears at the top
         setTimeout(scrollUserMsgToTop, 150);
     };
@@ -3914,6 +3971,8 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
 
     return (
         <div className="flex h-full bg-white overflow-hidden">
+            <ImageLightbox src={chatLightboxSrc} onClose={() => setChatLightboxSrc(null)} />
+            <ImageCapToast message={imageCapToast} onDismiss={() => setImageCapToast(null)} />
             <style>{`
                 @keyframes voice-bar { 0%,100%{height:3px} 50%{height:10px} }
                 .voice-bar { min-height: 3px; display:inline-block; border-radius:9999px; background:#9ca3af; }
@@ -4073,7 +4132,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     {msg.role === 'user' ? (
                                         <div className="flex justify-end">
                                             <div className="max-w-[72%] px-4 py-3 bg-gray-100 text-gray-900 rounded-2xl rounded-br-sm border border-gray-200/70">
-                                                <p className="text-[15px] leading-relaxed tracking-[-0.011em]" style={{ fontFamily: "'Open Runde', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif", fontWeight: 500 }}>{msg.content}</p>
+                                                {msg.images && msg.images.length > 0 && (
+                                                    <div className="flex flex-wrap gap-2 mb-2">
+                                                        {msg.images.map((src, ii) => (
+                                                            <img
+                                                                key={ii}
+                                                                src={src}
+                                                                alt=""
+                                                                className="max-h-40 max-w-[180px] rounded-lg object-cover border border-gray-200/70 cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition-all"
+                                                                onClick={() => setChatLightboxSrc(src)}
+                                                            />
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {msg.content && (
+                                                    <p className="text-[15px] leading-relaxed tracking-[-0.011em]" style={{ fontFamily: "'Open Runde', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif", fontWeight: 500 }}>{msg.content}</p>
+                                                )}
                                                 <p className="text-[9px] text-gray-400 mt-1.5 text-right">{msg.timestamp}</p>
                                             </div>
                                         </div>
@@ -4959,9 +5033,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
                                         {chatPastedImages.map((src, idx) => (
                                             <div key={idx} className="relative group shrink-0">
-                                                <img src={src} alt="" className="w-12 h-12 rounded-xl object-cover border border-gray-200 shadow-sm" />
+                                                <img
+                                                    src={src}
+                                                    alt=""
+                                                    className="w-12 h-12 rounded-xl object-cover border border-gray-200 shadow-sm cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition-all"
+                                                    onClick={() => setChatLightboxSrc(src)}
+                                                />
                                                 <button
-                                                    onClick={() => setChatPastedImages(prev => prev.filter((_, i) => i !== idx))}
+                                                    onClick={(e) => { e.stopPropagation(); setChatPastedImages(prev => prev.filter((_, i) => i !== idx)); }}
                                                     className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                                                 >
                                                     <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>

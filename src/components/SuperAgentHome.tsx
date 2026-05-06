@@ -2,6 +2,8 @@
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { usePrivy } from '@privy-io/react-auth';
 import { I, InputIcons, UseCaseIcons } from './Icons';
+import ImageLightbox from './chat/ImageLightbox';
+import ImageCapToast from './chat/ImageCapToast';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
 import GuruCarousel from './GuruCarousel';
@@ -272,6 +274,10 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
   const [liveDemoActive, setLiveDemoActive] = useState(false);
   const [phIdx, setPhIdx] = useState(0);
   const [pastedImages, setPastedImages] = useState<string[]>([]);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [imageCapToast, setImageCapToast] = useState<string | null>(null);
+  /** Backend caps multimodal turns at 4 images (server/socket/index.ts). */
+  const HOME_MAX_IMAGES = 4;
   const homeFileRef = useRef<HTMLInputElement>(null);
   const [homeVoiceState, setHomeVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const homeVoiceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -415,12 +421,23 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     const imageItems = items.filter(it => it.type.startsWith('image/'));
     if (!imageItems.length) return;
     e.preventDefault();
+    let dropped = 0;
     imageItems.forEach(item => {
       const file = item.getAsFile();
       if (!file) return;
       const reader = new FileReader();
       reader.onload = ev => {
-        if (ev.target?.result) setPastedImages(prev => [...prev, ev.target!.result as string]);
+        if (!ev.target?.result) return;
+        setPastedImages(prev => {
+          if (prev.length >= HOME_MAX_IMAGES) {
+            dropped += 1;
+            return prev;
+          }
+          return [...prev, ev.target!.result as string];
+        });
+        if (dropped > 0) {
+          setImageCapToast(`Up to ${HOME_MAX_IMAGES} images per message.`);
+        }
       };
       reader.readAsDataURL(file);
     });
@@ -428,10 +445,21 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
   const handleHomeFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
+    let dropped = 0;
     files.forEach(file => {
       const reader = new FileReader();
       reader.onload = ev => {
-        if (ev.target?.result) setPastedImages(prev => [...prev, ev.target!.result as string]);
+        if (!ev.target?.result) return;
+        setPastedImages(prev => {
+          if (prev.length >= HOME_MAX_IMAGES) {
+            dropped += 1;
+            return prev;
+          }
+          return [...prev, ev.target!.result as string];
+        });
+        if (dropped > 0) {
+          setImageCapToast(`Up to ${HOME_MAX_IMAGES} images per message.`);
+        }
       };
       reader.readAsDataURL(file);
     });
@@ -791,7 +819,11 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           // Demo replay: when ?demo=<id> is present, hydrate SuperAgentChat
           // from public/demo/<id>.json directly — no backend interactions.
           demoFixture={demoParam || undefined}
-          onBack={() => { setChatMessage(null); setChatAssetHint(null); setSelectedAgent(null); setSelectedScenario(null); setLiveDemoActive(false); navigate('/'); }}
+          // Forward any images the user pasted on the home composer so the
+          // first turn includes them. SuperAgentChat clears the strip after
+          // its initial-send fires (one-shot hand-off).
+          initialImages={pastedImages.length > 0 ? pastedImages : undefined}
+          onBack={() => { setChatMessage(null); setChatAssetHint(null); setSelectedAgent(null); setSelectedScenario(null); setPastedImages([]); setLiveDemoActive(false); navigate('/'); }}
         />
       </>
     );
@@ -808,6 +840,8 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
         ...(domain === 'web3' ? { backgroundColor: '#FFFFFF' } : { backgroundColor: '#FFFFFF' }),
       }}
     >
+      <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      <ImageCapToast message={imageCapToast} onDismiss={() => setImageCapToast(null)} />
       {/* ── Stocks page: classical / editorial styling (scoped) ── */}
       {domain === 'stocks' && (
         <style>{`
@@ -969,9 +1003,14 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
               <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
                 {pastedImages.map((src, idx) => (
                   <div key={idx} className="relative group shrink-0">
-                    <img src={src} alt="" className="w-14 h-14 rounded-xl object-cover border border-gray-200 shadow-sm" />
+                    <img
+                      src={src}
+                      alt=""
+                      className="w-14 h-14 rounded-xl object-cover border border-gray-200 shadow-sm cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition-all"
+                      onClick={() => setLightboxSrc(src)}
+                    />
                     <button
-                      onClick={() => setPastedImages(prev => prev.filter((_, i) => i !== idx))}
+                      onClick={(e) => { e.stopPropagation(); setPastedImages(prev => prev.filter((_, i) => i !== idx)); }}
                       className="absolute -top-1.5 -right-1.5 w-4.5 h-4.5 w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                     >
                       <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>

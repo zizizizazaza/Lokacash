@@ -19,6 +19,10 @@ export interface Message {
   isAppRunning?: boolean;
   appType?: string; // 'hedgefund' | 'stockanalysis' | etc.
   collapsibleReport?: string; // Background report to render as a collapsible <details> block
+  /** Inline images attached to a user message (data URLs). Forwarded to the
+   *  backend on send so vision-capable models can describe / answer about
+   *  them, and rendered under the user bubble for context on history view. */
+  images?: string[];
 }
 
 // ─── Agent Thinking Process ─────────────────────────────────

@@ -16,6 +16,11 @@ export interface Message {
      * because the user ran out of Fast and Roundtable quota. Renders an
      * inline upgrade hint above the response. */
     liteMode?: { hint: string } | null;
+    /** Inline images attached to a user turn (data: URLs from clipboard /
+     * file picker). Forwarded to the backend so vision models can read
+     * them, and rendered under the user bubble for visual context on
+     * replay. Capped at 4 by the backend on send. */
+    images?: string[];
 }
 
 // ── Search / Source ─────────────────────────────────────────────────────
