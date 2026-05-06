@@ -226,7 +226,7 @@ const App: React.FC = () => {
   // Public read-only share view — no sidebar, no auth required.
   if (location.pathname.startsWith('/share/')) {
     return (
-      <div className="h-screen w-screen overflow-auto bg-white">
+      <div className="min-h-screen w-screen bg-white">
         <AnimStyles />
         <Routes>
           <Route path="/share/:token" element={<SharedChatView />} />
