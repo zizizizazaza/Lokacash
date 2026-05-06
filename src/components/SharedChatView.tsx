@@ -191,7 +191,17 @@ const SharedChatView: React.FC = () => {
                             <button
                               onClick={() => {
                                 const el = document.getElementById(h.id);
-                                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                if (!el) return;
+                                // Manual scroll with offset for the sticky header,
+                                // since scrollIntoView would put the heading flush
+                                // against the navbar and hide it. Header is ~57px,
+                                // give a little extra breathing room.
+                                const top = el.getBoundingClientRect().top + window.scrollY - 84;
+                                window.scrollTo({ top, behavior: 'smooth' });
+                                // Highlight immediately — the scroll-spy listener
+                                // wouldn't refresh until scroll fires, which feels
+                                // laggy after a click.
+                                setActiveTocId(h.id);
                               }}
                               className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
                                 isActive
