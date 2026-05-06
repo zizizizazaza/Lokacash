@@ -511,6 +511,9 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
 
   const [searchParams] = useSearchParams();
   const sessionParam = searchParams.get('session');
+  // Demo replay (Roundtable Live Demo button): URL ?demo=<id> mounts
+  // SuperAgentChat in fixture-replay mode — no socket calls, no quota use.
+  const demoParam = searchParams.get('demo');
 
   // Derive effective chat message: during the render where New Chat was just
   // clicked, treat chatMessage as null so SuperAgentChat doesn't mount with
@@ -765,12 +768,12 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     </div>
   ) : null;
 
-  if (effectiveChatMessage || sessionParam) {
+  if (effectiveChatMessage || sessionParam || demoParam) {
     return (
       <>
         {welcomeModal}
         <SuperAgentChat
-          key={sessionParam || effectiveChatMessage || 'new'}
+          key={sessionParam || (demoParam ? `demo-${demoParam}` : effectiveChatMessage) || 'new'}
           initialMessage={effectiveChatMessage || ''}
           initialSessionId={sessionParam || undefined}
           initialChatMode={sessionParam ? undefined : mode}
@@ -785,6 +788,9 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           // history-restored sessions (sessionParam set) keep whatever path
           // the original turn used.
           initialDomain={sessionParam ? undefined : domain}
+          // Demo replay: when ?demo=<id> is present, hydrate SuperAgentChat
+          // from public/demo/<id>.json directly — no backend interactions.
+          demoFixture={demoParam || undefined}
           onBack={() => { setChatMessage(null); setChatAssetHint(null); setSelectedAgent(null); setSelectedScenario(null); setLiveDemoActive(false); navigate('/'); }}
         />
       </>
@@ -1250,13 +1256,11 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       {!selectedAgent && domain === 'stocks' && (
         <div className="px-4 pb-10 pt-0 w-full">
           <RoundtableBanner onLiveDemo={() => {
-            if (!isLoggedIn) {
-              window.dispatchEvent(new Event('show-auth-modal'));
-              return;
-            }
-            setMode('roundtable');
-            setLiveDemoActive(true);
-            setChatMessage('Is NVIDIA still a buy at current valuations?');
+            // Demo replay: navigate to ?demo=roundtable-nvda. SuperAgentChat
+            // will hydrate from public/demo/roundtable-nvda.json — no socket
+            // calls, no quota use, no waiting for real LLMs. Works even for
+            // logged-out visitors (it's pre-recorded data, not a live run).
+            navigate('/?demo=roundtable-nvda');
           }} />
         </div>
       )}

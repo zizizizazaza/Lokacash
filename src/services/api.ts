@@ -273,6 +273,35 @@ class ApiClient {
     return this.request(`/chat/conversations/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
   }
 
+  // ============ Share links ============
+
+  async createShareLink(sessionId: string) {
+    return this.request<{ token: string; createdAt: string }>('/chat/share', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId }),
+    });
+  }
+
+  async getSharedChat(token: string) {
+    return this.request<{
+      token: string;
+      sessionId: string;
+      createdAt: string;
+      messages: Array<{
+        id: string;
+        role: string;
+        content: string;
+        agentId?: string | null;
+        metadata?: string | null;
+        createdAt: string;
+      }>;
+    }>(`/chat/share/${encodeURIComponent(token)}`);
+  }
+
+  async revokeShareLink(token: string) {
+    return this.request(`/chat/share/${encodeURIComponent(token)}`, { method: 'DELETE' });
+  }
+
   // ============ Groups ============
 
   async getGroups() {

@@ -55,31 +55,85 @@ export interface PublicAnalystPersona {
  * Shared prompt shell used by every persona. Keeps the output schema uniform
  * so downstream parsers can extract `SIGNAL` without knowing which persona
  * replied.
+ *
+ * LANGUAGE — the SCHEMA labels (SIGNAL/CONFIDENCE/KEY_EVIDENCE/RATIONALE/
+ * WOULD_CHANGE_MY_MIND) MUST stay English so the regex parsers in
+ * socket/index.ts (parseSignal, parseConfidence, extractTagline) work. But
+ * the FREE-FORM content under those labels — bullets, rationale prose —
+ * MUST match the user's question language. Otherwise the final report ends
+ * up with Chinese wrapper (table headers, persona names, verdict tags) and
+ * English content cells, looking visibly broken.
  */
 const OUTPUT_SCHEMA_SUFFIX = `
 
 ---
+
+LANGUAGE RULE (CRITICAL):
+- The user's question language is the OUTPUT language for all free-form
+  prose: KEY_EVIDENCE bullets, RATIONALE, WOULD_CHANGE_MY_MIND.
+- If the user wrote in Chinese (中文), reply in Chinese.
+- If the user wrote in English, reply in English.
+- Do NOT mix languages mid-sentence. Pick one and stay there.
+- The field LABELS themselves (SIGNAL / CONFIDENCE / KEY_EVIDENCE /
+  RATIONALE / WOULD_CHANGE_MY_MIND) MUST remain in English exactly as
+  shown — downstream parsers depend on them.
+- Tickers (BTC, NVDA, BABA), proper nouns, and numeric units (USD, %, bps)
+  stay as-is regardless of language.
 
 Deliver your verdict IN YOUR OWN VOICE but strictly in this schema:
 
 SIGNAL: <bullish|bearish|neutral>
 CONFIDENCE: <0.0-1.0>
 KEY_EVIDENCE:
-- <bullet 1 — tied to your specific lens>
-- <bullet 2 — tied to your specific lens>
-- <bullet 3 — optional>
-RATIONALE: <3-5 sentences in your own framework; cite the lens by name>
-WOULD_CHANGE_MY_MIND: <one sentence — what evidence would flip your signal>
+- <bullet 1 — tied to your specific lens, in user's language>
+- <bullet 2 — tied to your specific lens, in user's language>
+- <bullet 3 — optional, in user's language>
+RATIONALE: <3-5 sentences in your own framework, in user's language; cite the lens by name>
+WOULD_CHANGE_MY_MIND: <one sentence in user's language — what evidence would flip your signal>
 `;
 
-/** Build the full prompt from three persona fields + the common suffix. */
+/**
+ * LANGUAGE PRIORITY HEADER — placed at the TOP of every persona system prompt.
+ *
+ * Why at the top: LLMs weight instructions near the start of the system
+ * prompt more heavily. The previous version put the LANGUAGE RULE at the
+ * end (after ~600 chars of English persona definition), which DeepSeek V3
+ * routinely ignored — it kept defaulting to English because the dominant
+ * language signal was the persona description above. Moving the rule to
+ * line 1 makes it the FIRST thing the model reads, before any English
+ * persona context can bias the output language.
+ */
+const LANGUAGE_PRIORITY_HEADER = `## OUTPUT LANGUAGE — READ THIS FIRST (overrides everything below)
+
+Detect the user's question language from their message. Then:
+- 中文 question → Reply 100% in Chinese (中文). All KEY_EVIDENCE bullets,
+  the entire RATIONALE paragraph, and WOULD_CHANGE_MY_MIND MUST be Chinese.
+- English question → Reply 100% in English.
+- Mixed question → match the dominant language; do NOT mix mid-sentence.
+
+Field labels (SIGNAL / CONFIDENCE / KEY_EVIDENCE / RATIONALE /
+WOULD_CHANGE_MY_MIND) stay English exactly as defined — parsers depend
+on them. Tickers (BTC, NVDA, BABA) and units (USD, %, bps) stay as-is.
+
+The persona description below is in English purely to keep one source of
+truth — DO NOT mirror that English back into your response. Translate the
+ideas into the user's language as you write.
+
+---
+
+`;
+
+/** Build the full prompt from three persona fields + the common suffix.
+ *  LANGUAGE_PRIORITY_HEADER is PREPENDED so it's the first thing the LLM
+ *  reads; OUTPUT_SCHEMA_SUFFIX (which also reiterates language) is APPENDED
+ *  so the rule bookends the persona definition on both sides. */
 function buildPrompt(parts: {
   displayName: string;
   philosophy: string;
   signatureLens: string;
   outputBias: string;
 }): string {
-  return `You are ${parts.displayName}. Stay fully in character — your philosophy, your vocabulary, your biases.
+  return `${LANGUAGE_PRIORITY_HEADER}You are ${parts.displayName}. Stay fully in character — your philosophy, your vocabulary, your biases.
 
 Philosophy:
 ${parts.philosophy}
