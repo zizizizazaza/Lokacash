@@ -1,4 +1,5 @@
-import React, { createContext, useContext } from 'react';
+import React, { createContext, useContext, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 // ─── Source Context for inline citation tooltips ────────────────
 export interface CitationSource {
@@ -1021,39 +1022,76 @@ function InlineCitation({
   const snippetText = matchedSource?.snippet ? decodeHtmlEntities(matchedSource.snippet) : undefined;
   const decodedTitle = decodeHtmlEntities(matchedSource?.title || '');
   const titleText = !isLowValueSourceTitle(decodedTitle) ? decodedTitle : show;
+
+  // The tooltip is rendered via a portal into document.body so that ancestor
+  // containers with `overflow: hidden` (table cells, scroll panes, etc.) can
+  // never clip it. We compute fixed coordinates on each hover so the bubble
+  // floats above the citation chip regardless of where it lives in the tree.
+  const anchorRef = useRef<HTMLAnchorElement | null>(null);
+  const [tip, setTip] = useState<{ top: number; left: number } | null>(null);
+  const TIP_WIDTH = 260;
+  const TIP_GAP = 8;
+  const showTip = () => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Anchor the tooltip's bottom-right at the chip's top-right by default.
+    let left = r.right - TIP_WIDTH;
+    // Keep it on screen with a small margin if the chip lives near the edge.
+    const margin = 8;
+    if (left < margin) left = margin;
+    if (left + TIP_WIDTH > window.innerWidth - margin) {
+      left = window.innerWidth - TIP_WIDTH - margin;
+    }
+    const top = r.top - TIP_GAP;
+    setTip({ top, left });
+  };
+  const hideTip = () => setTip(null);
+
   return (
-    <a
-      href={safe}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={CITE_TAG}
-    >
-      <svg className="w-2.5 h-2.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-      </svg>
-      <span className="truncate max-w-[8rem]">{show}</span>
-      {/* Rich hover tooltip — right-aligned so it never clips at right edge */}
-      <span className="pointer-events-none absolute bottom-full right-0 mb-2 w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal opacity-0 group-hover/cite:opacity-100 transition-opacity duration-150 shadow-xl z-50">
-        <span className="flex items-center gap-1.5">
-          <img
-            src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
-            alt=""
-            className="w-3.5 h-3.5 rounded-sm shrink-0"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-          <span className="text-[10px] text-gray-400 truncate">{domain}</span>
-        </span>
-        <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
-          {titleText}
-        </span>
-        {snippetText && (
-          <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
-            {snippetText}
+    <>
+      <a
+        ref={anchorRef}
+        href={safe}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={CITE_TAG}
+        onMouseEnter={showTip}
+        onMouseLeave={hideTip}
+        onFocus={showTip}
+        onBlur={hideTip}
+      >
+        <svg className="w-2.5 h-2.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+        </svg>
+        <span className="truncate max-w-[8rem]">{show}</span>
+      </a>
+      {tip && typeof document !== 'undefined' && createPortal(
+        <div
+          className="pointer-events-none fixed z-[1000] w-[260px] px-3 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] leading-snug whitespace-normal shadow-xl"
+          style={{ top: tip.top, left: tip.left, transform: 'translateY(-100%)' }}
+        >
+          <span className="flex items-center gap-1.5">
+            <img
+              src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
+              alt=""
+              className="w-3.5 h-3.5 rounded-sm shrink-0"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <span className="text-[10px] text-gray-400 truncate">{domain}</span>
           </span>
-        )}
-        <span className="absolute top-full right-3 -mt-px border-4 border-transparent border-t-gray-900" />
-      </span>
-    </a>
+          <span className="block font-semibold text-[11.5px] mt-1.5 line-clamp-2 leading-snug">
+            {titleText}
+          </span>
+          {snippetText && (
+            <span className="block text-gray-400 text-[10.5px] mt-1 line-clamp-3 leading-relaxed">
+              {snippetText}
+            </span>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -1063,15 +1101,44 @@ function InlineCitation({
  */
 function extractTrailingCitations(text: string): { cleanText: string; citations: Array<{ label: string; url: string }> } {
   const citations: Array<{ label: string; url: string }> = [];
+  // Skip citations whose grammatical role would be destroyed by removal.
+  // In Chinese, "[Source]的分析指出" means "[Source]'s analysis indicates" —
+  // stripping the citation leaves orphan "的分析指出" with no subject. Same
+  // for clauses where the citation is followed by a colon (e.g.
+  // "[Issue #389]：correspondent..." in a bullet). Detect both patterns and
+  // leave those citations inline (parseLine will render them as chips
+  // in-place) so the prose stays coherent.
+  const KEEP_AFTER = /^[的：:]/;
   const cleanText = text
-    .replace(/\[([^\]]*)\]\(([^)]+)\)/g, (match, label, rawUrl) => {
-      const url = rawUrl.trim();
-      if (safeHttpUrl(url)) {
-        citations.push({ label: label.trim() || urlChipLabel(url), url });
-        return '';
-      }
-      return match;
+    .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_match, label, rawUrl, offset) => {
+      const url = (rawUrl || '').trim();
+      // Broken citation — URL was missing/null/undefined/empty (LLM template
+      // interpolation failure where the source link wasn't substituted in).
+      // Don't preserve the raw markdown (`[Foo](undefined)` would otherwise
+      // be shown literally to the user); fall back to just the bare label.
+      if (!safeHttpUrl(url)) return label || '';
+      // Look at what follows the citation — if it's a Chinese particle or
+      // an orphan-leaving punctuation, keep the citation inline.
+      const after = text.slice(offset + _match.length);
+      if (KEEP_AFTER.test(after)) return _match;
+      citations.push({ label: label.trim() || urlChipLabel(url), url });
+      return '';
     })
+    // Strip orphan leading punctuation/particles left over from citations
+    // that lived at the start of a clause but were moved to the trailing
+    // badge row. Covers CJK + ASCII commas, colons, semicolons, and the
+    // Chinese enumeration mark "、". Applied per logical line so bullet
+    // markers (•/-/*) up front are preserved.
+    .split('\n')
+    .map(line => line.replace(/^([\s>*\-•·]*)[，,：:；;、]+\s*/u, '$1'))
+    .join('\n')
+    // Collapse adjacent separator punctuation left behind when a citation
+    // sat BETWEEN two separators in the source markdown. Examples seen:
+    //   "BTC突破$81K，[Source](url)，山寨币..." → "BTC突破$81K，，..."
+    //   "持续流入：[Source](url)，尽管..."     → "持续流入：，尽管..."
+    //   "多空清算数据；[Source](url)、Bitfinex Alpha分析" → "...；、..."
+    // Keep the first separator and drop the run that follows.
+    .replace(/([，,：:；;、])\s*(?:[，,：:；;、]\s*)+/g, '$1 ')
     .replace(/\s{2,}/g, ' ')
     .trim();
   return { cleanText, citations };
@@ -1139,14 +1206,22 @@ function parseFragments(text: string, keyBase: number): React.ReactNode[] {
       continue;
     }
 
-    m = /^\[([^\]]*)\]\(([^)]+)\)/.exec(rest);
+    m = /^\[([^\]]*)\]\(([^)]*)\)/.exec(rest);
     if (m) {
-      const url = m[2].trim();
+      const url = (m[2] || '').trim();
       if (safeHttpUrl(url)) {
         out.push(<InlineCitation key={k++} href={url} label={m[1]} />);
         pos += m[0].length;
         continue;
       }
+      // Broken citation (e.g. `[Foo](undefined)` from a failed template
+      // substitution) — render the label as plain text and consume the
+      // whole `[label](url)` token so the parens/url don't leak through.
+      if (m[1]) {
+        out.push(<React.Fragment key={k++}>{m[1]}</React.Fragment>);
+      }
+      pos += m[0].length;
+      continue;
     }
 
     m = /^\((https?:\/\/[^)]+)\)/.exec(rest);

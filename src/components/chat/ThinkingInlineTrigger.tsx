@@ -243,10 +243,14 @@ export const ThinkingInlineTrigger: React.FC<{
     // clickable button to open Process panel + rotating ticker of live progress.
     // Pill-shaped affordance with hover state + an end-cap chevron makes the
     // tap target obviously interactive — matches the LangGraph reference UI.
+    // Borderless variant per design feedback — the elliptical pill chrome
+    // (rounded-full / border / bg-white / shadow) felt too heavy for both the
+    // loading and the "Done · N tools · …" summary states. Render as a plain
+    // clickable text row instead; the icon + label still convey the state.
     return (
         <button
             onClick={onOpen}
-            className="group inline-flex flex-col items-start gap-0.5 mb-2 px-3 py-1.5 rounded-full border border-gray-200 bg-white hover:bg-gray-50 hover:border-gray-300 transition-all text-left shadow-sm hover:shadow"
+            className="group inline-flex flex-col items-start gap-0.5 mb-2 text-left transition-colors"
         >
             {/* Top row: spinner/check + title + elapsed + arrow.
                 Spinner ↔ check switches the moment streaming starts (not when

@@ -286,7 +286,11 @@ function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): S
     out.push({
       favicon: 'web',
       title: 'Exchange Market Data',
-      domain: 'market-data',
+      domain: 'okx.com',
+      // OKX is the upstream provider — point citations at its public market
+      // hub so the LLM can produce real `[Exchange Market Data](url)` links
+      // instead of `(undefined)`.
+      url: 'https://www.okx.com/markets',
       snippet: bases
         ? `Spot and perpetual snapshot (funding, open interest, orderbook depth) for ${bases}.`
         : 'Spot and perpetual market snapshot used by the Web3 pipeline.',
@@ -298,7 +302,8 @@ function buildWeb3ProviderSources(raw: Web3ResearchResult['raw'] | undefined): S
     out.push({
       favicon: 'web',
       title: 'News & Sentiment',
-      domain: 'news-sentiment',
+      domain: 'okx.com',
+      url: 'https://www.okx.com/learn',
       snippet: bases
         ? `Aggregated crypto news + sentiment snapshot for ${bases}.`
         : 'Aggregated crypto news + sentiment feed.',
