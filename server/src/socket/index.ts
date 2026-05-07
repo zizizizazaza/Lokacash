@@ -28,6 +28,7 @@ import {
   type PublicAnalystPersona,
 } from '../catalogs/analysts.js';
 import { extractAsset } from '../services/assetExtractor.js';
+import { extractUrls, fetchUrl, pageToPromptBlock, type FetchedPage } from '../services/webFetch/index.js';
 import { runAegeanDeepAnalysis } from '../services/aegeanDeepAnalysis.service.js';
 import { transformAegeanDeepAnalysis } from '../services/aegeanDeepAnalysisTransform.js';
 import { consumeQuota } from '../services/subscription.service.js';
@@ -1277,7 +1278,11 @@ Text: "${query}"`;
     });
 
     socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[]; assetHint?: { sym?: string; name?: string; kind?: string; coingeckoId?: string }; domain?: 'stocks' | 'web3' }) => {
-      const userContent = typeof data?.content === 'string' ? data.content : '';
+      // `let` (not `const`) so the webFetch pre-step below can append
+      // auto-fetched URL content to the prompt before routing/synthesis
+      // sees it. The DB-persisted user message uses this same augmented
+      // value so reopened sessions show the same context the LLM had.
+      let userContent = typeof data?.content === 'string' ? data.content : '';
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
       if (!userContent.trim() && !hasImages) return;
@@ -1322,6 +1327,65 @@ Text: "${query}"`;
         for (const [k, v] of chatDedupMap) {
           if (now - v > 10000) chatDedupMap.delete(k);
         }
+      }
+
+      // ── Auto-fetch URLs in the user message ──
+      // Up to 3 URLs are pulled in parallel via Jina Reader (with Tavily
+      // extract as a fallback). The cleaned content is appended to
+      // `userContent` so routing + synthesis see the page text, and per-URL
+      // progress events flow to the client so it can render a "Reading X"
+      // pill (handled in the frontend webfetch listener).
+      const detectedUrls = extractUrls(userContent, 3);
+      const webFetchedPages: FetchedPage[] = [];
+      if (detectedUrls.length > 0) {
+        // Tell the client the fetch is starting so it can show progress
+        // immediately — Jina round-trip can be 1-3s on cold pages.
+        socket.emit('agent:chat:webfetch', {
+          sessionId,
+          phase: 'start',
+          urls: detectedUrls,
+        });
+        const fetchResults = await Promise.all(
+          detectedUrls.map(async (u) => ({ url: u, outcome: await fetchUrl(u, { timeoutMs: 12_000, maxChars: 12_000 }) })),
+        );
+        const promptBlocks: string[] = [];
+        for (const r of fetchResults) {
+          if (r.outcome.ok) {
+            webFetchedPages.push(r.outcome.page);
+            promptBlocks.push(pageToPromptBlock(r.outcome.page));
+            socket.emit('agent:chat:webfetch', {
+              sessionId,
+              phase: 'page',
+              url: r.url,
+              ok: true,
+              title: r.outcome.page.title,
+              domain: r.outcome.page.domain,
+              provider: r.outcome.page.provider,
+              durationMs: r.outcome.page.durationMs,
+              truncated: r.outcome.page.truncated,
+            });
+          } else {
+            socket.emit('agent:chat:webfetch', {
+              sessionId,
+              phase: 'page',
+              url: r.url,
+              ok: false,
+              code: r.outcome.error.code,
+              message: r.outcome.error.message,
+              domain: r.outcome.error.domain,
+            });
+          }
+        }
+        if (promptBlocks.length) {
+          // Prepend so the LLM reads context first, then the user's question.
+          userContent = `${promptBlocks.join('\n\n---\n\n')}\n\n---\n\n${userContent}`;
+        }
+        socket.emit('agent:chat:webfetch', {
+          sessionId,
+          phase: 'done',
+          successCount: webFetchedPages.length,
+          totalCount: detectedUrls.length,
+        });
       }
 
       // ── Guest gate: only Auto is available without login ──

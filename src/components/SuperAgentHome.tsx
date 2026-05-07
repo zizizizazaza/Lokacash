@@ -4,6 +4,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import { I, InputIcons, UseCaseIcons } from './Icons';
 import ImageLightbox from './chat/ImageLightbox';
 import ImageCapToast from './chat/ImageCapToast';
+import HighlightedTextarea from './chat/HighlightedTextarea';
 import { QUICK_ACTIONS, USE_CASES, AGENT_GUIDES, FEATURED_GROUPS, FEATURED_AGENTS } from '../constants';
 import SuperAgentChat from './SuperAgentChat';
 import GuruCarousel from './GuruCarousel';
@@ -1020,7 +1021,7 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
               </div>
             )}
             <div className="relative">
-              <textarea
+              <HighlightedTextarea
                 ref={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
