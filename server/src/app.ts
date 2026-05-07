@@ -31,6 +31,8 @@ import voiceRoutes from './routes/voice.js';
 import agentsRoutes from './routes/agents.js';
 import eventsRoutes from './routes/events.js';
 import skillRoutes from './routes/skill.js';
+import advancedRoutes from './routes/advanced.js';
+import openaiCompatRoutes from './routes/openaiCompat.js';
 import subscriptionRoutes from './routes/subscription.js';
 import guestRoutes from './routes/guest.js';
 import configRoutes from './routes/config.js';
@@ -141,6 +143,14 @@ app.use('/api/analysts', analystsRoutes);
 // Mounted under /api so it inherits the reverse-proxy path in production
 // (e.g. https://nftkashai.online/lokacash/api/skill/v1/*).
 app.use('/api/skill', skillRoutes);
+// Advanced API — proxies the aegean-consensus FastAPI primitives so power
+// users can drive custom agent groups / weights / streaming consensus.
+// Same auth posture as skill: public, unauthenticated.
+app.use('/api/advanced', advancedRoutes);
+// OpenAI-compatible /v1/chat/completions — drop-in for any client that
+// speaks OpenAI's protocol (火山引擎 / Coze / Dify / Cursor / etc.).
+// Same auth posture as the rest of the public API for now.
+app.use('/api/v1', openaiCompatRoutes);
 
 // Static file serving for uploads
 app.use('/api/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
