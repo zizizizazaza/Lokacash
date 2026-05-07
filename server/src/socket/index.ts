@@ -1302,11 +1302,16 @@ Text: "${query}"`;
     });
 
     socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[]; assetHint?: { sym?: string; name?: string; kind?: string; coingeckoId?: string }; domain?: 'stocks' | 'web3' }) => {
-      // `let` (not `const`) so the webFetch pre-step below can append
-      // auto-fetched URL content to the prompt before routing/synthesis
-      // sees it. The DB-persisted user message uses this same augmented
-      // value so reopened sessions show the same context the LLM had.
-      let userContent = typeof data?.content === 'string' ? data.content : '';
+      // We track two views of the user's text:
+      //   - `originalUserContent`: exactly what the user typed; used for
+      //     DB persistence + replay so re-opening a session shows their
+      //     own words, not the augmented prompt the LLM saw.
+      //   - `userContent`: starts as the original but the webFetch pre-
+      //     step below prepends auto-fetched URL bodies so routing /
+      //     synthesis see the page text. Mutating only this branch
+      //     keeps the chat-history bubble clean.
+      const originalUserContent = typeof data?.content === 'string' ? data.content : '';
+      let userContent = originalUserContent;
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
       if (!userContent.trim() && !hasImages) return;
@@ -1497,7 +1502,11 @@ Text: "${query}"`;
         try {
           const userMeta = hasImages ? JSON.stringify({ images }) : null;
           const createdUser = await prisma.chatMessage.create({
-            data: { userId, sessionId, role: 'user', content: userContent, agentId: 'superagent', metadata: userMeta },
+            // Save the user's original text, NOT the webFetch-augmented
+            // version — otherwise reopened sessions render the LLM-side
+            // prompt (with [Auto-fetched: ...] blocks) inside the user's
+            // chat bubble.
+            data: { userId, sessionId, role: 'user', content: originalUserContent, agentId: 'superagent', metadata: userMeta },
             select: { id: true },
           });
           latestUserMessageId = createdUser.id;
