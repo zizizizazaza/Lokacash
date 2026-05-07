@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate, useSearchParams } from 'react-router-dom';
 import { usePrivy, useLogout } from '@privy-io/react-auth';
+import { Analytics } from '@vercel/analytics/react';
 import { Page } from './types';
 import AnimStyles from './components/AnimStyles';
 import { Sidebar } from './components/Sidebar';
@@ -213,6 +214,7 @@ const App: React.FC = () => {
     return (
       <div className="h-screen w-screen flex flex-col overflow-hidden bg-white">
         <AnimStyles />
+        <Analytics />
         <div className="flex-1 overflow-hidden">
           <Routes>
             <Route path="/developers" element={<ApiLanding />} />
@@ -228,6 +230,7 @@ const App: React.FC = () => {
     return (
       <div className="min-h-screen w-screen bg-white">
         <AnimStyles />
+        <Analytics />
         <Routes>
           <Route path="/share/:token" element={<SharedChatView />} />
         </Routes>
@@ -239,6 +242,7 @@ const App: React.FC = () => {
     <div className={`h-screen w-screen flex overflow-hidden ${appBg} selection:bg-gray-900 selection:text-white transition-colors duration-300`}>
 
       <AnimStyles />
+      <Analytics />
       <OAuthCallbackHandler />
       {showAuthModal && <AuthModal onLogin={() => setShowAuthModal(false)} onClose={() => setShowAuthModal(false)} />}
       <TxModal />
