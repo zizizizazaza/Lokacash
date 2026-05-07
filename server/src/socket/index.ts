@@ -33,6 +33,7 @@ import { runAegeanDeepAnalysis } from '../services/aegeanDeepAnalysis.service.js
 import { transformAegeanDeepAnalysis } from '../services/aegeanDeepAnalysisTransform.js';
 import { consumeQuota } from '../services/subscription.service.js';
 import { consumeGuestAuto, GUEST_CONFIG } from '../services/guest.service.js';
+import { getServiceAuthToken } from '../services/internalChat/serviceToken.js';
 import * as crypto from 'crypto';
 import {
   createModuleEmitter,
@@ -838,12 +839,35 @@ export function setupSocket(server: HttpServer) {
     }
   }, 5 * 60 * 1000);
 
+  // Eagerly resolve the service auth token so the middleware reads a
+  // stable value (and we log the auto-mint message at startup, not on
+  // first connection).
+  getServiceAuthToken();
+
   // JWT authentication middleware for WebSocket.
   // Tokenless connections are accepted as guests when ENABLE_GUEST_MODE is on;
   // guests are limited to Auto mode in the agent:chat handler below.
   io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
     const guestIdRaw = socket.handshake.auth?.guestId || socket.handshake.query?.guestId;
+    const serviceTokenRaw = socket.handshake.auth?.serviceToken || socket.handshake.query?.serviceToken;
+
+    // ── Service auth: in-process adapters (e.g. /api/v1/chat/completions
+    //    OpenAI compat layer) connect with this token to bypass the guest
+    //    quota gate and unlock all modes (auto / fast / roundtable). The
+    //    token is set via SERVICE_AUTH_TOKEN env var; matching connections
+    //    are tagged isService=true and bypass DB-write FK constraints by
+    //    routing the same way guests do (no real User row).
+    const serviceToken = typeof serviceTokenRaw === 'string' ? serviceTokenRaw.trim() : '';
+    const expectedServiceToken = (process.env.SERVICE_AUTH_TOKEN || '').trim();
+    if (serviceToken && expectedServiceToken && serviceToken === expectedServiceToken) {
+      const internalId = `service:${Math.random().toString(36).slice(2, 10)}`;
+      (socket as any).userId = internalId;
+      (socket as any).isGuest = true;     // reuse guest path: no DB writes
+      (socket as any).isService = true;   // flag for bypassing quota gate
+      (socket as any).guestId = internalId;
+      return next();
+    }
 
     if (token) {
       try {
@@ -1278,11 +1302,16 @@ Text: "${query}"`;
     });
 
     socket.on('agent:chat', async (data: { content?: string; mode: string; sessionId?: string; agentId?: string; hidden?: boolean; images?: AgentChatImage[]; analystIds?: string[]; assetHint?: { sym?: string; name?: string; kind?: string; coingeckoId?: string }; domain?: 'stocks' | 'web3' }) => {
-      // `let` (not `const`) so the webFetch pre-step below can append
-      // auto-fetched URL content to the prompt before routing/synthesis
-      // sees it. The DB-persisted user message uses this same augmented
-      // value so reopened sessions show the same context the LLM had.
-      let userContent = typeof data?.content === 'string' ? data.content : '';
+      // We track two views of the user's text:
+      //   - `originalUserContent`: exactly what the user typed; used for
+      //     DB persistence + replay so re-opening a session shows their
+      //     own words, not the augmented prompt the LLM saw.
+      //   - `userContent`: starts as the original but the webFetch pre-
+      //     step below prepends auto-fetched URL bodies so routing /
+      //     synthesis see the page text. Mutating only this branch
+      //     keeps the chat-history bubble clean.
+      const originalUserContent = typeof data?.content === 'string' ? data.content : '';
+      let userContent = originalUserContent;
       const images = normalizeIncomingImages(data?.images);
       const hasImages = images.length > 0;
       if (!userContent.trim() && !hasImages) return;
@@ -1388,8 +1417,12 @@ Text: "${query}"`;
         });
       }
 
-      // ── Guest gate: only Auto is available without login ──
-      if (isGuest) {
+      // ── Guest gate: only Auto is available without login. Service
+      // auth (in-process /api/v1/chat/completions adapter) bypasses
+      // both the mode gate and the per-IP quota — the upstream HTTP
+      // surface owns its own auth posture.
+      const isService = Boolean((socket as any).isService);
+      if (isGuest && !isService) {
         if (data.mode !== 'auto') {
           socket.emit('agent:chat:error', {
             sessionId,
@@ -1469,7 +1502,11 @@ Text: "${query}"`;
         try {
           const userMeta = hasImages ? JSON.stringify({ images }) : null;
           const createdUser = await prisma.chatMessage.create({
-            data: { userId, sessionId, role: 'user', content: userContent, agentId: 'superagent', metadata: userMeta },
+            // Save the user's original text, NOT the webFetch-augmented
+            // version — otherwise reopened sessions render the LLM-side
+            // prompt (with [Auto-fetched: ...] blocks) inside the user's
+            // chat bubble.
+            data: { userId, sessionId, role: 'user', content: originalUserContent, agentId: 'superagent', metadata: userMeta },
             select: { id: true },
           });
           latestUserMessageId = createdUser.id;
@@ -1845,8 +1882,11 @@ Text: "${query}"`;
 
       // Guests are capped at the simple-chat path regardless of what the
       // orchestrator decided. The 5/day guest quota pays for a plain LLM
-      // answer, not search + Web3 + synthesis.
-      if (isGuest) {
+      // answer, not search + Web3 + synthesis. Service auth (in-process
+      // /api/v1/chat/completions) shares the guest pathway for DB skip
+      // reasons but MUST run the full toolchain — otherwise HTTP callers
+      // get worse answers than the public frontend chat.
+      if (isGuest && !isService) {
         plan.isSimpleChat = true;
       }
 
