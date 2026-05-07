@@ -16,6 +16,8 @@ import PlanUpgradeEntry from './PlanUpgradeEntry';
 import ShareChatButton from './chat/ShareChatButton';
 import ImageLightbox from './chat/ImageLightbox';
 import ImageCapToast from './chat/ImageCapToast';
+import WebFetchPills, { type WebFetchEntry } from './chat/WebFetchPills';
+import HighlightedTextarea from './chat/HighlightedTextarea';
 import ModeSelector from './chat/ModeSelector';
 import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { RoundtableWorkbench, KnowledgeGraphView, buildKnowledgeGraph } from './chat/RoundtableWorkbench';
@@ -1906,6 +1908,10 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }>>({});
     // Token snapshot cards keyed by message index (live CoinGecko data injected via agent:chat:token)
     const [tokenCards, setTokenCards] = useState<Record<number, TokenSnapshotData>>({});
+    /** Auto-fetched URL pills, keyed by the assistant message index they
+     *  belong to. Populated from `agent:chat:webfetch` events emitted by
+     *  the backend's webFetch pre-step (see services/webFetch). */
+    const [webFetchEntries, setWebFetchEntries] = useState<Record<number, WebFetchEntry[]>>({});
     const currentConsensus = (() => {
         // First try the active message's consensus
         if (activeGraphMsgIdx !== null && consensusResults[activeGraphMsgIdx]) {
@@ -2676,6 +2682,60 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             setHtmlGenerating(prev => ({ ...prev, [data.msgIdx]: true }));
         };
 
+        const onWebFetch = (data: {
+            sessionId: string;
+            phase: 'start' | 'page' | 'done';
+            urls?: string[];
+            url?: string;
+            ok?: boolean;
+            title?: string;
+            domain?: string;
+            provider?: 'jina' | 'tavily' | 'cache';
+            durationMs?: number;
+            truncated?: boolean;
+            code?: string;
+            message?: string;
+        }) => {
+            if (data.sessionId !== sessionId) return;
+            // Always attach to the in-flight assistant message slot. If for
+            // some reason the active idx is unknown, fall back to the last
+            // index so the pills still surface somewhere visible.
+            const idx = activeMsgIdxRef.current >= 0
+                ? activeMsgIdxRef.current
+                : Math.max(0, messages.length - 1);
+
+            setWebFetchEntries(prev => {
+                const list = [...(prev[idx] || [])];
+                if (data.phase === 'start' && Array.isArray(data.urls)) {
+                    for (const url of data.urls) {
+                        if (!list.find(e => e.url === url)) {
+                            const domain = (() => {
+                                try { return new URL(url).hostname; } catch { return url; }
+                            })();
+                            list.push({ url, domain, state: 'fetching' });
+                        }
+                    }
+                } else if (data.phase === 'page' && data.url) {
+                    const existing = list.findIndex(e => e.url === data.url);
+                    const next: WebFetchEntry = {
+                        url: data.url,
+                        domain: data.domain || data.url,
+                        state: data.ok ? 'ok' : 'error',
+                        title: data.title,
+                        provider: data.provider,
+                        durationMs: data.durationMs,
+                        truncated: data.truncated,
+                        code: data.code,
+                        message: data.message,
+                    };
+                    if (existing >= 0) list[existing] = next;
+                    else list.push(next);
+                }
+                return { ...prev, [idx]: list };
+            });
+        };
+
+        socket.on('agent:chat:webfetch', onWebFetch);
         socket.on('agent:chat:routing', onRouting);
         socket.on('agent:chat:routed', onRouted);
         socket.on('agent:chat:quota_degraded', onQuotaDegraded);
@@ -2699,6 +2759,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:round_completed', onRoundCompleted);
 
         return () => {
+            socket.off('agent:chat:webfetch', onWebFetch);
             socket.off('agent:chat:routing', onRouting);
             socket.off('agent:chat:routed', onRouted);
             socket.off('agent:chat:quota_degraded', onQuotaDegraded);
@@ -4154,6 +4215,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                     ) : (
                                         <div className="flex items-start gap-3">
                                             <div className="flex-1 min-w-0">
+                                                {webFetchEntries[i] && webFetchEntries[i].length > 0 && (
+                                                    <WebFetchPills entries={webFetchEntries[i]} />
+                                                )}
                                                 {thinkingProcesses[i] && (
                                                     <ThinkingInlineTrigger
                                                         thinking={thinkingProcesses[i]}
@@ -5049,7 +5113,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                         ))}
                                     </div>
                                 )}
-                                <textarea
+                                <HighlightedTextarea
                                     ref={textareaRef}
                                     rows={1}
                                     value={inputText}
