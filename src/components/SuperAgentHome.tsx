@@ -259,6 +259,10 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     }
     setChatAssetHint(opts?.assetHint || null);
     setChatMessage(text.trim());
+    // Clear the home composer's image strip — SuperAgentChat captured the
+    // current value into its state via the `initialImages` prop, so any
+    // residual reference here would otherwise re-seed the next session.
+    setPastedImages([]);
   };
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
@@ -823,7 +827,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           // Forward any images the user pasted on the home composer so the
           // first turn includes them. SuperAgentChat clears the strip after
           // its initial-send fires (one-shot hand-off).
-          initialImages={pastedImages.length > 0 ? pastedImages : undefined}
+          //
+          // ONLY forward when starting a fresh chat (no sessionParam, no
+          // demoParam). When the user navigates into an existing session
+          // from the sidebar, that session has its own image history —
+          // re-seeding home's leftover pastedImages would replay them as
+          // attachments on the next message and confuse the user.
+          initialImages={(!sessionParam && !demoParam && pastedImages.length > 0) ? pastedImages : undefined}
           onBack={() => { setChatMessage(null); setChatAssetHint(null); setSelectedAgent(null); setSelectedScenario(null); setPastedImages([]); setLiveDemoActive(false); navigate('/'); }}
         />
       </>

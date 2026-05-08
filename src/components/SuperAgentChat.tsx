@@ -3258,8 +3258,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const transformedHistory: Message[] = history.map(
                         (m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
                             let sources: SearchSource[] | undefined;
+                            // For user turns the backend persists `{ images: [{ url }] }`
+                            // in metadata so the bubble can re-render the same
+                            // attachment thumbnails after reload. Pull both in
+                            // one parse so we don't double-decode.
+                            let images: string[] | undefined;
                             if (m.metadata) {
-                                try { sources = (JSON.parse(m.metadata) as any).sources; } catch {}
+                                try {
+                                    const parsed = JSON.parse(m.metadata) as any;
+                                    sources = parsed?.sources;
+                                    if (m.role === 'user' && Array.isArray(parsed?.images)) {
+                                        const urls = parsed.images
+                                            .map((img: any) => (typeof img?.url === 'string' ? img.url : null))
+                                            .filter(Boolean) as string[];
+                                        if (urls.length) images = urls;
+                                    }
+                                } catch {}
                             }
                             return {
                                 role: m.role as 'user' | 'assistant',
@@ -3268,6 +3282,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 isStreaming: false,
                                 metadata: m.metadata ?? null,
                                 sources,
+                                ...(images ? { images } : {}),
                             };
                         },
                     );
@@ -3649,7 +3664,14 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             if (initialImgs.length) setChatPastedImages([]);
             setTimeout(scrollUserMsgToTop, 150);
         }, 50);
-    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode, initialAssetHint, initialImages]);
+        // `initialImages` is intentionally NOT in the dep array — it's a
+        // one-shot hand-off captured on mount. Including it would re-fire
+        // this effect when the home page clears its `pastedImages` state
+        // (after `tryStartChat` runs), producing a duplicate `agent:chat`
+        // emit that races with the first run AND drops the image. The
+        // value is read inside the effect via the closure.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [initialMessage, sendToAI, initialSessionId, sessionId, chatSelectedAgent, scrollUserMsgToTop, chatMode, initialAssetHint]);
 
     // ─── Handle send ────────────────────────────────────────
     const handleSummonConfirm = useCallback(() => {
