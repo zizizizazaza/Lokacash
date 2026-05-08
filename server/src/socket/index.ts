@@ -10,6 +10,7 @@ import { stockAnalysisService } from '../services/stockanalysis.service.js';
 import { runHtmlGeneration as runHtmlGenerationService } from '../services/reportHtml.service.js';
 import { hedgefundService } from '../services/hedgefund.service.js';
 import { LokaAIService, getGlobalTimeContext } from '../services/ai.service.js';
+import { getMajorsSnapshotForSynthesis } from '../services/price.service.js';
 import { isCryptoSymbol, isAmbiguousSymbol, filterOutCryptoTickers } from '../constants/cryptoAssets.js';
 import {
   validateTickersAgainstCoinGecko,
@@ -809,6 +810,11 @@ export function setupSocket(server: HttpServer) {
       credentials: true,
     },
     path: '/api/socket.io',
+    // Vision turns ship images as base64 data: URLs inside `agent:chat`.
+    // A single phone photo is often 1.5–3 MB after base64; the multimodal
+    // turn cap is 4 images. Default 1 MB silently drops these packets and
+    // the handler never fires. Allow up to 32 MB to cover 4 large images.
+    maxHttpBufferSize: 32 * 1024 * 1024,
   });
 
   // Safety-net: sweep orphaned session state every 5 minutes.
@@ -3230,6 +3236,21 @@ Text: "${query}"`;
         }
       });
 
+      // Market-brief fallback: when the synthesis is rendering a "today's
+      // market overview" and the web3 agent's tool calls focused on long-tail
+      // tokens (e.g. user sent a screenshot of a trending-coins page),
+      // BTC/ETH/SOL/etc are absent from the WEB3 REPORT and the model
+      // renders an empty price column. Inject the cached majors snapshot so
+      // the standard "Market Overview" row at the top of the brief always
+      // has real numbers. Cost: a string concat — no extra API calls
+      // (PriceService refreshes on its own 60s timer).
+      if (plan.queryType === 'market-brief') {
+        const majorsSnapshot = getMajorsSnapshotForSynthesis();
+        if (majorsSnapshot) {
+          contextString += `【MAJOR COIN SNAPSHOT — use these for any "Market Overview" / "majors" table row】\n${majorsSnapshot}\n\n`;
+        }
+      }
+
       // Append structured source URLs so the report LLM can produce inline citations
       if (finalSocialSources.length > 0) {
         contextString += "【VERIFIED SOURCE URLs — CITE THESE INLINE】\n";
@@ -3679,6 +3700,8 @@ ${contextString}
 5. Never fabricate data. If specific numbers aren't in the context, say "data pending" or skip.
 6. Length: 500-1200 words. This is a brief, not a report.
 7. Focus on "what happened" and "what's next", not "deep analysis".
+8. DO NOT append a "Sources" / "数据来源" footer summarizing where data came from — citations must be inline (rule 4) only. The list of source URLs is shown to the user in a separate sidebar widget; restating them at the end of the brief is redundant.
+9. DO NOT append a disclaimer such as "本简报仅供参考，不构成投资建议", "Not investment advice", "市场有风险，投资需谨慎", or any equivalent risk warning. The product surface already carries the platform-level disclaimer; the brief itself ends with the last analytical bullet of "Tomorrow's Watch".
 `;
 
       // ─── Guru Council Prompt ───

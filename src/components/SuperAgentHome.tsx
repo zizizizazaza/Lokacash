@@ -259,6 +259,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     }
     setChatAssetHint(opts?.assetHint || null);
     setChatMessage(text.trim());
+    // Do NOT clear `pastedImages` here — React batches this with
+    // setChatMessage so SuperAgentChat would mount and read a value of
+    // `[]` *before* it could capture the user's attachments via the
+    // `initialImages` prop. SuperAgentChat clears its own internal copy
+    // after the initial send fires; the home strip stays in sync because
+    // the home page unmounts the moment we navigate into chat. The
+    // `onBack` handler below clears it when the user explicitly returns.
   };
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
@@ -504,6 +511,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       setSelectedScenario(null);
       // Live Demo is a one-shot flag — never let it leak into a manual chat
       setLiveDemoActive(false);
+      // Drop the leftover image strip on New Chat. tryStartChat intentionally
+      // skips clearing pastedImages on send (so the initialImages hand-off to
+      // SuperAgentChat survives the React batch), which means the strip
+      // outlives the chat session — without this clear, returning home via
+      // sidebar's New Chat would resurrect the previous turn's attachments
+      // in the composer.
+      setPastedImages([]);
       setPhIdx(Math.floor(Math.random() * QUICK_ACTIONS.length));
     }
   }, [newChatTs]); // eslint-disable-line
@@ -823,7 +837,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
           // Forward any images the user pasted on the home composer so the
           // first turn includes them. SuperAgentChat clears the strip after
           // its initial-send fires (one-shot hand-off).
-          initialImages={pastedImages.length > 0 ? pastedImages : undefined}
+          //
+          // ONLY forward when starting a fresh chat (no sessionParam, no
+          // demoParam). When the user navigates into an existing session
+          // from the sidebar, that session has its own image history —
+          // re-seeding home's leftover pastedImages would replay them as
+          // attachments on the next message and confuse the user.
+          initialImages={(!sessionParam && !demoParam && pastedImages.length > 0) ? pastedImages : undefined}
           onBack={() => { setChatMessage(null); setChatAssetHint(null); setSelectedAgent(null); setSelectedScenario(null); setPastedImages([]); setLiveDemoActive(false); navigate('/'); }}
         />
       </>

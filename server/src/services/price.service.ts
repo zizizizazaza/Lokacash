@@ -21,6 +21,12 @@ const COINGECKO_IDS: Record<string, string> = {
   ARB: 'arbitrum', OP: 'optimism', MATIC: 'matic-network', SOL: 'solana',
   PEPE: 'pepe', SHIB: 'shiba-inu', DOGE: 'dogecoin',
   cbETH: 'coinbase-wrapped-staked-eth', rETH: 'rocket-pool-eth', wstETH: 'wrapped-steth',
+  // Top-cap majors used by the market-brief snapshot fallback. Synthesis
+  // pulls these from cache when the web3 agent didn't run a token-deep-dive
+  // on them (e.g. user asked about niche tokens but expects a generic
+  // "today's market" row at the top of the brief).
+  BNB: 'binancecoin', XRP: 'ripple', ADA: 'cardano', TRX: 'tron', TON: 'the-open-network',
+  AVAX: 'avalanche-2', DOT: 'polkadot', LTC: 'litecoin', BCH: 'bitcoin-cash',
 };
 
 // Fallback prices (used when API is unavailable)
@@ -38,8 +44,17 @@ const FALLBACK_PRICES: Record<string, number> = {
 
 // In-memory cache
 let cachedPrices: Record<string, number> = { ...FALLBACK_PRICES };
+/** Per-symbol 24h change % from the most recent CoinGecko refresh. Sparse —
+ *  only populated for symbols where CoinGecko returned a value. Used by the
+ *  market-brief synthesis fallback to render major-coin rows even when the
+ *  web3 agent didn't fetch them. */
+let cachedChange24h: Record<string, number> = {};
 let lastFetchAt: Date | null = null;
 let fetchInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Symbols treated as "majors" for the market-brief fallback. Order matters —
+ *  this is the row order in the injected snapshot. */
+const MAJORS_FOR_BRIEF = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE'] as const;
 
 function parseEnvBool(value: string | undefined, defaultValue: boolean): boolean {
   if (value == null || value === '') return defaultValue;
@@ -129,7 +144,10 @@ function coingeckoCreds(): { baseUrl: string; headers: Record<string, string>; t
 async function fetchFromCoinGecko(): Promise<Record<string, number> | null> {
   const ids = [...new Set(Object.values(COINGECKO_IDS))].join(',');
   const { baseUrl, headers } = coingeckoCreds();
-  const url = `${baseUrl}/simple/price?ids=${ids}&vs_currencies=usd`;
+  // include_24hr_change=true is needed so the market-brief snapshot can show
+  // a percent-change column. Adds zero cost to the existing call (same row,
+  // extra field).
+  const url = `${baseUrl}/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`;
   const timeoutMs = coingeckoFetchTimeoutMs();
 
   const dispatcher = getCoingeckoDispatcher();
@@ -147,15 +165,22 @@ async function fetchFromCoinGecko(): Promise<Record<string, number> | null> {
         return null;
       }
 
-      const data = (await response.json()) as Record<string, { usd?: number }>;
+      const data = (await response.json()) as Record<string, { usd?: number; usd_24h_change?: number }>;
 
       const prices: Record<string, number> = {};
+      const change24h: Record<string, number> = {};
       for (const [symbol, geckoId] of Object.entries(COINGECKO_IDS)) {
-        const price = data[geckoId]?.usd;
-        if (price !== undefined) {
-          prices[symbol] = price;
+        const row = data[geckoId];
+        if (row?.usd !== undefined) {
+          prices[symbol] = row.usd;
+        }
+        if (typeof row?.usd_24h_change === 'number' && Number.isFinite(row.usd_24h_change)) {
+          change24h[symbol] = row.usd_24h_change;
         }
       }
+
+      // Side-effect: refresh the 24h-change cache used by getMajorsSnapshot().
+      cachedChange24h = change24h;
 
       return prices;
     } catch (err) {
@@ -207,6 +232,48 @@ export function getPriceMeta() {
     lastUpdated: lastFetchAt?.toISOString() || null,
     tokenCount: Object.keys(cachedPrices).length,
   };
+}
+
+/**
+ * Snapshot of major coins for the market-brief synthesis fallback.
+ * Returns a pre-formatted markdown table (or null if no real data is
+ * available — i.e. the cache is still on FALLBACK_PRICES with no live fetch).
+ *
+ * This lets synthesis render the standard "Market Overview" row even when
+ * the web3 agent's tool calls focused on long-tail tokens from an image
+ * digest and never queried BTC/ETH/SOL/etc.
+ */
+export function getMajorsSnapshotForSynthesis(): string | null {
+  // Skip injection until at least one live CoinGecko fetch has succeeded —
+  // the fallback dictionary is months-stale and would mislead synthesis.
+  if (!lastFetchAt) return null;
+  const rows: Array<{ symbol: string; price: number; change?: number }> = [];
+  for (const sym of MAJORS_FOR_BRIEF) {
+    const price = cachedPrices[sym];
+    if (price === undefined) continue;
+    rows.push({ symbol: sym, price, change: cachedChange24h[sym] });
+  }
+  if (rows.length === 0) return null;
+
+  const fmtPrice = (n: number): string => {
+    if (n >= 1000) return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+    if (n >= 1) return `$${n.toFixed(2)}`;
+    if (n >= 0.01) return `$${n.toFixed(4)}`;
+    return `$${n.toPrecision(3)}`;
+  };
+  const fmtChange = (c?: number): string => {
+    if (c === undefined) return '—';
+    const sign = c >= 0 ? '+' : '';
+    return `${sign}${c.toFixed(2)}%`;
+  };
+
+  const table = [
+    '| Symbol | Price (USD) | 24h % |',
+    '|--------|-------------|-------|',
+    ...rows.map((r) => `| ${r.symbol} | ${fmtPrice(r.price)} | ${fmtChange(r.change)} |`),
+  ].join('\n');
+
+  return `Source: CoinGecko cache (last refreshed ${lastFetchAt.toISOString()})\n${table}`;
 }
 
 /** Start auto-refresh (call on server startup) */
