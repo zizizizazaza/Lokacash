@@ -3072,25 +3072,50 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     }
 
                     /** Server has no memory buffer (common during restart or never successfully started) and local still has SA_PENDING: resend agent:chat */
-                    let pending: { streaming?: boolean; sessionId?: string; userContent?: string; assistantMsgIdx?: number } | null = null;
+                    let pending: {
+                        streaming?: boolean;
+                        sessionId?: string;
+                        userContent?: string;
+                        assistantMsgIdx?: number;
+                        images?: string[];
+                        sentAt?: number;
+                    } | null = null;
                     try {
                         const raw = sessionStorage.getItem(SA_PENDING_KEY);
                         pending = raw ? (JSON.parse(raw) as typeof pending) : null;
                     } catch {
                         pending = null;
                     }
+                    // If sendToAI emitted within the last few seconds, the original
+                    // agent:chat is still in flight — the server may not yet have
+                    // registered the session in activeChatSessions when our parallel
+                    // agent:chat:replay arrives, so it correctly returns "empty".
+                    // Resending here would duplicate the request and trigger the
+                    // server's abort-previous-run logic on our own first emit.
+                    // Only treat the pending as resendable after this in-flight
+                    // window has elapsed (i.e. genuine recovery from refresh or
+                    // disconnect).
+                    const FRESH_PENDING_WINDOW_MS = 5000;
+                    const pendingIsFresh =
+                        typeof pending?.sentAt === 'number' &&
+                        Date.now() - pending.sentAt < FRESH_PENDING_WINDOW_MS;
                     const canResend =
                         pending?.streaming &&
                         pending.sessionId === sessionId &&
                         typeof pending.userContent === 'string' &&
                         pending.userContent.length > 0 &&
+                        !pendingIsFresh &&
                         !replayRecoverAttemptedRef.current;
 
                     if (canResend) {
                         replayRecoverAttemptedRef.current = true;
                         const msgIdx = typeof pending!.assistantMsgIdx === 'number' ? pending!.assistantMsgIdx! : 1;
                         activeMsgIdxRef.current = msgIdx;
-                        saLog('replay empty → fallback emit agent:chat (local pending)', { sessionId, msgIdx });
+                        saLog('replay empty → fallback emit agent:chat (local pending)', {
+                            sessionId,
+                            msgIdx,
+                            imageCount: pending!.images?.length || 0,
+                        });
                         setThinkingProcesses(prev => ({
                             ...prev,
                             [msgIdx]: { ...(prev[msgIdx] || {}), modules: [], isActive: true, route: 'Routing...' },
@@ -3102,6 +3127,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                             sessionId,
                             agentId: msgIdx <= 1 ? chatSelectedAgent : undefined,
                             domain: initialDomain,
+                            // Preserve vision attachments on recovery — without
+                            // this the resend strips images and the model loses
+                            // the user's picture (`agent:chat ... images: 0`).
+                            ...(pending!.images && pending!.images.length > 0
+                                ? { images: pending!.images.slice(0, 4).map((url) => ({ url })) }
+                                : {}),
+                        });
+                        return;
+                    }
+                    if (pendingIsFresh) {
+                        saLog('replay empty but pending is fresh → defer resend (original emit still in flight)', {
+                            sessionId,
+                            ageMs: pending?.sentAt ? Date.now() - pending.sentAt : null,
                         });
                         return;
                     }
@@ -3204,6 +3242,18 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     userContent: text,
                     assistantMsgIdx: msgIdx,
                     streaming: true,
+                    // Persist images so the replay-fallback resend (see the
+                    // `canResend` branch in the replay effect) doesn't drop
+                    // vision input on recovery.
+                    images: imagesArg && imagesArg.length > 0 ? imagesArg : undefined,
+                    // Timestamp lets the replay effect distinguish "we're
+                    // recovering from a refresh / disconnect" (old pending,
+                    // safe to resend) from "the original emit is literally
+                    // still in flight" (fresh pending, server hasn't had time
+                    // to register the session yet — resending here just
+                    // duplicates the request and confuses the server's abort
+                    // logic into killing our own first run).
+                    sentAt: Date.now(),
                 }),
             );
         } catch {

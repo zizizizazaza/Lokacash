@@ -511,6 +511,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       setSelectedScenario(null);
       // Live Demo is a one-shot flag — never let it leak into a manual chat
       setLiveDemoActive(false);
+      // Drop the leftover image strip on New Chat. tryStartChat intentionally
+      // skips clearing pastedImages on send (so the initialImages hand-off to
+      // SuperAgentChat survives the React batch), which means the strip
+      // outlives the chat session — without this clear, returning home via
+      // sidebar's New Chat would resurrect the previous turn's attachments
+      // in the composer.
+      setPastedImages([]);
       setPhIdx(Math.floor(Math.random() * QUICK_ACTIONS.length));
     }
   }, [newChatTs]); // eslint-disable-line

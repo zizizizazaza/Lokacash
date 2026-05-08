@@ -2389,10 +2389,26 @@ async function runAgentLoop(query: string, hint?: PreResolvedHint | null): Promi
       const missing = TOKEN_DEEP_DIVE_TOOLS.filter((t) => !ctx.calledThisTurn.has(t));
       if (missing.length === 0 || !resolvedId) return;
       const sym = resolvedAssets[0]?.symbol;
+      // Multi-asset price fan-out: when the LLM resolved >1 asset (e.g. 7
+      // search_crypto_asset calls in one turn for trending tokens shown in
+      // an image), `get_token_price_and_market` should fetch prices for ALL
+      // of them in one go — CoinGecko's /simple/price?ids= accepts a comma-
+      // joined list. Without this, only resolvedAssets[0] gets a price and
+      // the synthesis renders an empty table for the rest. The other deep-
+      // dive tools (detail/history/technicals/OKX) stay targeted at the
+      // primary asset to avoid 6×6 fan-out blowing CoinGecko rate limits.
+      const allIds = Array.from(
+        new Set(resolvedAssets.map((a) => a.id).filter(Boolean)),
+      ).slice(0, MULTI_TOKEN_TOP_N);
+      const multiIds = allIds.length > 1 ? allIds.join(',') : null;
       // Build the batch — drop entries where the args builder returned null
       // (happens when an OKX tool was selected but we don't have a symbol).
       const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
       for (const name of missing) {
+        if (name === 'get_token_price_and_market' && multiIds) {
+          calls.push({ name, args: { ids: multiIds } });
+          continue;
+        }
         const args = argsForDeepDiveTool(name, resolvedId!, sym);
         if (args) calls.push({ name, args });
       }
