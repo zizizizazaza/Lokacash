@@ -3308,20 +3308,39 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const transformedHistory: Message[] = history.map(
                         (m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
                             let sources: SearchSource[] | undefined;
-                            // For user turns the backend persists `{ images: [{ url }] }`
-                            // in metadata so the bubble can re-render the same
-                            // attachment thumbnails after reload. Pull both in
-                            // one parse so we don't double-decode.
+                            // For user turns the backend persists images in
+                            // metadata so the bubble can re-render the same
+                            // attachment thumbnails after reload.
+                            //
+                            // Two shapes coexist on disk:
+                            //   - `images`         — current/most-recent image turn (raw bytes
+                            //                        still re-fed to the LLM next turn)
+                            //   - `archivedImages` — previous image turns that the server has
+                            //                        already replaced with a text imageSummary
+                            //                        (see archivePriorUserImageTurns in
+                            //                        server/src/socket/index.ts) to keep prompt
+                            //                        token usage low. The bytes are kept
+                            //                        client-display-only.
+                            //
+                            // Both should render in the user bubble when reopening history;
+                            // without the archivedImages fallback, every chat with >1 image
+                            // turn would visually lose all but the latest image after the next
+                            // archive pass.
                             let images: string[] | undefined;
                             if (m.metadata) {
                                 try {
                                     const parsed = JSON.parse(m.metadata) as any;
                                     sources = parsed?.sources;
-                                    if (m.role === 'user' && Array.isArray(parsed?.images)) {
-                                        const urls = parsed.images
-                                            .map((img: any) => (typeof img?.url === 'string' ? img.url : null))
-                                            .filter(Boolean) as string[];
-                                        if (urls.length) images = urls;
+                                    if (m.role === 'user') {
+                                        const rawImgs = Array.isArray(parsed?.images)
+                                            ? parsed.images
+                                            : (Array.isArray(parsed?.archivedImages) ? parsed.archivedImages : null);
+                                        if (rawImgs) {
+                                            const urls = rawImgs
+                                                .map((img: any) => (typeof img?.url === 'string' ? img.url : null))
+                                                .filter(Boolean) as string[];
+                                            if (urls.length) images = urls;
+                                        }
                                     }
                                 } catch {}
                             }
