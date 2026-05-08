@@ -259,10 +259,13 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
     }
     setChatAssetHint(opts?.assetHint || null);
     setChatMessage(text.trim());
-    // Clear the home composer's image strip — SuperAgentChat captured the
-    // current value into its state via the `initialImages` prop, so any
-    // residual reference here would otherwise re-seed the next session.
-    setPastedImages([]);
+    // Do NOT clear `pastedImages` here — React batches this with
+    // setChatMessage so SuperAgentChat would mount and read a value of
+    // `[]` *before* it could capture the user's attachments via the
+    // `initialImages` prop. SuperAgentChat clears its own internal copy
+    // after the initial send fires; the home strip stays in sync because
+    // the home page unmounts the moment we navigate into chat. The
+    // `onBack` handler below clears it when the user explicitly returns.
   };
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);

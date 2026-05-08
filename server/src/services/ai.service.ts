@@ -98,6 +98,11 @@ export interface AssetContext {
   description?: string;
 }
 
+const IMAGE_DIGEST_GUIDE = `
+
+## Image attachments (when the user sends a picture)
+When a user message contains a 【图片理解】 or [Image understanding] block, that block IS your visual perception of the image the user attached — a vision model has already looked at the picture and produced this description for you. Treat it as your own observation. Answer the user's question directly based on what's described there. Never say "I can't view images", "I cannot directly see/analyze the image", "请提供图片内容", or ask the user to describe the image — they already attached it and you have the description. If the description is sparse, you may note that briefly, but still answer with what you have.`;
+
 function buildSystemPrompt(assetContext?: AssetContext, agentId?: string): string {
   // SuperAgent pipeline calls (synthesis, HTML generation, consensus, etc.)
   // carry their own self-contained prompts that demand markdown / long-form
@@ -105,10 +110,10 @@ function buildSystemPrompt(assetContext?: AssetContext, agentId?: string): strin
   // would override them, truncating replies. Skip it for those callers and
   // only inject minimal time context.
   if (agentId === 'superagent') {
-    return getGlobalTimeContext();
+    return getGlobalTimeContext() + IMAGE_DIGEST_GUIDE;
   }
 
-  const basePrompt = getGlobalTimeContext() + LOKA_SYSTEM_PROMPT;
+  const basePrompt = getGlobalTimeContext() + LOKA_SYSTEM_PROMPT + IMAGE_DIGEST_GUIDE;
 
   if (!assetContext) {
     return basePrompt + `\n\n## Current Context\nNo specific ticker is selected. Greet the user briefly and invite them to send a ticker or an investment-research question — crypto (e.g. BTC, ETH, SOL) or stocks (e.g. TSLA, AAPL, 00700.HK). Mention in one sentence that they can pick Fast or Roundtable mode for deeper analysis, or stay on Auto and let the router decide. Keep the welcome under 6 lines of plain text. Do NOT invent a project list, do NOT mention stablecoins or APY offerings.`;
@@ -333,16 +338,15 @@ export class LokaAIService {
     const digestPrompt = `You are a routing preprocessor for a multimodal research assistant.
 Analyze the attached image(s) once and convert them into compact routing-friendly text.
 
-Return JSON only:
-{"imageDigest":"..."}
+Return PLAIN TEXT ONLY \u2014 no JSON, no markdown, no quotes around the whole thing, no preamble. Just the description as one paragraph.
 
 Rules:
-- Write imageDigest in ${isZh ? 'Chinese' : 'English'}.
+- Write the description in ${isZh ? 'Chinese' : 'English'}.
 - Focus on concrete, decision-relevant facts only: visible entities, logos/brands, OCR text, chart/topic, scene, meme intent, and what the user is likely asking about.
 - If the image is a screenshot/post, capture the main claim and any important text.
 - If the image is noisy or ambiguous, say what is uncertain briefly.
 - Keep it concise: 80-260 characters preferred, hard cap 500 characters.
-- Do not include chain-of-thought.
+- Do not include chain-of-thought, do not wrap in JSON, do not prefix with "Image:" or similar.
 
 User text:
 ${userText || '(empty)'}`;
@@ -363,7 +367,6 @@ ${userText || '(empty)'}`;
         ],
         max_tokens: 300,
         temperature: 0.1,
-        response_format: { type: 'json_object' },
         // Disable Doubao 深度思考 — see comment in requestRouterPlan above.
         thinking: { type: 'disabled' },
       }),
@@ -379,21 +382,29 @@ ${userText || '(empty)'}`;
       choices?: Array<{ message?: { content?: string } }>;
     };
 
-    const raw = (data.choices?.[0]?.message?.content || '').trim();
-    if (!raw) return '';
-    try {
-      const parsed = JSON.parse(raw) as { imageDigest?: string };
-      return typeof parsed.imageDigest === 'string' ? parsed.imageDigest.trim().slice(0, 500) : '';
-    } catch {
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (!match) return '';
-      try {
-        const parsed = JSON.parse(match[0]) as { imageDigest?: string };
-        return typeof parsed.imageDigest === 'string' ? parsed.imageDigest.trim().slice(0, 500) : '';
-      } catch {
-        return '';
-      }
+    let raw = (data.choices?.[0]?.message?.content || '').trim();
+    if (!raw) {
+      console.warn('[analyzeImagesForRouting] empty content from model', {
+        model: this.imageDigestModel,
+        imageCount: safeImages.length,
+        firstImagePreview: safeImages[0]?.url?.slice(0, 80),
+      });
+      return '';
     }
+
+    // Some upstreams keep returning the legacy JSON wrapper despite the
+    // plain-text instruction. Be tolerant: if it *looks* like the wrapper,
+    // pull the value out via regex (cannot use JSON.parse — the model often
+    // emits unescaped " inside the value, which makes parse fail).
+    const wrapperMatch = raw.match(/"imageDigest"\s*:\s*"([\s\S]*?)"\s*\}\s*$/);
+    if (wrapperMatch) {
+      raw = wrapperMatch[1].trim();
+    } else {
+      // Strip a leading ```json / ``` fence if present.
+      raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    }
+
+    return raw.slice(0, 500);
   }
 
   async chat(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext, modelOverride?: string): Promise<AIResponse> {

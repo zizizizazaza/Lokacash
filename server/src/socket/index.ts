@@ -809,6 +809,11 @@ export function setupSocket(server: HttpServer) {
       credentials: true,
     },
     path: '/api/socket.io',
+    // Vision turns ship images as base64 data: URLs inside `agent:chat`.
+    // A single phone photo is often 1.5–3 MB after base64; the multimodal
+    // turn cap is 4 images. Default 1 MB silently drops these packets and
+    // the handler never fires. Allow up to 32 MB to cover 4 large images.
+    maxHttpBufferSize: 32 * 1024 * 1024,
   });
 
   // Safety-net: sweep orphaned session state every 5 minutes.
