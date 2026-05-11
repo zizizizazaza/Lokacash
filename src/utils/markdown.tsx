@@ -823,32 +823,78 @@ const REDDIT_ICON = (
 
 /**
  * Maps CoinGecko exchange names to their canonical domain so we can fetch favicons.
- * Lookup is case-insensitive and tolerant of suffixes (e.g. "Coinbase Exchange").
+ * Lookup is case-insensitive and tolerant of common suffixes/variations:
+ * - "Coinbase Exchange" → drops "exchange" → matches "coinbase"
+ * - "AscendEX (BitMax)" → strips parens → matches "ascendex"
+ * - "Biconomy.com" → strips ".com" → matches "biconomy"
  */
 const EXCHANGE_DOMAINS: Record<string, string> = {
   binance: 'binance.com', 'binance us': 'binance.us',
-  coinbase: 'coinbase.com', 'coinbase exchange': 'coinbase.com', 'coinbase pro': 'pro.coinbase.com',
+  coinbase: 'coinbase.com', 'coinbase pro': 'pro.coinbase.com',
   kraken: 'kraken.com', okx: 'okx.com', bybit: 'bybit.com', kucoin: 'kucoin.com',
   bitfinex: 'bitfinex.com', bitstamp: 'bitstamp.net', gemini: 'gemini.com',
   upbit: 'upbit.com', htx: 'htx.com', huobi: 'htx.com',
   'gate.io': 'gate.io', gate: 'gate.io',
   mexc: 'mexc.com', 'mexc global': 'mexc.com', bitget: 'bitget.com',
-  'crypto.com': 'crypto.com', 'crypto.com exchange': 'crypto.com',
+  'crypto.com': 'crypto.com',
   bingx: 'bingx.com', bithumb: 'bithumb.com', whitebit: 'whitebit.com', phemex: 'phemex.com',
   lbank: 'lbank.com', 'xt.com': 'xt.com', xt: 'xt.com',
   btse: 'btse.com', bitrue: 'bitrue.com', hotcoin: 'hotcoin.com', websea: 'websea.com',
   korbit: 'korbit.co.kr', poloniex: 'poloniex.com', bittrex: 'bittrex.com',
-  ascendex: 'ascendex.com', bitmart: 'bitmart.com', digifinex: 'digifinex.com',
+  ascendex: 'ascendex.com', bitmax: 'ascendex.com',
+  bitmart: 'bitmart.com', digifinex: 'digifinex.com',
   pionex: 'pionex.com', btcc: 'btcc.com', bibox: 'bibox.com',
-  probit: 'probit.com', 'probit global': 'probit.com',
+  probit: 'probit.com',
+  // newly added — were rendering as plain dots before
+  biconomy: 'biconomy.com',
+  deepcoin: 'deepcoin.com',
+  coinstore: 'coinstore.com',
+  coinw: 'coinw.com',
+  bingbon: 'bingbon.com',
+  bittrue: 'bitrue.com',
+  bitvavo: 'bitvavo.com',
+  bitflyer: 'bitflyer.com',
+  coincheck: 'coincheck.com',
+  blofin: 'blofin.com',
+  toobit: 'toobit.com',
+  weex: 'weex.com',
+  hashkey: 'hashkey.com',
+  'hashkey global': 'hashkey.com',
+  cryptocom: 'crypto.com',
+  bitmex: 'bitmex.com',
+  archax: 'archax.com',
+  paribu: 'paribu.com',
+  korbit_: 'korbit.co.kr',
 };
 
-/** Returns a favicon URL for an exchange name, or null if unknown. */
+/**
+ * Normalises an exchange name to a lookup key. Tries progressive simplifications:
+ * 1. raw lowercased "coinbase exchange"
+ * 2. drop ".com" suffix → "coinbase"
+ * 3. drop parens content → "ascendex" (from "ascendex (bitmax)")
+ * 4. drop common suffixes "exchange / global / pro" → "coinbase"
+ */
 function exchangeFaviconUrl(name: string): string | null {
   if (!name) return null;
-  const key = name.trim().toLowerCase();
-  const domain = EXCHANGE_DOMAINS[key];
-  return domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32` : null;
+  const base = name.trim().toLowerCase();
+  const candidates = new Set<string>([base]);
+  candidates.add(base.replace(/\.com$/i, ''));
+  candidates.add(base.replace(/\s*\([^)]+\)\s*/g, '').trim());
+  candidates.add(base.replace(/\s+(exchange|global|pro|spot)$/i, '').trim());
+  // Combination: strip parens AND suffix together
+  candidates.add(
+    base
+      .replace(/\s*\([^)]+\)\s*/g, '')
+      .replace(/\s+(exchange|global|pro|spot)$/i, '')
+      .replace(/\.com$/i, '')
+      .trim(),
+  );
+  for (const key of candidates) {
+    if (!key) continue;
+    const domain = EXCHANGE_DOMAINS[key];
+    if (domain) return `https://www.google.com/s2/favicons?domain=${domain}&sz=32`;
+  }
+  return null;
 }
 
 /** Returns a price change diff in USD (price * change% / 100) — used for "▲ +$0.0379" line. */
@@ -2160,31 +2206,166 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       const cit = consumeTrailingCitations(i);
       const colCount = Math.max(headerCells.length, ...bodyRows.map(r => r.length));
 
+      // ── Column type inference: "numeric" = majority of body cells are
+      //    digit-dominant (more digits than letters). Numeric columns get
+      //    mono font + right-align + tabular-nums so $95.21 / $3.14亿 /
+      //    0.0078% line up cleanly. Pure-text columns ("含义" / "来源")
+      //    stay left-aligned + sans.
+      const isNumericText = (s: string): boolean => {
+        const t = s.trim();
+        if (!t) return false;
+        const digits = (t.match(/\d/g) || []).length;
+        const letters = (t.match(/[a-zA-Z一-鿿]/g) || []).length;
+        // Need at least 1 digit, and digits ≥ letters (lenient — handles
+        // "$3.14亿" digits=3 letters=1, "0.0078% / 8h (年化约8.59%)" too).
+        return digits >= 1 && digits >= letters;
+      };
+      const numericCols: boolean[] = [];
+      for (let c = 0; c < colCount; c++) {
+        let numericCount = 0;
+        let totalCount = 0;
+        for (const row of bodyRows) {
+          const cell = row[c];
+          if (cell == null || cell === '') continue;
+          totalCount++;
+          if (isNumericText(cell)) numericCount++;
+        }
+        // Column is numeric when ≥ 60% of non-empty cells are digit-dominant.
+        numericCols[c] = totalCount > 0 && numericCount / totalCount >= 0.6;
+      }
+
+      // ── Layout decision: 2-col key/value data is really a stat-list, NOT
+      //    a relational table. Forcing it into <table> chrome makes it feel
+      //    like an Excel paste. Render as a bento grid of stat tiles instead
+      //    — matches the TokenCard / QuoteCard aesthetic and gives each
+      //    metric proper visual weight. 3+ col tables (真正的多维数据)
+      //    keep the table layout.
+      if (colCount === 2 && bodyRows.length >= 2) {
+        // Pick grid columns based on row count so tiles don't get too wide
+        // (3 rows → 1 wide row of 3) or too cramped (8 rows → 4x2 grid).
+        const n = bodyRows.length;
+        const cols = n <= 3 ? 'grid-cols-1 sm:grid-cols-3'
+          : n <= 4 ? 'grid-cols-2 sm:grid-cols-2'
+          : n <= 6 ? 'grid-cols-2 sm:grid-cols-3'
+          : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4';
+
+        elements.push(
+          <div key={`tbl-${i}`} className={`my-5 grid ${cols} gap-2.5`}>
+            {bodyRows.map((row, ri) => {
+              const label = row[0] || '';
+              const value = row[1] || '';
+              const valueIsNum = isNumericText(value);
+              return (
+                <div
+                  key={ri}
+                  className="rounded-lg p-3.5 transition-all hover:shadow-md hover:-translate-y-px"
+                  style={{
+                    background: 'linear-gradient(180deg, #fafbfc 0%, #ffffff 100%)',
+                    border: '1px solid #e2e8f0',
+                    boxShadow: '0 1px 2px rgba(15,23,42,0.03)',
+                  }}
+                >
+                  <div className="text-[10.5px] tracking-[0.1em] text-slate-500 font-semibold uppercase truncate">
+                    {parseLine(label)}
+                  </div>
+                  <div
+                    className={`mt-1.5 truncate leading-snug ${
+                      valueIsNum
+                        ? 'text-[19px] font-bold text-slate-900 tabular-nums'
+                        : 'text-[14px] font-semibold text-slate-700'
+                    }`}
+                    style={valueIsNum ? { fontFamily: TK_MONO } : undefined}
+                  >
+                    {parseLine(value)}
+                  </div>
+                </div>
+              );
+            })}
+            {cit.text && (
+              <div className="col-span-full text-right text-[11px] text-slate-400 -mt-1">
+                {parseLine(cit.text)}
+              </div>
+            )}
+          </div>,
+        );
+        i = cit.newIdx;
+        continue;
+      }
+
       elements.push(
-        <div key={`tbl-${i}`} className="my-4 overflow-x-auto rounded-lg border border-gray-200">
-          <table className="w-full text-[13.5px] text-left">
+        <div
+          key={`tbl-${i}`}
+          className="my-5 overflow-x-auto rounded-xl bg-white"
+          style={{
+            border: '1px solid #e5e7eb',
+            boxShadow: '0 1px 3px rgba(15,23,42,0.04), 0 1px 2px rgba(15,23,42,0.02)',
+          }}
+        >
+          <table className="w-full text-[13px] text-left border-collapse">
             <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
+              <tr style={{ background: 'linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%)', borderBottom: '1px solid #cbd5e1' }}>
                 {headerCells.map((cell, ci) => (
-                  <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+                  <th
+                    key={ci}
+                    className={`px-4 py-3 text-[11.5px] font-bold uppercase tracking-[0.1em] text-slate-700 whitespace-nowrap ${
+                      numericCols[ci] ? 'text-right' : 'text-left'
+                    }`}
+                  >
                     {parseLine(cell)}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {bodyRows.map((cells, ri) => (
-                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                  {cells.map((cell, ci) => (
-                    <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
-                      {parseLine(cell)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
+              {bodyRows.map((cells, ri) => {
+                // Subtle zebra striping — every other row gets a tinted bg
+                // so the eye gets visual anchors as it scans down. Modern
+                // fintech (Stripe Dashboard / Linear analytics) use this
+                // pattern for medium-density tables.
+                const stripe = ri % 2 === 1 ? '#fafbfc' : '#ffffff';
+                return (
+                  <tr
+                    key={ri}
+                    className="transition-colors hover:bg-blue-50/30"
+                    style={{
+                      background: stripe,
+                      borderBottom: ri < bodyRows.length - 1 ? '1px solid #f1f5f9' : undefined,
+                    }}
+                  >
+                    {cells.map((cell, ci) => {
+                      const isFirstCol = ci === 0;
+                      const isNum = numericCols[ci];
+                      const isLastCol = ci === cells.length - 1;
+                      // Heuristic: short last-column text in a 3+col table = source/note
+                      const isSourceCol = !isNum && isLastCol && cell.length < 40 && colCount >= 3;
+                      return (
+                        <td
+                          key={ci}
+                          className={`px-4 py-2.5 align-middle ${
+                            isNum
+                              ? 'text-right text-[14.5px] font-bold text-slate-900 tabular-nums whitespace-nowrap'
+                              : isFirstCol
+                                ? 'text-[13px] font-semibold text-slate-800'
+                                : isSourceCol
+                                  ? 'text-[11.5px] text-slate-500'
+                                  : 'text-[13px] text-slate-600 leading-relaxed'
+                          }`}
+                          style={isNum ? { fontFamily: TK_MONO } : undefined}
+                        >
+                          {parseLine(cell)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
               {cit.text && (
-                <tr className="bg-gray-50/70">
-                  <td colSpan={colCount} className="px-3 py-1.5 text-right border-t border-gray-100">
+                <tr>
+                  <td
+                    colSpan={colCount}
+                    className="px-4 py-1.5 text-right text-[11px] text-slate-400"
+                    style={{ borderTop: '1px solid #f1f5f9', background: '#fafbfc' }}
+                  >
                     {parseLine(cit.text)}
                   </td>
                 </tr>

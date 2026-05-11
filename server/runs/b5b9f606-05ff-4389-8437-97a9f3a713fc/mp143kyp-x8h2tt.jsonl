@@ -1,0 +1,8 @@
+{"ts":"2026-05-11T11:22:00.289Z","type":"turn_start","userId":"cmmn8oiqb022f0dky01c0ls1p","sessionId":"b5b9f606-05ff-4389-8437-97a9f3a713fc","userMessagePreview":"What's driving Venice Token (VVV) today?"}
+{"ts":"2026-05-11T11:22:00.305Z","type":"first_pass_start","tools":7,"historyMessages":1,"hasMemoryRecall":false,"hasImages":false,"imageCount":0,"firstPassModel":"default"}
+{"ts":"2026-05-11T11:22:06.516Z","type":"first_pass_done","narrationLen":98,"toolCalls":[{"name":"web3_token_analysis","argsLen":76},{"name":"web_research","argsLen":55}]}
+{"ts":"2026-05-11T11:22:06.516Z","type":"tool_call_start","name":"web3_token_analysis","args":{"query":"Venice Token VVV price funding rate liquidations news sentiment"}}
+{"ts":"2026-05-11T11:22:06.517Z","type":"tool_call_start","name":"web_research","args":{"query":"Venice Token VVV price surge reasons today"}}
+{"ts":"2026-05-11T11:22:11.849Z","type":"tool_call_done","name":"web_research","ok":true,"durationMs":5332,"contentLen":5912,"sourcesCount":13}
+{"ts":"2026-05-11T11:22:29.936Z","type":"tool_call_done","name":"web3_token_analysis","ok":true,"durationMs":23420,"contentLen":1285,"sourcesCount":1}
+{"ts":"2026-05-11T11:22:29.936Z","type":"synthesis_start","promptKind":"crypto","toolsPhaseDurationS":23}

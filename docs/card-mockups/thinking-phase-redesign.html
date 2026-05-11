@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Thinking Phase — Before vs After</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #f4f5f8;
+    color: #0f172a;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  /* pulse dot for active tools */
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+  }
+  .dot-pulse { animation: pulse-dot 1.4s ease-in-out infinite; }
+
+  /* ring spinner for in-flight tools */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 0.9s linear infinite; }
+
+  /* fade-in for newly arrived pills */
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .fade-in { animation: fade-up 0.25s ease-out; }
+
+  /* category color tokens */
+  :root {
+    --search-bg: #eff6ff;     --search-fg: #1d4ed8;     --search-ring: #bfdbfe;  /* blue */
+    --data-bg:   #ecfdf5;     --data-fg:   #047857;     --data-ring:   #a7f3d0;  /* green */
+    --analyze-bg:#f5f3ff;     --analyze-fg:#6d28d9;     --analyze-ring:#ddd6fe;  /* purple */
+    --signal-bg: #fff7ed;     --signal-fg: #c2410c;     --signal-ring: #fed7aa;  /* orange */
+    --done-bg:   #f8fafc;     --done-fg:   #64748b;     --done-ring:   #e2e8f0;  /* slate */
+  }
+
+  /* status pill — base */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 9999px;
+    font-size: 11.5px; font-weight: 500;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .pill .ts { font-size: 10px; opacity: 0.6; margin-left: 2px; }
+  .pill .dot { width: 6px; height: 6px; border-radius: 9999px; }
+
+  /* state: active (pulsing colored dot, full color bg) */
+  .pill.search.active { background: var(--search-bg); color: var(--search-fg); border-color: var(--search-ring); }
+  .pill.data.active   { background: var(--data-bg);   color: var(--data-fg);   border-color: var(--data-ring); }
+  .pill.analyze.active{ background: var(--analyze-bg);color: var(--analyze-fg);border-color: var(--analyze-ring); }
+  .pill.signal.active { background: var(--signal-bg); color: var(--signal-fg); border-color: var(--signal-ring); }
+  .pill.active .dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+  .pill.search.active .dot   { background: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+  .pill.data.active .dot     { background: #059669; box-shadow: 0 0 0 3px rgba(5,150,105,.15); }
+  .pill.analyze.active .dot  { background: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,.15); }
+  .pill.signal.active .dot   { background: #ea580c; box-shadow: 0 0 0 3px rgba(234,88,12,.15); }
+
+  /* state: done (muted, with ✓) */
+  .pill.done {
+    background: var(--done-bg); color: var(--done-fg); border-color: var(--done-ring);
+  }
+  .pill.done .check { width: 11px; height: 11px; color: #94a3b8; }
+
+  /* state: queued (dashed border, low contrast) */
+  .pill.queued {
+    background: #fafbfc; color: #94a3b8;
+    border: 1px dashed #cbd5e1;
+  }
+  .pill.queued .dot { background: #cbd5e1; }
+
+  /* state: failed */
+  .pill.failed {
+    background: #fef2f2; color: #b91c1c; border-color: #fecaca;
+  }
+  .pill.failed .x { width: 11px; height: 11px; color: #dc2626; }
+
+  /* group container — wraps related tools */
+  .group {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 6px 4px 10px; border-radius: 12px;
+    background: #fafbfc; border: 1px solid #e2e8f0;
+  }
+  .group-label {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+    color: #64748b; margin-right: 4px;
+  }
+  .group-tools { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .group-tool {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 8px; border-radius: 9999px; font-size: 11px;
+    background: #fff; border: 1px solid #e2e8f0; color: #334155;
+  }
+  .group-tool.active { background: var(--data-bg); color: var(--data-fg); border-color: var(--data-ring); }
+  .group-tool.active .dot { width: 5px; height: 5px; border-radius: 9999px; background: #059669; animation: pulse-dot 1.4s ease-in-out infinite; }
+  .group-tool .ts { font-size: 9.5px; opacity: 0.55; margin-left: 2px; }
+
+  /* token resolution chip — inline, compact */
+  .token-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 9999px;
+    background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+    border: 1px solid #a7f3d0; color: #047857;
+    font-size: 11.5px; font-weight: 600;
+  }
+  .token-chip .check { width: 12px; height: 12px; }
+  .token-chip .arrow { opacity: 0.5; }
+  .token-chip .id { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 500; opacity: 0.7; }
+
+  /* sources card — same but more compact */
+  .sources-card {
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 12px;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.03);
+  }
+
+  /* narration text */
+  .narration { color: #334155; font-size: 14px; line-height: 1.7; }
+
+  /* status header (top-most "Querying market data" line) */
+  .status-line {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 600; color: #0f172a;
+  }
+  .status-line .spin-ring {
+    width: 14px; height: 14px; border: 2px solid #cbd5e1; border-top-color: #3b82f6;
+    border-radius: 50%; animation: spin 0.9s linear infinite;
+  }
+  .status-line .ts { font-size: 12px; font-weight: 500; color: #64748b; }
+</style>
+</head>
+<body class="min-h-screen p-8">
+
+<div class="max-w-[1400px] mx-auto">
+
+  <header class="mb-10">
+    <p class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Lokacash · Thinking-phase UI</p>
+    <h1 class="text-[26px] font-extrabold tracking-tight text-gray-900 mt-1">Before vs After</h1>
+    <p class="text-gray-600 mt-2 max-w-2xl text-[14px]">
+      Same 8-tool sequence (search → resolve → 4 token data → 2 OKX). Left: current. Right: with horizontal wrap + status icons + durations + grouping + semantic colors + token chip.
+    </p>
+  </header>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- BEFORE                                                       -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <section>
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-[10px] uppercase tracking-[0.14em] px-2 py-1 rounded-full bg-rose-100 text-rose-700 font-bold">Before · 现状</span>
+        <span class="text-[12px] text-gray-500">~ 410px tall</span>
+      </div>
+
+      <div class="bg-white rounded-2xl p-6 border border-gray-200">
+        <!-- status header -->
+        <div class="status-line">
+          <span class="spin-ring"></span>
+          <span>Querying market data</span>
+          <span class="ts">10s</span>
+          <span class="text-gray-400">›</span>
+        </div>
+        <div class="text-[11.5px] text-gray-500 mt-1 ml-[22px]">Reading on-chain signals</div>
+
+        <!-- narration -->
+        <p class="narration mt-4">我来分析SOL的当前市场情况，包括价格、衍生品数据和市场情绪。马上搜集数据。</p>
+
+        <!-- pills row (cyan, stacked vertically as in screenshot) -->
+        <div class="mt-4 flex flex-wrap gap-2">
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">searching web</span>
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">reading X</span>
+        </div>
+
+        <!-- sources card -->
+        <div class="mt-4 sources-card overflow-hidden">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+            <div class="flex items-center gap-2">
+              <span class="text-[12px] font-semibold">Sources</span>
+              <span class="text-[10.5px] uppercase tracking-wider text-gray-400">24 Found</span>
+            </div>
+            <span class="text-[9.5px] uppercase tracking-wider text-gray-400">VIA WEB · X</span>
+          </div>
+          <div class="text-[12px]">
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <span class="text-gray-400">𝕏</span>
+              <span class="truncate flex-1 text-gray-700">然而，在阅读完 @0xzhaozhao 的贴文当我们拨开情绪的迷雾...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <span class="text-gray-400">𝕏</span>
+              <span class="truncate flex-1 text-gray-700">WTI 📈 86.2（亚盘开盘跌超2%，隔夜结算收涨6.87%至89.61...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <span class="text-gray-400">𝕏</span>
+              <span class="truncate flex-1 text-gray-700">周末中东局势上演惊天逆转。就在上周五（4月17日）伊朗刚刚...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <span class="text-gray-400">𝕏</span>
+              <span class="truncate flex-1 text-gray-700">✨ 事件脉络：Tokenomist 数据显示，本周加密市场将迎来天...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <span class="text-gray-400">𝕏</span>
+              <span class="truncate flex-1 text-gray-700">✨ 事件脉...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <span class="text-gray-400">𝕏</span>
+              <span class="truncate flex-1 text-gray-700">✨ 方向...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5">
+              <a class="text-[11px] text-blue-600 hover:underline">Show 18 more</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- resolve token pill -->
+        <div class="mt-4">
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">
+            resolve token <span class="mx-1 opacity-50">·</span> SOL
+          </span>
+        </div>
+
+        <!-- token resolution card -->
+        <div class="mt-3 sources-card overflow-hidden">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+            <div class="flex items-center gap-2">
+              <span class="text-[12px] font-semibold">Token resolution</span>
+              <span class="text-[10.5px] uppercase tracking-wider text-gray-400">SOL</span>
+            </div>
+            <span class="text-[9.5px] uppercase tracking-wider text-gray-400">VIA COINGECKO</span>
+          </div>
+          <div class="px-3 py-3 flex items-center gap-2">
+            <span class="text-[16px] font-bold text-gray-900">Solana</span>
+            <span class="text-gray-400">→</span>
+            <span class="text-[11px] text-gray-600 mono">solana</span>
+          </div>
+        </div>
+
+        <!-- multiple pills stacked vertically (the bottom of the screenshot) -->
+        <div class="mt-4 flex flex-col gap-2 items-start">
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">fetch price <span class="mx-1 opacity-50">·</span> solana</span>
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">project profile <span class="mx-1 opacity-50">·</span> solana</span>
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">price history <span class="mx-1 opacity-50">·</span> solana <span class="mx-1 opacity-50">·</span> 30</span>
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">technicals <span class="mx-1 opacity-50">·</span> solana</span>
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">OKX derivatives <span class="mx-1 opacity-50">·</span></span>
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] bg-cyan-100 text-cyan-700 font-medium">OKX news &amp; mood</span>
+        </div>
+      </div>
+
+      <ul class="mt-4 text-[12px] text-gray-600 list-disc pl-5 space-y-1 leading-relaxed">
+        <li>药丸纵向堆 → 占 ~250px 垂直</li>
+        <li>无状态指示（active/done/failed 都一样色）</li>
+        <li>无时长（不知道每个工具花了多久）</li>
+        <li>"solana" 4 次重复</li>
+        <li>Token resolution 用整张卡展示 1 个 fact</li>
+        <li>全 cyan 单色，扫读无锚点</li>
+      </ul>
+    </section>
+
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- AFTER                                                        -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <section>
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-[10px] uppercase tracking-[0.14em] px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-bold">After · 优化</span>
+        <span class="text-[12px] text-gray-500">~ 150px tall · 64% 更短</span>
+      </div>
+
+      <div class="bg-white rounded-2xl p-6 border border-gray-200">
+        <!-- status header -->
+        <div class="status-line">
+          <span class="spin-ring"></span>
+          <span>Querying market data</span>
+          <span class="ts">10s</span>
+          <span class="text-gray-400">›</span>
+        </div>
+        <div class="text-[11.5px] text-gray-500 mt-1 ml-[22px]">Reading on-chain signals</div>
+
+        <!-- narration -->
+        <p class="narration mt-4">我来分析SOL的当前市场情况，包括价格、衍生品数据和市场情绪。马上搜集数据。</p>
+
+        <!-- ── Inline flow row 1: search done + token chip + queued ── -->
+        <div class="mt-4 flex flex-wrap items-center gap-2">
+          <!-- search · done -->
+          <span class="pill search done">
+            <svg class="check" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+            searching web
+            <span class="ts mono">1.9s</span>
+          </span>
+          <span class="pill search done">
+            <svg class="check" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+            reading X
+            <span class="ts mono">2.3s</span>
+          </span>
+          <!-- token resolution as compact green chip -->
+          <span class="token-chip" title="Token resolution via CoinGecko">
+            <svg class="check" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+            SOL <span class="arrow">→</span> Solana <span class="id">solana</span>
+          </span>
+        </div>
+
+        <!-- ── Compressed Sources card (count + 3 lines + show all) ── -->
+        <div class="mt-3 sources-card overflow-hidden">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+            <div class="flex items-center gap-2">
+              <span class="text-[12px] font-semibold">Sources</span>
+              <span class="text-[10.5px] uppercase tracking-wider text-gray-400">24 Found · X + Web</span>
+            </div>
+            <button class="text-[11px] text-blue-600 hover:underline">expand ▾</button>
+          </div>
+          <div class="text-[12px]">
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <img class="w-3.5 h-3.5 rounded-full bg-gray-100" src="https://www.google.com/s2/favicons?domain=x.com&amp;sz=32" alt="" />
+              <span class="truncate flex-1 text-gray-700">@0xzhaozhao：拨开情绪迷雾后，SOL 关键支撑在 $90...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3 border-b border-gray-50">
+              <img class="w-3.5 h-3.5 rounded-full bg-gray-100" src="https://www.google.com/s2/favicons?domain=x.com&amp;sz=32" alt="" />
+              <span class="truncate flex-1 text-gray-700">Tokenomist：本周加密市场将迎来天量解锁...</span>
+              <span class="text-[10px] text-gray-400">x.com</span>
+            </div>
+            <div class="px-3 py-1.5 flex items-center gap-3">
+              <img class="w-3.5 h-3.5 rounded-full bg-gray-100" src="https://www.google.com/s2/favicons?domain=coindesk.com&amp;sz=32" alt="" />
+              <span class="truncate flex-1 text-gray-700">CoinDesk：ETF 资金流入对 SOL 边际定价影响...</span>
+              <span class="text-[10px] text-gray-400">coindesk.com</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Grouped tool row: "Token data" group with sub-tools + OKX group ── -->
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <!-- Token data group: aggregates fetch price / profile / history / technicals on solana -->
+          <div class="group">
+            <span class="group-label">Token data</span>
+            <span class="text-[10.5px] text-slate-400">solana</span>
+            <span class="text-slate-300">·</span>
+            <span class="group-tools">
+              <span class="group-tool">
+                <svg class="w-2.5 h-2.5" viewBox="0 0 12 12" fill="none" stroke="#94a3b8" stroke-width="2.4"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+                price <span class="ts mono">0.4s</span>
+              </span>
+              <span class="group-tool">
+                <svg class="w-2.5 h-2.5" viewBox="0 0 12 12" fill="none" stroke="#94a3b8" stroke-width="2.4"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+                profile <span class="ts mono">0.6s</span>
+              </span>
+              <span class="group-tool active">
+                <span class="dot"></span>
+                history <span class="ts mono">···</span>
+              </span>
+              <span class="group-tool" style="background:#fafbfc; color:#94a3b8; border:1px dashed #cbd5e1;">
+                <span class="dot" style="width:5px;height:5px;border-radius:9999px;background:#cbd5e1;"></span>
+                technicals
+              </span>
+            </span>
+          </div>
+
+          <!-- OKX group: derivatives + news -->
+          <div class="group">
+            <span class="group-label" style="color:#9a3412;">OKX</span>
+            <span class="group-tools">
+              <span class="group-tool" style="background:#fafbfc; color:#94a3b8; border:1px dashed #cbd5e1;">
+                <span class="dot" style="width:5px;height:5px;border-radius:9999px;background:#cbd5e1;"></span>
+                derivatives
+              </span>
+              <span class="group-tool" style="background:#fafbfc; color:#94a3b8; border:1px dashed #cbd5e1;">
+                <span class="dot" style="width:5px;height:5px;border-radius:9999px;background:#cbd5e1;"></span>
+                news &amp; mood
+              </span>
+            </span>
+          </div>
+        </div>
+
+      </div>
+
+      <ul class="mt-4 text-[12px] text-gray-600 list-disc pl-5 space-y-1 leading-relaxed">
+        <li>✅ 横向 flex-wrap → 高度 -64%</li>
+        <li>✅ 状态图标：active 脉动绿点 / done 灰勾 / queued 虚线灰</li>
+        <li>✅ 完成态带时长（<span class="mono">0.4s · 0.6s · 2.3s</span>）</li>
+        <li>✅ "Token data (solana): price · profile · history · technicals" — 主题分组，"solana" 只出现 1 次</li>
+        <li>✅ Token resolution 改成内联绿色 chip：<span class="mono">SOL → Solana <span class="opacity-60">solana</span></span></li>
+        <li>✅ 语义色：search=蓝、data=绿、OKX=橙、analyze=紫</li>
+        <li>✅ Sources 卡加了实际 favicon + 默认 3 行可展开</li>
+      </ul>
+    </section>
+
+  </div>
+
+  <!-- Color legend -->
+  <div class="mt-12 bg-white rounded-2xl p-6 border border-gray-200">
+    <h2 class="text-[14px] font-bold text-gray-900 mb-3">语义色 token 系统</h2>
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 text-[11.5px]">
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe;">
+        <span class="w-2 h-2 rounded-full" style="background:#2563eb;"></span>
+        <b>SEARCH</b> · web / X / sources
+      </div>
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;">
+        <span class="w-2 h-2 rounded-full" style="background:#059669;"></span>
+        <b>DATA</b> · price / resolve / fetch
+      </div>
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background:#f5f3ff; color:#6d28d9; border:1px solid #ddd6fe;">
+        <span class="w-2 h-2 rounded-full" style="background:#7c3aed;"></span>
+        <b>ANALYZE</b> · technicals / derivatives
+      </div>
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background:#fff7ed; color:#c2410c; border:1px solid #fed7aa;">
+        <span class="w-2 h-2 rounded-full" style="background:#ea580c;"></span>
+        <b>SIGNAL</b> · OKX / on-chain / mood
+      </div>
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background:#f8fafc; color:#64748b; border:1px solid #e2e8f0;">
+        <svg class="w-2.5 h-2.5" viewBox="0 0 12 12" fill="none" stroke="#94a3b8" stroke-width="2.4"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+        <b>DONE</b> · 灰勾 + 时长
+      </div>
+    </div>
+  </div>
+
+  <!-- State legend -->
+  <div class="mt-6 bg-white rounded-2xl p-6 border border-gray-200">
+    <h2 class="text-[14px] font-bold text-gray-900 mb-3">状态指示对照</h2>
+    <div class="flex flex-wrap gap-3 text-[11.5px]">
+      <span class="pill data active">
+        <span class="dot"></span>
+        fetching price
+      </span>
+      <span class="pill data done">
+        <svg class="check" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M2.5 6.5l2.5 2.5 5-5"/></svg>
+        fetched price
+        <span class="ts mono">0.4s</span>
+      </span>
+      <span class="pill queued">
+        <span class="dot"></span>
+        queued · technicals
+      </span>
+      <span class="pill failed">
+        <svg class="x" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        OKX news failed
+        <span class="ts mono">timeout</span>
+      </span>
+    </div>
+  </div>
+
+  <footer class="mt-12 text-center text-[11.5px] text-gray-400">
+    Same SOL query · 8-tool sequence · simulated active/done/queued states
+  </footer>
+</div>
+
+</body>
+</html>

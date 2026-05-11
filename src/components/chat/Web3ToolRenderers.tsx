@@ -1261,37 +1261,192 @@ const TOOL_LABELS_EN: Record<string, string> = {
 
 type ToolPillState = 'active' | 'completed' | 'failed' | 'skipped';
 
+type ToolCategory = 'search' | 'data' | 'analyze' | 'signal';
+
 /**
- * Single pill — used both standalone (paired with its own result card) and
- * inside the multi-pill cluster below. Kept lightweight: the styling is
- * identical to the cluster pills so pairing one pill with one card looks
- * visually consistent with the search cluster's multi-pill row.
+ * Maps tool names to semantic categories. Drives the pill color theme:
+ * - search:  web / X / news lookup (blue)
+ * - data:    fetch concrete numbers (price/profile/history) (green)
+ * - analyze: derived analytics (technicals/trend/pattern) (purple)
+ * - signal:  exchange/derivatives/on-chain (OKX/funding) (orange)
+ * Unknown tools fall back to "data" (neutral default).
+ */
+const TOOL_CATEGORY: Record<string, ToolCategory> = {
+    // Search
+    search_web: 'search', search_x: 'search', search_news: 'search',
+    search_stock_news: 'search', search_comprehensive_intel: 'search',
+    // Token / equity data
+    search_crypto_asset: 'data',
+    get_token_price_and_market: 'data', get_token_detail: 'data', get_price_history: 'data',
+    get_trending_coins: 'data', get_market_rankings: 'data', get_global_market_overview: 'data',
+    get_institutional_holdings: 'data', get_exchange_rankings: 'data',
+    get_nft_collection: 'data', get_onchain_pools: 'data', get_category_coins: 'data',
+    get_realtime_quote: 'data', get_daily_history: 'data',
+    get_analysis_context: 'data', get_stock_info: 'data',
+    get_portfolio_snapshot: 'data', get_market_indices: 'data', get_sector_rankings: 'data',
+    // Analyze
+    get_token_technical_indicators: 'analyze',
+    analyze_trend: 'analyze', calculate_ma: 'analyze', analyze_pattern: 'analyze',
+    get_volume_analysis: 'analyze',
+    get_skill_backtest_summary: 'analyze', get_strategy_backtest_summary: 'analyze',
+    get_stock_backtest_summary: 'analyze',
+    // Signal (derivatives / on-chain / liquidations / capital flow)
+    get_okx_derivatives: 'signal', get_okx_news_sentiment: 'signal', get_okx_liquidations: 'signal',
+    get_chip_distribution: 'signal', get_capital_flow: 'signal',
+};
+
+function categorizeToolName(name: string): ToolCategory {
+    return TOOL_CATEGORY[name] || 'data';
+}
+
+/** Compact duration string: 230ms → "0.2s", 1850ms → "1.9s", 14300ms → "14s". */
+function fmtDurationMs(ms?: number): string | null {
+    if (ms == null || !Number.isFinite(ms)) return null;
+    if (ms < 100) return null; // too short to be meaningful
+    if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.round(ms / 1000)}s`;
+}
+
+// ── State icons — small inline SVG ──────────────────────────────
+const ICON_CHECK = (
+    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.3" className="w-2.5 h-2.5">
+        <path d="M2.5 6.5l2.5 2.5 5-5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+);
+const ICON_X = (
+    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.4" className="w-2.5 h-2.5">
+        <path d="M3 3l6 6M9 3l-6 6" strokeLinecap="round"/>
+    </svg>
+);
+
+// ── Category color tokens ──────────────────────────────────────
+//   active: full color (pill is "live", drawing the eye)
+//   done:   subtle (muted slate — task is past, gets out of the way)
+//   queued: dashed border (signals "not yet")
+//   failed: rose
+const CAT_COLORS: Record<ToolCategory, { bg: string; fg: string; ring: string; dot: string }> = {
+    search:  { bg: '#eff6ff', fg: '#1d4ed8', ring: '#bfdbfe', dot: '#2563eb' },
+    data:    { bg: '#ecfdf5', fg: '#047857', ring: '#a7f3d0', dot: '#059669' },
+    analyze: { bg: '#f5f3ff', fg: '#6d28d9', ring: '#ddd6fe', dot: '#7c3aed' },
+    signal:  { bg: '#fff7ed', fg: '#c2410c', ring: '#fed7aa', dot: '#ea580c' },
+};
+
+/**
+ * Compact tool pill with status icon + duration + semantic category color.
+ *   - active:    colored bg + pulsing colored dot  ← current "in flight"
+ *   - completed: muted slate bg + ✓ + duration     ← out of the way
+ *   - failed:    rose bg + ✗                        ← screams for attention
+ *   - skipped:   dashed slate                       ← never ran
  */
 export const Web3ToolPill: React.FC<{
     toolName: string;
     args?: any;
     state?: ToolPillState;
-}> = ({ toolName, args, state }) => {
+    durationMs?: number;
+    /** When set, an arg value matching this string (case-insensitive) is
+     *  hidden from the inline summary. Used when the pill sits inside a
+     *  Web3ToolGroup whose label already shows the subject. */
+    stripSubject?: string;
+}> = ({ toolName, args, state, durationMs, stripSubject }) => {
     const label = TOOL_LABELS_EN[toolName] || toolName;
+    const cat = categorizeToolName(toolName);
+    const palette = CAT_COLORS[cat];
+
     const argSummary = args
         ? Object.values(args)
+            .filter((v): v is string | number | boolean | null => {
+                if (v == null || v === '') return false;
+                if (stripSubject && typeof v === 'string' && v.toLowerCase() === stripSubject.toLowerCase()) return false;
+                return true;
+            })
             .map((v) => (typeof v === 'string' ? v : JSON.stringify(v).slice(0, 12)))
             .join(' · ')
             .slice(0, 40)
         : '';
-    const stateClass =
-        state === 'completed' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' :
-        state === 'failed' ? 'bg-rose-50 text-rose-700 border-rose-100' :
-        state === 'active' ? 'bg-blue-50 text-blue-700 border-blue-100 animate-pulse' :
-        'bg-gray-50 text-gray-600 border-gray-100';
+
+    let style: React.CSSProperties;
+    let icon: React.ReactNode;
+    if (state === 'active') {
+        style = { background: palette.bg, color: palette.fg, border: `1px solid ${palette.ring}` };
+        icon = (
+            <span className="relative inline-flex items-center justify-center w-2 h-2">
+                <span
+                    className="absolute inline-block w-2 h-2 rounded-full animate-ping opacity-60"
+                    style={{ background: palette.dot }}
+                />
+                <span
+                    className="relative inline-block w-1.5 h-1.5 rounded-full"
+                    style={{ background: palette.dot }}
+                />
+            </span>
+        );
+    } else if (state === 'completed') {
+        style = { background: '#f8fafc', color: '#64748b', border: '1px solid #e2e8f0' };
+        icon = <span style={{ color: '#94a3b8' }}>{ICON_CHECK}</span>;
+    } else if (state === 'failed') {
+        style = { background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca' };
+        icon = <span style={{ color: '#dc2626' }}>{ICON_X}</span>;
+    } else if (state === 'skipped') {
+        style = { background: '#fafbfc', color: '#94a3b8', border: '1px dashed #cbd5e1' };
+        icon = <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: '#cbd5e1' }} />;
+    } else {
+        // queued (no state)
+        style = { background: '#fafbfc', color: '#94a3b8', border: '1px dashed #cbd5e1' };
+        icon = <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: '#cbd5e1' }} />;
+    }
+
+    const durStr = state === 'completed' ? fmtDurationMs(durationMs) : null;
+
     return (
         <span
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${stateClass}`}
+            className="inline-flex items-center gap-1.5 rounded-full px-2 py-[3px] text-[11px] font-medium"
+            style={style}
         >
-            <span className="font-medium">{label}</span>
-            {argSummary && (
-                <span className="opacity-60 truncate max-w-[120px]" style={{ fontFamily: mono }}>
+            {icon}
+            <span>{label}</span>
+            {argSummary && state !== 'active' && (
+                <span className="opacity-55 truncate max-w-[100px]" style={{ fontFamily: mono }}>
                     · {argSummary}
+                </span>
+            )}
+            {argSummary && state === 'active' && (
+                <span className="opacity-70 truncate max-w-[100px]" style={{ fontFamily: mono }}>
+                    · {argSummary}
+                </span>
+            )}
+            {durStr && (
+                <span className="opacity-55 ml-0.5" style={{ fontFamily: mono, fontSize: '10px' }}>
+                    {durStr}
+                </span>
+            )}
+        </span>
+    );
+};
+
+/** Inline chip for a successful token resolution — replaces the heavyweight
+ *  SearchCryptoCard when used in the thinking-phase pill cluster. Reads as
+ *  "✓ SOL → Solana solana" in one line. */
+export const Web3TokenChip: React.FC<{ data: any }> = ({ data }) => {
+    if (!data || data.error) return null;
+    const symbol = (data.symbol || '').toUpperCase();
+    const name = data.name || data.id;
+    const id = data.id;
+    return (
+        <span
+            className="inline-flex items-center gap-1.5 rounded-full px-2 py-[3px] text-[11.5px] font-semibold"
+            style={{
+                background: 'linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%)',
+                border: '1px solid #a7f3d0',
+                color: '#047857',
+            }}
+        >
+            <span style={{ color: '#94a3b8' }}>{ICON_CHECK}</span>
+            {symbol && <span>{symbol}</span>}
+            <span className="opacity-50">→</span>
+            <span>{name}</span>
+            {id && id !== name && (
+                <span className="opacity-60 font-normal" style={{ fontFamily: mono, fontSize: '10px' }}>
+                    {id}
                 </span>
             )}
         </span>
@@ -1326,3 +1481,183 @@ export const Web3ToolCallPills: React.FC<{
 
 // Re-export helper labels for callers that want the localized title separately.
 export { TOOL_LABELS_ZH, TOOL_LABELS_EN };
+
+// ─────────────────────────────────────────────────────────────────────
+//  Tool grouping — same-subject + same-provider tools cluster into one
+//  visual container so "price · sui", "profile · sui", "history · sui",
+//  "technicals · sui" become one "Token data (sui)" group with 4 sub-pills
+//  instead of 4 sibling pills each repeating "sui".
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Coarse provider/family classification — determines which group a stage
+ * lands in. Search/resolve tools render separately (above the groups), so
+ * they aren't part of any group here.
+ */
+function classifyStageProvider(toolName: string): 'okx' | 'token' | 'stock' | 'search' | 'analyze' | 'other' {
+    if (toolName.startsWith('search_') && toolName !== 'search_crypto_asset') return 'search';
+    if (toolName === 'search_crypto_asset') return 'token';
+    if (toolName.startsWith('get_okx_')) return 'okx';
+    if (
+        toolName === 'get_realtime_quote' || toolName === 'get_daily_history' ||
+        toolName === 'get_stock_info' || toolName === 'get_chip_distribution' ||
+        toolName === 'get_capital_flow' || toolName === 'analyze_trend' ||
+        toolName === 'calculate_ma' || toolName === 'get_volume_analysis' ||
+        toolName === 'analyze_pattern' || toolName === 'search_stock_news' ||
+        toolName === 'search_comprehensive_intel' || toolName === 'get_portfolio_snapshot' ||
+        toolName === 'get_market_indices' || toolName === 'get_sector_rankings' ||
+        toolName === 'get_skill_backtest_summary' || toolName === 'get_strategy_backtest_summary' ||
+        toolName === 'get_stock_backtest_summary' || toolName === 'get_analysis_context'
+    ) return 'stock';
+    if (
+        toolName.startsWith('get_token_') || toolName.startsWith('get_trending_') ||
+        toolName.startsWith('get_market_') || toolName.startsWith('get_global_') ||
+        toolName.startsWith('get_institutional_') || toolName.startsWith('get_exchange_') ||
+        toolName.startsWith('get_nft_') || toolName.startsWith('get_onchain_') ||
+        toolName.startsWith('get_category_') || toolName === 'get_price_history'
+    ) return 'token';
+    return 'other';
+}
+
+/** Pulls the subject (token id, ticker, symbol, query) out of the tool's args. */
+function extractStageSubject(args: any): string | undefined {
+    if (!args || typeof args !== 'object') return undefined;
+    const v = args.id || args.ids || args.symbol || args.coin || args.ticker || args.tickers || args.query;
+    if (v == null) return undefined;
+    if (typeof v === 'string') return v.trim() || undefined;
+    if (Array.isArray(v)) return v[0] ? String(v[0]) : undefined;
+    return String(v);
+}
+
+type ToolGroup = {
+    key: string;
+    label: string;           // e.g. "Token data" / "OKX" / "Stock data"
+    subject?: string;        // e.g. "sui" / "AAPL"
+    category: ToolCategory;  // drives color
+    stages: Array<{ stage: string; state?: ToolPillState; durationMs?: number; argsData?: any; rawData?: any }>;
+};
+
+/** Partitions stages into visual groups. Stages NOT belonging to any
+ *  group (search-type) are returned separately as `ungrouped`. */
+export function groupStagesForUI(
+    stages: Array<{ stage: string; state?: ToolPillState; durationMs?: number; argsData?: any; rawData?: any }>,
+): { groups: ToolGroup[]; ungrouped: typeof stages } {
+    const groups = new Map<string, ToolGroup>();
+    const ungrouped: typeof stages = [];
+
+    for (const s of stages) {
+        const provider = classifyStageProvider(s.stage);
+
+        // Search tools render in their own row above groups (handled by caller)
+        if (provider === 'search') {
+            ungrouped.push(s);
+            continue;
+        }
+
+        // Token resolution → also rendered as inline chip by caller
+        if (s.stage === 'search_crypto_asset' && s.state === 'completed' && s.rawData) {
+            ungrouped.push(s);
+            continue;
+        }
+
+        // Decide group label + subject
+        let groupLabel: string;
+        let subject = extractStageSubject(s.argsData);
+        if (provider === 'okx') {
+            groupLabel = 'OKX';
+        } else if (provider === 'stock') {
+            groupLabel = 'Stock data';
+        } else if (provider === 'token') {
+            groupLabel = 'Token data';
+        } else {
+            groupLabel = 'Tools';
+        }
+
+        const key = `${groupLabel}::${(subject || '').toLowerCase()}`;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                key,
+                label: groupLabel,
+                subject,
+                category: categorizeToolName(s.stage),
+                stages: [],
+            });
+        }
+        groups.get(key)!.stages.push(s);
+    }
+
+    return { groups: Array.from(groups.values()), ungrouped };
+}
+
+/**
+ * Visual group container — wraps related stages (same provider + subject)
+ * in a single pill-like card. Drastically reduces visual noise when many
+ * sibling tools operate on the same asset.
+ */
+export const Web3ToolGroup: React.FC<{
+    label: string;
+    subject?: string;
+    category?: ToolCategory;
+    stages: Array<{ stage: string; state?: ToolPillState; durationMs?: number; argsData?: any }>;
+}> = ({ label, subject, stages }) => {
+    if (!stages || stages.length === 0) return null;
+
+    // Aggregate stats for the group header
+    const done = stages.filter((s) => s.state === 'completed').length;
+    const total = stages.length;
+    const hasActive = stages.some((s) => s.state === 'active');
+    const hasFailed = stages.some((s) => s.state === 'failed');
+    const totalMs = stages
+        .filter((s) => s.state === 'completed' && s.durationMs)
+        .reduce((sum, s) => sum + (s.durationMs || 0), 0);
+    const aggDur = fmtDurationMs(totalMs);
+
+    // Subtle status dot for the group itself
+    const headerDot = hasFailed
+        ? <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#dc2626' }} />
+        : hasActive
+            ? <span className="relative inline-flex w-2 h-2 items-center justify-center">
+                <span className="absolute inline-block w-2 h-2 rounded-full animate-ping opacity-60" style={{ background: '#059669' }} />
+                <span className="relative inline-block w-1.5 h-1.5 rounded-full" style={{ background: '#059669' }} />
+              </span>
+            : <span className="text-emerald-500">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.4" className="w-2.5 h-2.5">
+                    <path d="M2.5 6.5l2.5 2.5 5-5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </span>;
+
+    return (
+        <div
+            className="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 max-w-full flex-wrap"
+            style={{ background: '#fafbfc', border: '1px solid #e2e8f0' }}
+        >
+            <div className="inline-flex items-center gap-1.5 pl-1 pr-0.5 shrink-0">
+                {headerDot}
+                <span className="text-[10.5px] font-bold uppercase tracking-[0.08em] text-slate-700">
+                    {label}
+                </span>
+                {subject && (
+                    <span className="text-[10.5px] text-slate-400" style={{ fontFamily: mono }}>
+                        {subject.toLowerCase()}
+                    </span>
+                )}
+                <span className="text-[9.5px] text-slate-400" style={{ fontFamily: mono }}>
+                    {done}/{total}{aggDur ? ` · ${aggDur}` : ''}
+                </span>
+            </div>
+            <span className="text-slate-300">·</span>
+            <div className="inline-flex flex-wrap items-center gap-1">
+                {stages.map((s, i) => (
+                    <Web3ToolPill
+                        key={`${s.stage}-${i}`}
+                        toolName={s.stage}
+                        args={s.argsData}
+                        state={s.state}
+                        durationMs={s.durationMs}
+                        stripSubject={subject}
+                    />
+                ))}
+            </div>
+        </div>
+    );
+};

@@ -21,7 +21,7 @@ import HighlightedTextarea from './chat/HighlightedTextarea';
 import ModeSelector from './chat/ModeSelector';
 import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { RoundtableWorkbench, KnowledgeGraphView, buildKnowledgeGraph } from './chat/RoundtableWorkbench';
-import { Web3ToolResultCard, Web3ToolCallPills, Web3ToolPill, SearchSourcesCard } from './chat/Web3ToolRenderers';
+import { Web3ToolResultCard, Web3ToolCallPills, Web3ToolPill, Web3TokenChip, Web3ToolGroup, SearchSourcesCard, groupStagesForUI } from './chat/Web3ToolRenderers';
 
 // ── Phase-1 refactor: shared types / constants / helpers extracted to ./chat/* ──
 import type {
@@ -4602,58 +4602,76 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     }
                                                     void web3Calls; void web3CardStages; // pairing now happens per-stage below
 
+                                                    // ── Partition web3Stages:
+                                                    //    1. Token resolution → inline chip
+                                                    //    2. Everything else → grouped by subject+provider via groupStagesForUI
+                                                    const resolveStages = web3Stages.filter(
+                                                        (s) => s.stage === 'search_crypto_asset' && s.state === 'completed' && s.rawData,
+                                                    );
+                                                    const { groups: web3Groups } = groupStagesForUI(
+                                                        web3Stages.filter(
+                                                            (s) => !(s.stage === 'search_crypto_asset' && s.state === 'completed' && s.rawData),
+                                                        ),
+                                                    );
+                                                    const { groups: stockGroups } = groupStagesForUI(stocksToolStages);
+
+                                                    // Pull rawData-bearing stages out for result card rendering below the groups.
+                                                    const allResultStages = [
+                                                        ...web3Stages.filter(
+                                                            (s) => s.rawData != null && !(s.stage === 'search_crypto_asset' && s.state === 'completed'),
+                                                        ),
+                                                        ...stocksToolStages.filter((s) => s.rawData != null),
+                                                    ];
+
                                                     return (
                                                         <div className="mb-3 space-y-3">
-                                                            {/* Search block: cluster of pills (web/X) over the
-                                                                Sources card. Pills + card stay grouped because
-                                                                a single Sources card represents both pills. */}
-                                                            {(searchPills.length > 0 || dedupedSources.length > 0) && (
-                                                                <div className="space-y-1.5">
+                                                            {/* Row 1: search pills + token-resolve chips horizontal. */}
+                                                            {(searchPills.length > 0 || resolveStages.length > 0) && (
+                                                                <div className="flex flex-wrap items-center gap-1.5">
                                                                     {searchPills.length > 0 && (
                                                                         <Web3ToolCallPills calls={searchPills} hideLabel />
                                                                     )}
-                                                                    {dedupedSources.length > 0 && (
-                                                                        <SearchSourcesCard sources={dedupedSources} initialCount={6} />
-                                                                    )}
+                                                                    {resolveStages.map((s, idx) => (
+                                                                        <Web3TokenChip key={`tk-${idx}`} data={s.rawData} />
+                                                                    ))}
                                                                 </div>
                                                             )}
-                                                            {/* Web3 tool blocks: each pill paired with its card.
-                                                                Card may be absent for stages still in flight
-                                                                (no rawData yet) — pill alone is fine. */}
-                                                            {web3Stages.map((s, idx) => (
-                                                                <div key={`web3-${s.stage}-${idx}`} className="space-y-1.5">
-                                                                    <Web3ToolPill
-                                                                        toolName={s.stage}
-                                                                        args={s.argsData}
-                                                                        state={s.state}
-                                                                    />
-                                                                    {s.rawData != null && (
-                                                                        <Web3ToolResultCard
-                                                                            toolName={s.stage}
-                                                                            rawData={s.rawData}
+                                                            {dedupedSources.length > 0 && (
+                                                                <SearchSourcesCard sources={dedupedSources} initialCount={3} />
+                                                            )}
+                                                            {/* Row 2: grouped tool clusters. "Token data (sui)" /
+                                                                "OKX (sui)" / "Stock data (aapl)" — each one container
+                                                                with the subject called out once and sibling tools
+                                                                rendering as compact pills inside. */}
+                                                            {(web3Groups.length > 0 || stockGroups.length > 0) && (
+                                                                <div className="flex flex-wrap items-start gap-2">
+                                                                    {web3Groups.map((g) => (
+                                                                        <Web3ToolGroup
+                                                                            key={`g-${g.key}`}
+                                                                            label={g.label}
+                                                                            subject={g.subject}
+                                                                            category={g.category}
+                                                                            stages={g.stages}
                                                                         />
-                                                                    )}
-                                                                </div>
-                                                            ))}
-                                                            {/* Stocks tool blocks: identical pill+card layout
-                                                                — same Web3Stage shape, same renderers. The
-                                                                source module is `analysis` instead of `web3`,
-                                                                but the visual treatment is unified so the
-                                                                stocks side feels just as rich. */}
-                                                            {stocksToolStages.map((s, idx) => (
-                                                                <div key={`stk-${s.stage}-${idx}`} className="space-y-1.5">
-                                                                    <Web3ToolPill
-                                                                        toolName={s.stage}
-                                                                        args={s.argsData}
-                                                                        state={s.state}
-                                                                    />
-                                                                    {s.rawData != null && (
-                                                                        <Web3ToolResultCard
-                                                                            toolName={s.stage}
-                                                                            rawData={s.rawData}
+                                                                    ))}
+                                                                    {stockGroups.map((g) => (
+                                                                        <Web3ToolGroup
+                                                                            key={`sg-${g.key}`}
+                                                                            label={g.label}
+                                                                            subject={g.subject}
+                                                                            category={g.category}
+                                                                            stages={g.stages}
                                                                         />
-                                                                    )}
+                                                                    ))}
                                                                 </div>
+                                                            )}
+                                                            {/* Result cards — rawData details stacked under the group row. */}
+                                                            {allResultStages.map((s, idx) => (
+                                                                <Web3ToolResultCard
+                                                                    key={`rc-${s.stage}-${idx}`}
+                                                                    toolName={s.stage}
+                                                                    rawData={s.rawData}
+                                                                />
                                                             ))}
                                                         </div>
                                                     );
