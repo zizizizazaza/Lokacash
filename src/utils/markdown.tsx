@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useRef, useState } from 'react';
+﻿import React, { createContext, useContext, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 // ─── Source Context for inline citation tooltips ────────────────
@@ -292,6 +292,9 @@ interface QuoteData {
   supplyCirculating?: string; // Circulating supply
   supplyTotal?: string;       // Total / max supply
   fundingRate?: string;       // Perp funding rate string (fallback when live derivatives data absent)
+  // Daily close-price series (oldest → newest). Drives the QuoteCard hero sparkline.
+  // Populated server-side from get_daily_history when available, undefined otherwise.
+  sparkline7d?: number[];
 }
 
 /**
@@ -423,17 +426,17 @@ const LABELS: Record<string, Record<string, string>> = {
   },
 };
 
-/** Market badge style map (supports both zh & en market labels) */
-const MKT_STYLE: Record<string, string> = {
-  '美股': 'bg-blue-500/10 text-blue-600', '港股': 'bg-amber-500/10 text-amber-600', 'A股': 'bg-red-500/10 text-red-600',
-  'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
-};
-
-/** Renders a stock/crypto quote snapshot as a styled card */
+/**
+ * Minimal QuoteCard — Apple Stocks aesthetic. For stocks (no historical sparkline
+ * available on the backend) we render: header + hero price + 3-4 key stats row.
+ *
+ * okxSnap / okxNews are retained for callsite compatibility but ignored:
+ * crypto data is surfaced upstream via TokenCard.
+ */
 export function QuoteCard({
   quote,
-  okxSnap,
-  okxNews,
+  okxSnap: _okxSnap,
+  okxNews: _okxNews,
 }: {
   quote: QuoteData;
   okxSnap?: QuoteOkxSnapshot | null;
@@ -441,100 +444,184 @@ export function QuoteCard({
 }) {
   const lang = quote.lang || 'zh';
   const L = LABELS[lang] || LABELS.zh;
+  const isZh = lang === 'zh';
 
   const isPositive = quote.change ? /^\+|涨/.test(quote.change) : null;
   const isNegative = quote.change ? /^-|跌/.test(quote.change) : null;
-  const changeColor = isPositive ? 'text-emerald-600' : isNegative ? 'text-red-500' : 'text-gray-500';
-  const changeBg = isPositive
-    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20'
-    : isNegative
-    ? 'bg-red-500/8 ring-1 ring-red-500/20'
-    : 'bg-gray-100 ring-1 ring-gray-200/60';
+  const dirColor = isPositive ? TERM.up : isNegative ? TERM.down : TERM.muted;
 
-  // Subtle background tint based on price movement
-  const cardBg = isPositive
-    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
-    : isNegative
-    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
-    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
-
-  const mktCls = quote.market ? (MKT_STYLE[quote.market] || 'bg-gray-100 text-gray-500') : '';
-
-  // Helper: check if a value is meaningful (not N/A, empty, zero-ish)
   const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
 
-  // Build stats array with localized labels, skipping empty/N/A.
-  // Order: 24h price band → supply/market cap → stock-style metrics → crypto funding.
-  const stats: { label: string; value: string }[] = [];
-  if (ok(quote.high)) stats.push({ label: L.high, value: quote.high! });
-  if (ok(quote.low)) stats.push({ label: L.low, value: quote.low! });
-  if (ok(quote.ath)) stats.push({ label: L.ath, value: quote.ath! });
+  // Build 3-4 key stats. Prioritize: market cap → volume → intraday range → PE.
+  const stats: { label: string; value: string; color?: string }[] = [];
   if (ok(quote.marketCap)) stats.push({ label: L.marketCap, value: quote.marketCap! });
   if (ok(quote.volume)) stats.push({ label: L.volume, value: quote.volume! });
-  if (ok(quote.supplyCirculating)) stats.push({ label: L.supplyCirculating, value: quote.supplyCirculating! });
-  if (ok(quote.supplyTotal)) stats.push({ label: L.supplyTotal, value: quote.supplyTotal! });
-  if (ok(quote.open)) stats.push({ label: L.open, value: quote.open! });
-  if (ok(quote.prevClose)) stats.push({ label: L.prevClose, value: quote.prevClose! });
-  if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
-  if (ok(quote.pe)) stats.push({ label: L.pe, value: quote.pe! });
-  if (ok(quote.pb)) stats.push({ label: L.pb, value: quote.pb! });
-  if (ok(quote.turnover)) stats.push({ label: L.turnover, value: quote.turnover! });
-  // Funding rate only when no live derivatives snapshot is available (avoid duplication).
-  if (!okxSnap && ok(quote.fundingRate)) stats.push({ label: L.fundingRate, value: quote.fundingRate! });
+  if (ok(quote.high) && ok(quote.low)) {
+    stats.push({ label: isZh ? '日内区间' : 'Day Range', value: `${quote.low} - ${quote.high}` });
+  } else if (ok(quote.high)) {
+    stats.push({ label: L.high, value: quote.high! });
+  }
+  if (stats.length < 4) {
+    if (ok(quote.pe)) stats.push({ label: L.pe, value: quote.pe! });
+    else if (ok(quote.turnover)) stats.push({ label: L.turnover, value: quote.turnover! });
+    else if (ok(quote.amount)) stats.push({ label: L.amount, value: quote.amount! });
+    else if (ok(quote.ath)) stats.push({ label: L.ath, value: quote.ath! });
+  }
+  const cols = stats.length === 4 ? 'grid-cols-4'
+    : stats.length === 3 ? 'grid-cols-3'
+    : stats.length === 2 ? 'grid-cols-2' : 'grid-cols-1';
+
+  // Market badge color — keeps a hint of asset-class identity without rainbow chaos.
+  const mktAccent =
+    quote.market === '美股' || quote.market === 'US' ? '#2563eb'
+    : quote.market === '港股' || quote.market === 'HK' ? '#d97706'
+    : quote.market === 'A股' || quote.market === 'A-Share' ? '#dc2626'
+    : TERM.muted;
+
+  // Stock sparkline — daily closes from get_daily_history (server-injected).
+  const hasSparkline = Array.isArray(quote.sparkline7d) && quote.sparkline7d.length >= 2;
+  const sparkLen = hasSparkline ? quote.sparkline7d!.length : 0;
+  // Compute trend % from first vs last close so we can color & label the chart.
+  let sparkChangePct: number | null = null;
+  if (hasSparkline) {
+    const first = quote.sparkline7d![0];
+    const last = quote.sparkline7d![sparkLen - 1];
+    if (first > 0) sparkChangePct = ((last - first) / first) * 100;
+  }
+  const sparkUp = (sparkChangePct ?? 0) >= 0;
+  const sparkColor = sparkUp ? TERM.up : TERM.down;
 
   return (
-    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
+    <div
+      className="mb-5 rounded-3xl p-5 bg-white"
+      style={{
+        fontFamily: TK_SANS,
+        fontVariantNumeric: 'tabular-nums',
+        boxShadow: '0 2px 24px -8px rgba(15,23,42,0.08), 0 1px 2px rgba(15,23,42,0.04)',
+        border: `1px solid ${TERM.line}`,
+      }}
+    >
+      {/* HEADER */}
+      <div className="flex items-center gap-3 flex-wrap">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none truncate">{quote.symbol}</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[15px] font-semibold tracking-tight" style={{ color: TERM.textStrong }}>
+              {quote.symbol}
+            </span>
             {quote.market && (
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase shrink-0`}>{quote.market}</span>
-            )}
-          </div>
-          {quote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide truncate">{quote.name}</p>}
-        </div>
-        {ok(quote.price) && (
-          <div className="text-right flex flex-col items-end min-w-0 max-w-[45%]">
-            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight truncate max-w-full">{quote.price}</p>
-            {ok(quote.change) && (
-              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${changeBg} ${changeColor} tabular-nums truncate max-w-full`}>
-                {isPositive && <span className="mr-0.5">▲</span>}
-                {isNegative && <span className="mr-0.5">▼</span>}
-                {quote.change}
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wider"
+                style={{ color: mktAccent }}
+              >
+                {quote.market}
               </span>
             )}
+            {quote.name && (
+              <>
+                <span className="text-[11px]" style={{ color: TERM.muted }}>·</span>
+                <span className="text-[12px] truncate" style={{ color: TERM.muted2 }}>{quote.name}</span>
+              </>
+            )}
           </div>
+        </div>
+        {quote.asOf && (
+          <span
+            className="text-[10px] uppercase tracking-wider shrink-0"
+            style={{ color: TERM.muted, fontFamily: TK_MONO }}
+          >
+            {quote.asOf}
+          </span>
         )}
       </div>
 
-      {/* Divider */}
-      {stats.length > 0 && (
-        <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
-      )}
-
-      {/* Stats grid */}
-      {stats.length > 0 && (
-        <div className="px-5 py-3.5">
-          <div className="grid grid-cols-5 gap-x-4 gap-y-3">
-            {stats.map((s) => (
-              <div key={s.label} className="min-w-0">
-                <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
-                <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
+      {/* HERO PRICE + SPARKLINE (inline if sparkline exists) */}
+      {(ok(quote.price) || hasSparkline) && (
+        <div className="mt-4 flex items-end gap-6 flex-wrap">
+          {/* PRICE COLUMN */}
+          {ok(quote.price) && (
+            <div className="shrink-0">
+              <div
+                className="font-bold leading-none"
+                style={{
+                  color: TERM.textStrong,
+                  fontFamily: TK_MONO,
+                  fontSize: '46px',
+                  letterSpacing: '-0.04em',
+                }}
+              >
+                {quote.price}
               </div>
-            ))}
-          </div>
+              {ok(quote.change) && (
+                <div className="mt-2 flex items-baseline gap-2.5 flex-wrap">
+                  <span
+                    className="text-[14px] font-semibold"
+                    style={{ color: dirColor, fontFamily: TK_MONO }}
+                  >
+                    {isPositive ? '▲' : isNegative ? '▼' : ''} {quote.change}
+                  </span>
+                  <span
+                    className="text-[10.5px] uppercase tracking-wider"
+                    style={{ color: TERM.muted, fontFamily: TK_MONO }}
+                  >
+                    {isZh ? '今日' : 'Today'}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SPARKLINE — daily closes from get_daily_history */}
+          {hasSparkline && (
+            <div className="flex-1 min-w-[220px]">
+              <InteractiveSparkline
+                prices={quote.sparkline7d!}
+                isUp={sparkUp}
+                change7dPct={sparkChangePct ?? undefined}
+                label=""
+                isZh={isZh}
+                hideBottomLabel
+              />
+              <div
+                className="mt-1.5 flex items-baseline justify-between text-[9.5px] uppercase tracking-wider"
+                style={{ color: TERM.muted, fontFamily: TK_MONO }}
+              >
+                <span>{isZh ? `${sparkLen} 日` : `${sparkLen}D`}</span>
+                <span>
+                  {isZh ? '至今' : 'Today'}
+                  {sparkChangePct != null && (
+                    <span className="ml-1.5 font-semibold" style={{ color: sparkColor }}>
+                      {sparkChangePct >= 0 ? '+' : ''}{sparkChangePct.toFixed(2)}%
+                    </span>
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* OKX-derived derivatives + news sections removed per product decision —
-          crypto data is now surfaced exclusively via the TokenCard upstream. */}
-
-      {/* Timestamp */}
-      {quote.asOf && (
-        <div className="px-5 pb-3 pt-0">
-          <p className="text-[9px] text-gray-300 tracking-wide">{quote.asOf}</p>
+      {/* STATS ROW */}
+      {stats.length > 0 && (
+        <div
+          className={`mt-4 pt-3 grid ${cols} gap-3`}
+          style={{ borderTop: `1px solid ${TERM.line}` }}
+        >
+          {stats.map((s) => (
+            <div key={s.label} className="min-w-0">
+              <div
+                className="text-[9.5px] uppercase tracking-[0.1em] font-semibold"
+                style={{ color: TERM.muted }}
+              >
+                {s.label}
+              </div>
+              <div
+                className="text-[17px] font-bold leading-none mt-0.5 truncate"
+                style={{ color: s.color || TERM.textStrong, fontFamily: TK_MONO }}
+              >
+                {s.value}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -580,6 +667,8 @@ export interface TokenSnapshotData {
     totalSupply?: number;
     maxSupply?: number;
     circulatingPctOfMax?: number;
+    /** Optional 7d price series (hourly or sub-hourly), oldest → newest. Drives the hero sparkline. */
+    sparkline7d?: number[];
   };
   community: {
     twitterFollowers?: number;
@@ -645,6 +734,74 @@ function pctColor(v?: number): string {
   return 'text-gray-500';
 }
 
+/**
+ * Builds an SVG path for a 7d sparkline. Returns null if there are < 2 points.
+ * Padding keeps endpoints inside the viewbox so the end-dot isn't clipped.
+ */
+function buildSparkPath(
+  prices: number[],
+  w: number,
+  h: number,
+): { line: string; area: string; isUp: boolean; lastX: number; lastY: number } | null {
+  if (!Array.isArray(prices) || prices.length < 2) return null;
+  let min = Infinity, max = -Infinity;
+  for (const p of prices) {
+    if (!Number.isFinite(p)) continue;
+    if (p < min) min = p;
+    if (p > max) max = p;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+  const range = max - min || 1;
+  const step = w / (prices.length - 1);
+  const padTop = 4, padBottom = 2;
+  const usableH = h - padTop - padBottom;
+  const pts: Array<[number, number]> = prices.map((p, i) => {
+    const x = i * step;
+    const y = padTop + (1 - (p - min) / range) * usableH;
+    return [x, y];
+  });
+  const line = pts.map((pt, i) => `${i === 0 ? 'M' : 'L'}${pt[0].toFixed(2)} ${pt[1].toFixed(2)}`).join(' ');
+  const last = pts[pts.length - 1];
+  const area = `${line} L${w} ${h} L0 ${h} Z`;
+  const isUp = prices[prices.length - 1] >= prices[0];
+  return { line, area, isUp, lastX: last[0], lastY: last[1] };
+}
+
+const TK_MONO = "ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace";
+
+/**
+ * Terminal palette — used by TokenCard / QuoteCard's Bloomberg-style theme.
+ * Hex values are inlined via `style={{ color: TERM.x }}` since Tailwind arbitrary
+ * values get verbose for ~12 frequently-reused tones.
+ */
+/**
+ * Minimal palette — Apple Stocks-inspired clean light card.
+ * Direction colors via emerald/rose; no brand accent; ultra-subtle dividers.
+ */
+const TERM = {
+  bg1: '#ffffff',
+  bg2: '#fafbfc',
+  bg3: '#f3f4f6',
+  line: '#f1f5f9',        // slate-100 — barely visible divider
+  line2: '#e2e8f0',
+  primary: '#0f172a',
+  text: '#0f172a',
+  textStrong: '#0f172a',
+  muted: '#9ca3af',       // gray-400 — labels
+  muted2: '#64748b',      // gray-500 — secondary
+  up: '#059669',
+  upBg: 'rgba(5,150,105,.12)',
+  upWash: 'rgba(5,150,105,.04)',
+  down: '#dc2626',
+  downBg: 'rgba(220,38,38,.12)',
+  downWash: 'rgba(220,38,38,.04)',
+  amber: '#d97706',
+} as const;
+
+/** Sans font stack for labels/headers (paired with TK_MONO for numbers). */
+const TK_SANS = "Inter, 'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+
+// ─── Social link icons (12px SVG, currentColor) ─────────────────
 const TWITTER_ICON = (
   <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
 );
@@ -652,7 +809,7 @@ const GITHUB_ICON = (
   <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.92.58.1.79-.25.79-.56 0-.27-.01-1.16-.02-2.1-3.2.7-3.88-1.36-3.88-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11 11 0 015.78 0c2.21-1.5 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.27 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.56C20.21 21.39 23.5 17.07 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
 );
 const LINK_ICON = (
-  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 7h3a5 5 0 010 10h-3M10 17H7A5 5 0 017 7h3M8 12h8"/></svg>
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M14 7h3a5 5 0 010 10h-3M10 17H7A5 5 0 017 7h3M8 12h8"/></svg>
 );
 const DOC_ICON = (
   <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z M14 2v6h6 M9 13h6 M9 17h6 M9 9h2"/></svg>
@@ -664,258 +821,712 @@ const REDDIT_ICON = (
   <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor"><path d="M22 12c0-1.1-.9-2-2-2-.5 0-1 .2-1.4.6C16.9 9.4 14.5 8.6 12 8.5l1-4.5 3.1.7c0 .8.7 1.5 1.5 1.5s1.5-.7 1.5-1.5S18.4 3 17.6 3c-.6 0-1 .3-1.3.8l-3.5-.8c-.2 0-.4.1-.4.3l-1.1 5.1C8.7 8.6 6.3 9.4 4.4 10.6 4 10.2 3.5 10 3 10c-1.1 0-2 .9-2 2 0 .8.5 1.5 1.2 1.8-.1.4-.1.7-.1 1.1 0 3.6 4 6.6 9 6.6s9-3 9-6.6c0-.4 0-.8-.1-1.1.7-.3 1.2-1 1.2-1.8M7 13.5c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5S9.3 15 8.5 15 7 14.3 7 13.5m8.5 4.6c-1 .6-2.3.9-3.5.9s-2.5-.3-3.5-.9c-.2-.1-.2-.4-.1-.5.1-.2.4-.2.5-.1.8.5 1.9.7 3.1.7s2.3-.2 3.1-.7c.2-.1.4-.1.5.1.1.1.1.4-.1.5m.1-3.1c-.8 0-1.5-.7-1.5-1.5s.7-1.5 1.5-1.5 1.5.7 1.5 1.5-.7 1.5-1.5 1.5z"/></svg>
 );
 
-function ExtLink({ href, icon, label, title }: { href: string; icon: React.ReactNode; label?: string; title: string }) {
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      title={title}
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10.5px] font-medium text-gray-500 bg-gray-50 hover:bg-gray-100 hover:text-gray-700 border border-gray-200/60 transition"
-    >
-      {icon}
-      {label && <span className="leading-none">{label}</span>}
-    </a>
+/**
+ * Maps CoinGecko exchange names to their canonical domain so we can fetch favicons.
+ * Lookup is case-insensitive and tolerant of common suffixes/variations:
+ * - "Coinbase Exchange" → drops "exchange" → matches "coinbase"
+ * - "AscendEX (BitMax)" → strips parens → matches "ascendex"
+ * - "Biconomy.com" → strips ".com" → matches "biconomy"
+ */
+const EXCHANGE_DOMAINS: Record<string, string> = {
+  binance: 'binance.com', 'binance us': 'binance.us',
+  coinbase: 'coinbase.com', 'coinbase pro': 'pro.coinbase.com',
+  kraken: 'kraken.com', okx: 'okx.com', bybit: 'bybit.com', kucoin: 'kucoin.com',
+  bitfinex: 'bitfinex.com', bitstamp: 'bitstamp.net', gemini: 'gemini.com',
+  upbit: 'upbit.com', htx: 'htx.com', huobi: 'htx.com',
+  'gate.io': 'gate.io', gate: 'gate.io',
+  mexc: 'mexc.com', 'mexc global': 'mexc.com', bitget: 'bitget.com',
+  'crypto.com': 'crypto.com',
+  bingx: 'bingx.com', bithumb: 'bithumb.com', whitebit: 'whitebit.com', phemex: 'phemex.com',
+  lbank: 'lbank.com', 'xt.com': 'xt.com', xt: 'xt.com',
+  btse: 'btse.com', bitrue: 'bitrue.com', hotcoin: 'hotcoin.com', websea: 'websea.com',
+  korbit: 'korbit.co.kr', poloniex: 'poloniex.com', bittrex: 'bittrex.com',
+  ascendex: 'ascendex.com', bitmax: 'ascendex.com',
+  bitmart: 'bitmart.com', digifinex: 'digifinex.com',
+  pionex: 'pionex.com', btcc: 'btcc.com', bibox: 'bibox.com',
+  probit: 'probit.com',
+  // newly added — were rendering as plain dots before
+  biconomy: 'biconomy.com',
+  deepcoin: 'deepcoin.com',
+  coinstore: 'coinstore.com',
+  coinw: 'coinw.com',
+  bingbon: 'bingbon.com',
+  bittrue: 'bitrue.com',
+  bitvavo: 'bitvavo.com',
+  bitflyer: 'bitflyer.com',
+  coincheck: 'coincheck.com',
+  blofin: 'blofin.com',
+  toobit: 'toobit.com',
+  weex: 'weex.com',
+  hashkey: 'hashkey.com',
+  'hashkey global': 'hashkey.com',
+  cryptocom: 'crypto.com',
+  bitmex: 'bitmex.com',
+  archax: 'archax.com',
+  paribu: 'paribu.com',
+  korbit_: 'korbit.co.kr',
+};
+
+/**
+ * Normalises an exchange name to a lookup key. Tries progressive simplifications:
+ * 1. raw lowercased "coinbase exchange"
+ * 2. drop ".com" suffix → "coinbase"
+ * 3. drop parens content → "ascendex" (from "ascendex (bitmax)")
+ * 4. drop common suffixes "exchange / global / pro" → "coinbase"
+ */
+function exchangeFaviconUrl(name: string): string | null {
+  if (!name) return null;
+  const base = name.trim().toLowerCase();
+  const candidates = new Set<string>([base]);
+  candidates.add(base.replace(/\.com$/i, ''));
+  candidates.add(base.replace(/\s*\([^)]+\)\s*/g, '').trim());
+  candidates.add(base.replace(/\s+(exchange|global|pro|spot)$/i, '').trim());
+  // Combination: strip parens AND suffix together
+  candidates.add(
+    base
+      .replace(/\s*\([^)]+\)\s*/g, '')
+      .replace(/\s+(exchange|global|pro|spot)$/i, '')
+      .replace(/\.com$/i, '')
+      .trim(),
   );
+  for (const key of candidates) {
+    if (!key) continue;
+    const domain = EXCHANGE_DOMAINS[key];
+    if (domain) return `https://www.google.com/s2/favicons?domain=${domain}&sz=32`;
+  }
+  return null;
 }
 
-function StatBlock({ label, value, hint, color, info, alwaysShow }: { label: string; value?: string; hint?: string; color?: string; info?: string; alwaysShow?: boolean }) {
-  if (!value && !alwaysShow) return null;
-  const shown = value ?? '—';
-  const showHint = !!value && !!hint;
+/** Returns a price change diff in USD (price * change% / 100) — used for "▲ +$0.0379" line. */
+function priceDelta(priceUsd?: number, changePct?: number): string | null {
+  if (priceUsd == null || changePct == null) return null;
+  const delta = priceUsd * (changePct / 100);
+  const abs = Math.abs(delta);
+  const sign = delta >= 0 ? '+' : '-';
+  if (abs >= 1000) return `${sign}$${abs.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  if (abs >= 1) return `${sign}$${abs.toFixed(3)}`;
+  if (abs >= 0.0001) return `${sign}$${abs.toFixed(4)}`;
+  return `${sign}$${abs.toPrecision(2)}`;
+}
+
+/**
+ * Interactive 7d sparkline with hover crosshair + tooltip.
+ * Mouse moves over the SVG → snap to nearest index → show vertical guide,
+ * data-point dot, and a tooltip with price + relative time + % vs 7d ago.
+ *
+ * CoinGecko's `sparkline_7d.price` is hourly (168 points / 7d), so each index
+ * step ≈ 1 hour. We label by hours/days back from "now".
+ */
+function InteractiveSparkline({
+  prices,
+  isUp,
+  change7dPct,
+  label,
+  isZh,
+  hideBottomLabel,
+}: {
+  prices: number[];
+  isUp: boolean;
+  change7dPct?: number;
+  label: string;
+  isZh: boolean;
+  /** When true, omit the bottom "label · %" row (the caller already shows it externally). */
+  hideBottomLabel?: boolean;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const gradIdRef = useRef(`sparkGrad-${Math.random().toString(36).slice(2, 8)}`);
+
+  const W = 220;
+  const H = 64;
+  const spark = buildSparkPath(prices, W, H);
+  if (!spark) return null;
+
+  const color = isUp ? '#10b981' : '#f43f5e';
+  const n = prices.length;
+  const step = n > 1 ? W / (n - 1) : 0;
+
+  let hoverX = 0;
+  let hoverY = 0;
+  let hoverPrice = 0;
+  let hoverChangePct = 0;
+  if (hover != null) {
+    hoverX = hover * step;
+    let min = Infinity, max = -Infinity;
+    for (const p of prices) {
+      if (!Number.isFinite(p)) continue;
+      if (p < min) min = p;
+      if (p > max) max = p;
+    }
+    const range = max - min || 1;
+    const padTop = 4;
+    const padBottom = 2;
+    const usableH = H - padTop - padBottom;
+    hoverY = padTop + (1 - (prices[hover] - min) / range) * usableH;
+    hoverPrice = prices[hover];
+    const first = prices[0] || 0;
+    hoverChangePct = first > 0 ? ((hoverPrice - first) / first) * 100 : 0;
+  }
+
+  const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el || n < 2) return;
+    const r = el.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const idx = Math.round((x / r.width) * (n - 1));
+    setHover(Math.max(0, Math.min(n - 1, idx)));
+  };
+
+  // hoursAgo = n-1 - idx (last index is "now"). For 168-point series → hourly.
+  const hoursAgo = hover != null ? n - 1 - hover : 0;
+  let agoLabel = '';
+  if (hover != null) {
+    if (hoursAgo === 0) agoLabel = isZh ? '当前' : 'now';
+    else if (hoursAgo < 24) agoLabel = isZh ? `${hoursAgo} 小时前` : `${hoursAgo}h ago`;
+    else {
+      const d = Math.floor(hoursAgo / 24);
+      const h = hoursAgo % 24;
+      agoLabel = isZh ? `${d} 天${h ? ` ${h} 小时` : ''}前` : `${d}d${h ? ` ${h}h` : ''} ago`;
+    }
+  }
+
+  const tooltipLeftPct = hover != null ? Math.max(10, Math.min(90, (hoverX / W) * 100)) : 50;
+
+  // Convert SVG viewBox coordinates → container percentages.
+  // We render the data dots as HTML overlays (not SVG circles) so they stay
+  // perfect circles regardless of the horizontal SVG stretching from preserveAspectRatio="none".
+  const endXPct = ((spark.lastX - 1) / W) * 100;
+  const endYPct = (spark.lastY / H) * 100;
+  const hoverXPct = hover != null ? (hoverX / W) * 100 : 0;
+  const hoverYPct = hover != null ? (hoverY / H) * 100 : 0;
+
   return (
-    <div className="min-w-0">
-      <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1 flex items-center gap-1">
-        <span className="truncate">{label}</span>
-        {info && (
-          <span className="tk-info group relative inline-flex items-center shrink-0" tabIndex={0}>
-            <svg
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-              className="w-[12px] h-[12px] text-gray-400 group-hover:text-gray-600 group-focus:text-gray-600 transition-colors"
-              fill="currentColor"
-            >
-              <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.4a5.1 5.1 0 1 1 0 10.2A5.1 5.1 0 0 1 8 2.9Zm0 2.1a.85.85 0 1 0 0 1.7.85.85 0 0 0 0-1.7Zm-.85 3.05V11.8a.85.85 0 1 0 1.7 0V8.05a.85.85 0 1 0-1.7 0Z" />
-            </svg>
-            <span
-              role="tooltip"
-              className="tk-info-pop pointer-events-none absolute left-1/2 bottom-full mb-1.5 -translate-x-1/2 z-30 normal-case tracking-normal whitespace-normal text-[11px] font-normal leading-snug text-white bg-gray-900/95 rounded-lg px-2.5 py-1.5 w-[220px] shadow-lg ring-1 ring-black/10 opacity-0 translate-y-1 transition-all duration-100 group-hover:opacity-100 group-hover:translate-y-0 group-focus:opacity-100 group-focus:translate-y-0"
-            >
-              {info}
+    <div ref={containerRef} className="relative select-none">
+      {/* Tooltip — absolute over the spark area, fades in on hover */}
+      {hover != null && (
+        <div
+          className="absolute z-20 -translate-x-1/2 bottom-full mb-2 px-2.5 py-1.5 bg-gray-900/95 text-white rounded-lg shadow-lg pointer-events-none ring-1 ring-black/10 whitespace-nowrap"
+          style={{ left: `${tooltipLeftPct}%` }}
+        >
+          <div className="text-[12.5px] font-bold tabular-nums leading-none" style={{ fontFamily: TK_MONO }}>
+            {fmtPriceUsd(hoverPrice)}
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-[9px] text-gray-400">{agoLabel}</span>
+            <span className={`text-[9.5px] font-semibold tabular-nums ${hoverChangePct >= 0 ? 'text-emerald-300' : 'text-rose-300'}`} style={{ fontFamily: TK_MONO }}>
+              {hoverChangePct >= 0 ? '+' : ''}{hoverChangePct.toFixed(2)}%
             </span>
-          </span>
+          </div>
+        </div>
+      )}
+
+      {/* Chart area — wraps SVG + HTML dot overlays. Sized at h-14 (56px) for a tighter card. */}
+      <div
+        className="relative h-14 cursor-crosshair"
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHover(null)}
+      >
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          className="absolute inset-0 w-full h-full block overflow-visible"
+          preserveAspectRatio="none"
+        >
+          <defs>
+            <linearGradient id={gradIdRef.current} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+              <stop offset="100%" stopColor={color} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d={spark.area} fill={`url(#${gradIdRef.current})`} />
+          <path d={spark.line} fill="none" stroke={color} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+          {/* Crosshair (vertical line — not affected by horizontal stretch). */}
+          {hover != null && (
+            <line x1={hoverX} x2={hoverX} y1="0" y2={H} stroke="#9ca3af" strokeWidth="0.6" strokeDasharray="2 2" />
+          )}
+        </svg>
+
+        {/* End-of-series dot (HTML overlay → perfect circle) */}
+        {hover == null && (
+          <div
+            className="absolute pointer-events-none rounded-full"
+            style={{
+              left: `${endXPct}%`,
+              top: `${endYPct}%`,
+              transform: 'translate(-50%, -50%)',
+              width: 7,
+              height: 7,
+              background: color,
+              border: '1.5px solid #fff',
+              boxShadow: '0 0 0 0.5px rgba(0,0,0,0.06)',
+            }}
+          />
         )}
-      </p>
-      <p className={`text-[13px] font-semibold tabular-nums truncate leading-none ${value ? (color || 'text-gray-800') : 'text-gray-300'}`}>{shown}</p>
-      {showHint && <p className="text-[9.5px] text-gray-400 mt-0.5 truncate leading-none">{hint}</p>}
+
+        {/* Hover data dot (HTML overlay → perfect circle) */}
+        {hover != null && (
+          <div
+            className="absolute pointer-events-none rounded-full"
+            style={{
+              left: `${hoverXPct}%`,
+              top: `${hoverYPct}%`,
+              transform: 'translate(-50%, -50%)',
+              width: 9,
+              height: 9,
+              background: '#fff',
+              border: `2px solid ${color}`,
+              boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+            }}
+          />
+        )}
+      </div>
+
+      {!hideBottomLabel && (
+        <div className="flex justify-between text-[9.5px] uppercase tracking-wider text-gray-400 mt-0.5" style={{ fontFamily: TK_MONO }}>
+          <span>{label}</span>
+          {change7dPct != null && (
+            <span className={pctColor(change7dPct)}>{fmtPct(change7dPct)}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-/** Renders a crypto token card from a TokenSnapshot. */
+/** Renders a crypto token card from a TokenSnapshot — Hero + Sparkline + Bento. */
+/** Terminal-style TokenCard — Bloomberg/Hyperliquid aesthetic. */
+/**
+ * TokenCard — minimal "Apple Stocks" aesthetic.
+ * Strips to: header, huge hero price, big sparkline, 4 key stats.
+ * Deliberately omits Returns / Supply / ATH detail / Exchanges / Community
+ * footer — those are noise for an at-a-glance crypto card.
+ */
 export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: string }) {
   const isZh = (lang || 'zh') === 'zh';
   const L = isZh
-    ? {
-        rank: '排名', mcap: '市值', fdv: 'FDV', fdvMcap: 'FDV/MC', vol24: '24h 量', high24: '24h 高', low24: '24h 低',
-        ch24: '24h', ch7: '7d', ch30: '30d', ch1y: '1y',
-        circ: '流通', total: '总量', max: '上限', circPct: '流通%',
-        ath: '历史最高', atl: '历史最低',
-        twitter: '推特粉丝', reddit: 'Reddit', telegram: 'TG 群', github: 'GitHub',
-        commits4w: '4周提交', stars: 'Stars', forks: 'Forks', contributors: '贡献者',
-        infoTwitter: '项目官方 Twitter / X 账号的粉丝数。',
-        infoTelegram: '项目官方 Telegram 群的成员数。没有官方 TG 群时显示 —。',
-        infoCommits4w: '主代码仓库最近 4 周的提交次数，用来看项目近期开发是否活跃。0 代表项目近 1 个月没动过代码。',
-        infoStars: '主代码仓库累计获得的 GitHub Stars，反映开发者社区对项目的关注度。',
-        sentimentUp: '看涨投票', sentimentDown: '看跌投票',
-        topExch: '主要交易所',
-        details: '详细数据',
-      }
-    : {
-        rank: 'Rank', mcap: 'Mkt Cap', fdv: 'FDV', fdvMcap: 'FDV/MC', vol24: '24h Vol', high24: '24h High', low24: '24h Low',
-        ch24: '24h', ch7: '7d', ch30: '30d', ch1y: '1y',
-        circ: 'Circ', total: 'Total', max: 'Max', circPct: 'Circ %',
-        ath: 'ATH', atl: 'ATL',
-        twitter: 'Twitter', reddit: 'Reddit', telegram: 'Telegram', github: 'GitHub',
-        commits4w: '4w commits', stars: 'Stars', forks: 'Forks', contributors: 'Contributors',
-        infoTwitter: 'Followers of the project’s official Twitter / X account.',
-        infoTelegram: 'Members of the project’s official Telegram group. Shows — if there is none.',
-        infoCommits4w: 'GitHub commits to the main repo in the last 4 weeks. 0 means no code activity for a month.',
-        infoStars: 'Cumulative GitHub stars on the main repo — a proxy for developer interest.',
-        sentimentUp: 'Bullish votes', sentimentDown: 'Bearish votes',
-        topExch: 'Top exchanges',
-        details: 'Show details',
-      };
+    ? { today: '今日', daysAgo: '7 天前', now: '现在', mcap: '市值', vol24: '24H 量', d30: '30D', ath: 'ATH' }
+    : { today: 'Today', daysAgo: '7 days ago', now: 'now', mcap: 'Mkt Cap', vol24: '24H Vol', d30: '30D', ath: 'ATH' };
 
   const m = token.market;
-  const c = token.community;
-  const d = token.developer;
 
   const ch24 = m.change24hPct;
   const isUp = ch24 != null && ch24 > 0;
   const isDown = ch24 != null && ch24 < 0;
+  const dirColor = isUp ? TERM.up : isDown ? TERM.down : TERM.muted;
 
-  const cardBg = isUp
-    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
-    : isDown
-    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
-    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
-  const changeBg = isUp
-    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20 text-emerald-600'
-    : isDown
-    ? 'bg-red-500/8 ring-1 ring-red-500/20 text-red-500'
-    : 'bg-gray-100 ring-1 ring-gray-200/60 text-gray-500';
+  const hasSparkline = Array.isArray(m.sparkline7d) && m.sparkline7d.length >= 2;
+  const ch7d = m.change7dPct;
+  const ch7Color = (ch7d ?? 0) >= 0 ? TERM.up : TERM.down;
 
-  // Row 1: market basics
-  const row1: { label: string; value?: string; hint?: string; color?: string }[] = [
-    { label: L.mcap, value: fmtUsdCompact(m.marketCapUsd), hint: token.rank ? `#${token.rank}` : undefined },
-    { label: L.fdv, value: fmtUsdCompact(m.fdvUsd), hint: m.fdvOverMcap ? `${L.fdvMcap} ${m.fdvOverMcap.toFixed(2)}×` : undefined },
-    { label: L.vol24, value: fmtUsdCompact(m.volume24hUsd) },
-    { label: L.high24, value: fmtPriceUsd(m.high24hUsd) },
-    { label: L.low24, value: fmtPriceUsd(m.low24hUsd) },
-  ];
-
-  // Row 2: returns + supply pressure
-  const row2: { label: string; value?: string; hint?: string; color?: string }[] = [
-    { label: L.ch7, value: fmtPct(m.change7dPct), color: pctColor(m.change7dPct) },
-    { label: L.ch30, value: fmtPct(m.change30dPct), color: pctColor(m.change30dPct) },
-    { label: L.ch1y, value: fmtPct(m.change1yPct), color: pctColor(m.change1yPct) },
-    {
-      label: L.circ,
-      value: fmtCount(m.circulatingSupply),
-      hint: m.circulatingPctOfMax != null ? `${m.circulatingPctOfMax.toFixed(1)}% ${L.max}` : (m.maxSupply ? `/ ${fmtCount(m.maxSupply)}` : undefined),
-    },
-    {
-      label: L.ath,
-      value: fmtPriceUsd(m.athUsd),
-      hint: m.athChangePct != null ? fmtPct(m.athChangePct) : undefined,
-      color: 'text-gray-700',
-    },
-  ];
-
-  // Row 3: community + developer — always render so the labels stay
-  // self-explanatory even when the project has no TG / GitHub.
-  const row3: { label: string; value?: string; hint?: string; color?: string; info?: string; alwaysShow?: boolean }[] = [
-    { label: L.twitter, value: fmtCount(c.twitterFollowers), info: L.infoTwitter, alwaysShow: true },
-    { label: L.telegram, value: fmtCount(c.telegramUsers), info: L.infoTelegram, alwaysShow: true },
-    {
-      label: L.commits4w,
-      value: d.commits4w != null ? String(d.commits4w) : undefined,
-      hint: d.contributors != null ? `${d.contributors} ${L.contributors}` : undefined,
-      info: L.infoCommits4w,
-      alwaysShow: true,
-    },
-    {
-      label: L.stars,
-      value: fmtCount(d.githubStars),
-      hint: d.githubForks != null ? `${fmtCount(d.githubForks)} ${L.forks}` : undefined,
-      info: L.infoStars,
-      alwaysShow: true,
-    },
-  ];
-
-  const hasAnyRow1 = row1.some((s) => s.value);
-  const hasAnyRow2 = row2.some((s) => s.value);
-  // Row 3 has alwaysShow entries — keep the row visible even when every value is missing.
-  const hasAnyRow3 = true;
-
-  const topEx = (token.topExchanges || []).slice(0, 5);
+  const c = token.community;
+  const d = token.developer;
+  const topEx = (token.topExchanges || []).slice(0, 6);
+  const totalExVol = topEx.reduce((s, e) => s + (e.volumeUsd || 0), 0);
 
   return (
-    <div className={`mb-5 rounded-2xl ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
-        <div className="min-w-0 flex items-start gap-3">
-          {token.imageUrl && (
-            <img
-              src={token.imageUrl}
-              alt={token.symbol}
-              className="w-10 h-10 rounded-full ring-1 ring-black/[0.06] shrink-0 mt-0.5"
-              loading="lazy"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-            />
-          )}
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{token.symbol}</span>
-              {token.rank != null && (
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-600 tracking-wide">#{token.rank}</span>
+    <div
+      className="mb-5 rounded-3xl p-5 bg-white"
+      style={{
+        fontFamily: TK_SANS,
+        fontVariantNumeric: 'tabular-nums',
+        boxShadow: '0 2px 24px -8px rgba(15,23,42,0.08), 0 1px 2px rgba(15,23,42,0.04)',
+        border: `1px solid ${TERM.line}`,
+      }}
+    >
+      {/* HEADER — identity (left) + community stats & social icons (right).
+          Mirror layout: 2-line left (symbol/name + categories), 2-line right (stats + social). */}
+      {(() => {
+        const sentUp = c.sentimentUpPct;
+        const sentDown = c.sentimentDownPct;
+        const hasSent = sentUp != null || sentDown != null;
+        const sUp = sentUp ?? 0;
+        const sDown = sentDown ?? 0;
+        const sTotal = sUp + sDown || 100;
+        const sUpW = (sUp / sTotal) * 100;
+        const sDownW = (sDown / sTotal) * 100;
+
+        const hasCommunity =
+          c.telegramUsers != null || d.githubStars != null || d.commits4w != null || hasSent;
+        const hasSocial =
+          token.homepage || token.whitepaper || token.twitter || token.github || token.telegram || token.reddit;
+
+        return (
+          <div className="flex items-start gap-3 flex-wrap">
+            {token.imageUrl ? (
+              <img
+                src={token.imageUrl}
+                alt=""
+                className="w-9 h-9 rounded-full shrink-0"
+                loading="lazy"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              />
+            ) : (
+              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-500 via-violet-500 to-fuchsia-500 flex items-center justify-center text-white font-bold text-sm shrink-0">
+                {(token.symbol || '?').slice(0, 2).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-2">
+                <span className="text-[15px] font-semibold" style={{ color: TERM.textStrong }}>{token.symbol}</span>
+                {token.name && (
+                  <>
+                    <span className="text-[11px]" style={{ color: TERM.muted }}>·</span>
+                    <span className="text-[12px] truncate" style={{ color: TERM.muted2 }}>{token.name}</span>
+                  </>
+                )}
+              </div>
+              {(token.categories || []).length > 0 && (
+                <div className="text-[10.5px] mt-0.5 truncate" style={{ color: TERM.muted }}>
+                  {(token.categories || []).slice(0, 3).map((cat) => cat.replace(/\s*\(.*\)$/, '').replace(/\s+Ecosystem$/i, '')).join(' · ')}
+                </div>
               )}
-              {(token.categories || []).slice(0, 2).map((cat) => (
-                <span key={cat} className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-500/8 text-gray-600 tracking-wide truncate max-w-[10rem]">{cat}</span>
-              ))}
             </div>
-            <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide truncate max-w-[20rem]">{token.name}</p>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {token.homepage && <ExtLink href={token.homepage} icon={LINK_ICON} title={token.homepage} />}
-              {token.whitepaper && <ExtLink href={token.whitepaper} icon={DOC_ICON} title={token.whitepaper} label="WP" />}
-              {token.twitter && <ExtLink href={`https://x.com/${token.twitter}`} icon={TWITTER_ICON} title={`@${token.twitter}`} label={c.twitterFollowers != null ? fmtCount(c.twitterFollowers) : undefined} />}
-              {token.github && <ExtLink href={token.github} icon={GITHUB_ICON} title={token.github} label={d.githubStars != null ? fmtCount(d.githubStars) : undefined} />}
-              {token.telegram && <ExtLink href={`https://t.me/${token.telegram}`} icon={TG_ICON} title={`Telegram`} />}
-              {token.reddit && <ExtLink href={token.reddit} icon={REDDIT_ICON} title={token.reddit} />}
-            </div>
-          </div>
-        </div>
-        {m.priceUsd != null && (
-          <div className="text-right shrink-0 flex flex-col items-end">
-            <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{fmtPriceUsd(m.priceUsd)}</p>
-            {ch24 != null && (
-              <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg tabular-nums ${changeBg}`}>
-                {isUp && <span className="mr-0.5">▲</span>}
-                {isDown && <span className="mr-0.5">▼</span>}
-                {fmtPct(ch24)}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
 
-      {/* Stats rows */}
-      {(hasAnyRow1 || hasAnyRow2 || hasAnyRow3) && (
-        <>
-          <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
-          <div className="px-5 py-3.5 space-y-3.5">
-            {hasAnyRow1 && (
-              <div className="grid grid-cols-5 gap-x-4 gap-y-3">
-                {row1.map((s) => <StatBlock key={s.label} {...s} />)}
-              </div>
-            )}
-            {hasAnyRow2 && (
-              <div className="grid grid-cols-5 gap-x-4 gap-y-3">
-                {row2.map((s) => <StatBlock key={s.label} {...s} />)}
-              </div>
-            )}
-            {hasAnyRow3 && (
-              <div className="grid grid-cols-5 gap-x-4 gap-y-3">
-                {row3.map((s) => <StatBlock key={s.label} {...s} />)}
+            {/* Right column — community stats (row 1) + social icons (row 2) + rank */}
+            {(hasCommunity || hasSocial || token.rank != null) && (
+              <div className="shrink-0 flex flex-col items-end gap-1.5">
+                <div className="flex items-center gap-x-3 gap-y-1 flex-wrap justify-end text-[10.5px]" style={{ color: TERM.muted2 }}>
+                  {c.telegramUsers != null && (
+                    <span className="flex items-center gap-1">
+                      <span className="uppercase text-[9.5px] tracking-wider" style={{ color: TERM.muted }}>TG</span>
+                      <span className="font-semibold" style={{ color: TERM.textStrong, fontFamily: TK_MONO }}>{fmtCount(c.telegramUsers)}</span>
+                    </span>
+                  )}
+                  {d.githubStars != null && (
+                    <span className="flex items-center gap-1">
+                      <span className="uppercase text-[9.5px] tracking-wider" style={{ color: TERM.muted }}>★</span>
+                      <span className="font-semibold" style={{ color: TERM.textStrong, fontFamily: TK_MONO }}>{fmtCount(d.githubStars)}</span>
+                    </span>
+                  )}
+                  {d.commits4w != null && (
+                    <span className="flex items-center gap-1" title={d.commits4w === 0 ? (isZh ? '4 周无提交' : '4w no commits') : undefined}>
+                      <span className="uppercase text-[9.5px] tracking-wider" style={{ color: TERM.muted }}>4W</span>
+                      <span className="font-semibold" style={{ color: d.commits4w === 0 ? TERM.down : TERM.textStrong, fontFamily: TK_MONO }}>{d.commits4w}{d.commits4w === 0 ? ' ⚠' : ''}</span>
+                    </span>
+                  )}
+                  {hasSent && (
+                    <span className="flex items-center gap-1.5" title={`bullish ${sUp.toFixed(0)}% · bearish ${sDown.toFixed(0)}%`}>
+                      <span className="uppercase text-[9.5px] tracking-wider" style={{ color: TERM.muted }}>{isZh ? '情绪' : 'SENT'}</span>
+                      <span className="font-semibold" style={{ color: TERM.up, fontFamily: TK_MONO }}>{sUp.toFixed(0)}</span>
+                      <span className="relative h-1 w-[48px] rounded-full overflow-hidden flex" style={{ background: TERM.line }}>
+                        <span className="h-full" style={{ width: `${sUpW}%`, background: TERM.up }} />
+                        <span className="h-full" style={{ width: `${sDownW}%`, background: TERM.down }} />
+                      </span>
+                      <span className="font-semibold" style={{ color: TERM.down, fontFamily: TK_MONO }}>{sDown.toFixed(0)}</span>
+                    </span>
+                  )}
+                  {token.rank != null && (
+                    <span className="uppercase text-[10px] tracking-wider" style={{ color: TERM.muted, fontFamily: TK_MONO }}>
+                      #{token.rank}
+                    </span>
+                  )}
+                </div>
+
+                {hasSocial && (
+                  <div className="flex items-center gap-0.5">
+                    {token.homepage && (
+                      <a
+                        href={token.homepage}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={isZh ? '官网' : 'Website'}
+                        aria-label="Website"
+                        className="inline-flex items-center justify-center w-6 h-6 rounded-md hover:bg-gray-100 transition-colors"
+                        style={{ color: TERM.muted2 }}
+                      >
+                        {LINK_ICON}
+                      </a>
+                    )}
+                    {token.whitepaper && (
+                      <a
+                        href={token.whitepaper}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={isZh ? '白皮书' : 'Whitepaper'}
+                        aria-label="Whitepaper"
+                        className="inline-flex items-center justify-center w-6 h-6 rounded-md hover:bg-gray-100 transition-colors"
+                        style={{ color: TERM.muted2 }}
+                      >
+                        {DOC_ICON}
+                      </a>
+                    )}
+                    {token.twitter && (
+                      <a
+                        href={`https://x.com/${token.twitter}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={`@${token.twitter}`}
+                        aria-label="Twitter / X"
+                        className="inline-flex items-center justify-center w-6 h-6 rounded-md hover:bg-gray-100 transition-colors"
+                        style={{ color: TERM.muted2 }}
+                      >
+                        {TWITTER_ICON}
+                      </a>
+                    )}
+                    {token.github && (
+                      <a
+                        href={token.github}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="GitHub"
+                        aria-label="GitHub"
+                        className="inline-flex items-center justify-center w-6 h-6 rounded-md hover:bg-gray-100 transition-colors"
+                        style={{ color: TERM.muted2 }}
+                      >
+                        {GITHUB_ICON}
+                      </a>
+                    )}
+                    {token.telegram && (
+                      <a
+                        href={`https://t.me/${token.telegram}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Telegram"
+                        aria-label="Telegram"
+                        className="inline-flex items-center justify-center w-6 h-6 rounded-md hover:bg-gray-100 transition-colors"
+                        style={{ color: TERM.muted2 }}
+                      >
+                        {TG_ICON}
+                      </a>
+                    )}
+                    {token.reddit && (
+                      <a
+                        href={token.reddit}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Reddit"
+                        aria-label="Reddit"
+                        className="inline-flex items-center justify-center w-6 h-6 rounded-md hover:bg-gray-100 transition-colors"
+                        style={{ color: TERM.muted2 }}
+                      >
+                        {REDDIT_ICON}
+                      </a>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
-        </>
-      )}
+        );
+      })()}
 
-      {/* Top exchanges */}
-      {topEx.length > 0 && (
-        <>
-          <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
-          <div className="px-5 py-3">
-            <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-2">{L.topExch}</p>
-            <div className="flex flex-wrap gap-1.5">
-              {topEx.map((ex, i) => (
-                <span
-                  key={`${ex.name}-${ex.pair}-${i}`}
-                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-gray-600 bg-gray-50 border border-gray-200/60"
-                  title={ex.spreadPct != null ? `spread ${ex.spreadPct.toFixed(3)}%` : undefined}
+      {/* HERO PRICE + SPARKLINE — same row to maximize vertical density */}
+      {(m.priceUsd != null || hasSparkline) && (() => {
+        const now = new Date();
+        // 8 anchor marks at 0/7, 1/7, ..., 7/7 — one per day boundary
+        const days: Date[] = [];
+        for (let i = 7; i >= 0; i--) {
+          const d = new Date(now);
+          d.setDate(d.getDate() - i);
+          days.push(d);
+        }
+        const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const fmtFull = (d: Date) => isZh
+          ? `${d.getMonth() + 1}/${d.getDate()}`
+          : `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+        return (
+          <div className="mt-4 flex items-end gap-6 flex-wrap">
+            {/* PRICE COLUMN */}
+            {m.priceUsd != null && (
+              <div className="shrink-0">
+                <div
+                  className="font-bold leading-none"
+                  style={{
+                    color: TERM.textStrong,
+                    fontFamily: TK_MONO,
+                    fontSize: '50px',
+                    letterSpacing: '-0.04em',
+                  }}
                 >
-                  <span className="font-semibold text-gray-700">{ex.name}</span>
-                  <span className="text-gray-400">{ex.pair}</span>
-                  {ex.volumeUsd != null && <span className="text-gray-500 tabular-nums">{fmtUsdCompact(ex.volumeUsd)}</span>}
-                </span>
-              ))}
-            </div>
+                  {fmtPriceUsd(m.priceUsd)}
+                </div>
+                {ch24 != null && (
+                  <div className="mt-2 flex items-baseline gap-2.5 flex-wrap">
+                    <span
+                      className="text-[14px] font-semibold"
+                      style={{ color: dirColor, fontFamily: TK_MONO }}
+                    >
+                      {isUp ? '▲' : isDown ? '▼' : ''}{' '}
+                      {priceDelta(m.priceUsd, ch24)?.replace(/^[+-]/, '')}
+                      <span className="ml-1.5 opacity-80">
+                        ({ch24 >= 0 ? '+' : ''}{ch24.toFixed(2)}%)
+                      </span>
+                    </span>
+                    <span
+                      className="text-[10.5px] uppercase tracking-wider"
+                      style={{ color: TERM.muted, fontFamily: TK_MONO }}
+                    >
+                      {L.today}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SPARKLINE COLUMN — fills remaining width */}
+            {hasSparkline && (
+              <div className="flex-1 min-w-[220px]">
+                <InteractiveSparkline
+                  prices={m.sparkline7d!}
+                  isUp={(ch7d ?? 0) >= 0}
+                  change7dPct={ch7d}
+                  label={L.daysAgo}
+                  isZh={isZh}
+                  hideBottomLabel
+                />
+                <div
+                  className="mt-1.5 relative h-3 text-[9.5px] uppercase tracking-wider"
+                  style={{ color: TERM.muted, fontFamily: TK_MONO }}
+                >
+                  {days.map((d, i) => {
+                    const pct = (i / 7) * 100;
+                    const isFirst = i === 0;
+                    const isLast = i === days.length - 1;
+                    const transform = isFirst
+                      ? 'translateX(0)'
+                      : isLast
+                        ? 'translateX(-100%)'
+                        : 'translateX(-50%)';
+                    const label = isFirst || isLast ? fmtFull(d) : String(d.getDate());
+                    return (
+                      <span
+                        key={i}
+                        className="absolute whitespace-nowrap"
+                        style={{ left: `${pct}%`, transform }}
+                      >
+                        {label}
+                        {isLast && ch7d != null && (
+                          <span className="ml-1.5 font-semibold" style={{ color: ch7Color }}>
+                            {ch7d >= 0 ? '+' : ''}{ch7d.toFixed(2)}%
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
-        </>
+        );
+      })()}
+
+      {/* 4-STAT FOOTER ROW — labels uppercase tiny, values bold mono */}
+      {(() => {
+        const stats: { label: string; value: string; color?: string }[] = [];
+        if (m.marketCapUsd != null) stats.push({ label: L.mcap, value: fmtUsdCompact(m.marketCapUsd) || '—' });
+        if (m.volume24hUsd != null) stats.push({ label: L.vol24, value: fmtUsdCompact(m.volume24hUsd) || '—' });
+        if (m.change30dPct != null) stats.push({
+          label: L.d30,
+          value: `${m.change30dPct >= 0 ? '+' : ''}${m.change30dPct.toFixed(0)}%`,
+          color: m.change30dPct >= 0 ? TERM.up : TERM.down,
+        });
+        if (m.athUsd != null) stats.push({ label: L.ath, value: fmtPriceUsd(m.athUsd) || '—' });
+        if (stats.length === 0) return null;
+        const cols = stats.length === 4 ? 'grid-cols-4' : stats.length === 3 ? 'grid-cols-3' : stats.length === 2 ? 'grid-cols-2' : 'grid-cols-1';
+        return (
+          <div
+            className={`mt-4 pt-3 grid ${cols} gap-3`}
+            style={{ borderTop: `1px solid ${TERM.line}` }}
+          >
+            {stats.map((s) => (
+              <div key={s.label} className="min-w-0">
+                <div
+                  className="text-[9.5px] uppercase tracking-[0.1em] font-semibold"
+                  style={{ color: TERM.muted }}
+                >
+                  {s.label}
+                </div>
+                <div
+                  className="text-[17px] font-bold leading-none mt-0.5 truncate"
+                  style={{ color: s.color || TERM.textStrong, fontFamily: TK_MONO }}
+                >
+                  {s.value}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* EXCHANGES TABLE — responsive flex layout. On mobile the PAIR column
+          collapses (pair shown inline under venue name) so VENUE/VOL/SHARE
+          always fit in <360px. */}
+      {topEx.length > 0 && (
+        <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${TERM.line}` }}>
+          <div
+            className="text-[9.5px] uppercase tracking-[0.1em] font-semibold mb-1.5"
+            style={{ color: TERM.muted }}
+          >
+            {isZh ? '主要交易所' : 'Top Exchanges'}
+          </div>
+          <div
+            className="flex items-center gap-3 px-1 pb-1 text-[9.5px] uppercase tracking-wider"
+            style={{ color: TERM.muted, borderBottom: `1px solid ${TERM.line}` }}
+          >
+            <span className="w-3.5 shrink-0" />
+            <span className="flex-1 min-w-0">{isZh ? '交易所' : 'Venue'}</span>
+            <span className="hidden sm:block w-[120px] shrink-0">{isZh ? '交易对' : 'Pair'}</span>
+            <span className="w-[80px] sm:w-[90px] shrink-0 text-right">{isZh ? '24H 量' : 'Vol 24H'}</span>
+            <span className="w-14 shrink-0 text-right">{isZh ? '占比' : 'Share'}</span>
+          </div>
+          {topEx.map((ex, i) => {
+            const sharePct = ex.volumeUsd != null && totalExVol > 0 ? (ex.volumeUsd / totalExVol) * 100 : null;
+            const shareColor = sharePct == null
+              ? TERM.muted
+              : sharePct >= 25 ? TERM.up : sharePct >= 10 ? TERM.amber : TERM.muted2;
+            const logoUrl = exchangeFaviconUrl(ex.name);
+            return (
+              <div
+                key={`${ex.name}-${ex.pair}-${i}`}
+                className="flex items-center gap-3 px-1 py-1 text-[12px] hover:bg-gray-50 transition-colors"
+                style={{ borderBottom: i < topEx.length - 1 ? `1px solid ${TERM.line}` : undefined }}
+                title={ex.spreadPct != null ? `spread ${ex.spreadPct.toFixed(3)}%` : undefined}
+              >
+                {logoUrl ? (
+                  <img
+                    src={logoUrl}
+                    alt=""
+                    aria-hidden
+                    className="w-3.5 h-3.5 rounded-sm shrink-0"
+                    loading="lazy"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
+                ) : (
+                  <span className="w-3.5 shrink-0" />
+                )}
+                <div className="flex-1 min-w-0 flex items-baseline gap-2 flex-wrap">
+                  <span className="truncate font-medium" style={{ color: TERM.textStrong }}>{ex.name}</span>
+                  {/* Pair shown inline-under-venue on mobile only */}
+                  <span
+                    className="text-[10.5px] sm:hidden truncate"
+                    style={{ color: TERM.muted, fontFamily: TK_MONO }}
+                  >
+                    {ex.pair}
+                  </span>
+                </div>
+                <span
+                  className="hidden sm:block w-[120px] shrink-0 truncate"
+                  style={{ color: TERM.muted, fontFamily: TK_MONO }}
+                >
+                  {ex.pair}
+                </span>
+                <span
+                  className="w-[80px] sm:w-[90px] shrink-0 text-right font-semibold"
+                  style={{ color: TERM.textStrong, fontFamily: TK_MONO }}
+                >
+                  {ex.volumeUsd != null ? fmtUsdCompact(ex.volumeUsd) : '—'}
+                </span>
+                <span
+                  className="w-14 shrink-0 text-right font-semibold"
+                  style={{ color: shareColor, fontFamily: TK_MONO }}
+                >
+                  {sharePct != null ? `${sharePct.toFixed(1)}%` : '—'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       )}
+
     </div>
   );
 }
@@ -1595,31 +2206,166 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
       const cit = consumeTrailingCitations(i);
       const colCount = Math.max(headerCells.length, ...bodyRows.map(r => r.length));
 
+      // ── Column type inference: "numeric" = majority of body cells are
+      //    digit-dominant (more digits than letters). Numeric columns get
+      //    mono font + right-align + tabular-nums so $95.21 / $3.14亿 /
+      //    0.0078% line up cleanly. Pure-text columns ("含义" / "来源")
+      //    stay left-aligned + sans.
+      const isNumericText = (s: string): boolean => {
+        const t = s.trim();
+        if (!t) return false;
+        const digits = (t.match(/\d/g) || []).length;
+        const letters = (t.match(/[a-zA-Z一-鿿]/g) || []).length;
+        // Need at least 1 digit, and digits ≥ letters (lenient — handles
+        // "$3.14亿" digits=3 letters=1, "0.0078% / 8h (年化约8.59%)" too).
+        return digits >= 1 && digits >= letters;
+      };
+      const numericCols: boolean[] = [];
+      for (let c = 0; c < colCount; c++) {
+        let numericCount = 0;
+        let totalCount = 0;
+        for (const row of bodyRows) {
+          const cell = row[c];
+          if (cell == null || cell === '') continue;
+          totalCount++;
+          if (isNumericText(cell)) numericCount++;
+        }
+        // Column is numeric when ≥ 60% of non-empty cells are digit-dominant.
+        numericCols[c] = totalCount > 0 && numericCount / totalCount >= 0.6;
+      }
+
+      // ── Layout decision: 2-col key/value data is really a stat-list, NOT
+      //    a relational table. Forcing it into <table> chrome makes it feel
+      //    like an Excel paste. Render as a bento grid of stat tiles instead
+      //    — matches the TokenCard / QuoteCard aesthetic and gives each
+      //    metric proper visual weight. 3+ col tables (真正的多维数据)
+      //    keep the table layout.
+      if (colCount === 2 && bodyRows.length >= 2) {
+        // Pick grid columns based on row count so tiles don't get too wide
+        // (3 rows → 1 wide row of 3) or too cramped (8 rows → 4x2 grid).
+        const n = bodyRows.length;
+        const cols = n <= 3 ? 'grid-cols-1 sm:grid-cols-3'
+          : n <= 4 ? 'grid-cols-2 sm:grid-cols-2'
+          : n <= 6 ? 'grid-cols-2 sm:grid-cols-3'
+          : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4';
+
+        elements.push(
+          <div key={`tbl-${i}`} className={`my-5 grid ${cols} gap-2.5`}>
+            {bodyRows.map((row, ri) => {
+              const label = row[0] || '';
+              const value = row[1] || '';
+              const valueIsNum = isNumericText(value);
+              return (
+                <div
+                  key={ri}
+                  className="rounded-lg p-3.5 transition-all hover:shadow-md hover:-translate-y-px"
+                  style={{
+                    background: 'linear-gradient(180deg, #fafbfc 0%, #ffffff 100%)',
+                    border: '1px solid #e2e8f0',
+                    boxShadow: '0 1px 2px rgba(15,23,42,0.03)',
+                  }}
+                >
+                  <div className="text-[10.5px] tracking-[0.1em] text-slate-500 font-semibold uppercase truncate">
+                    {parseLine(label)}
+                  </div>
+                  <div
+                    className={`mt-1.5 truncate leading-snug ${
+                      valueIsNum
+                        ? 'text-[19px] font-bold text-slate-900 tabular-nums'
+                        : 'text-[14px] font-semibold text-slate-700'
+                    }`}
+                    style={valueIsNum ? { fontFamily: TK_MONO } : undefined}
+                  >
+                    {parseLine(value)}
+                  </div>
+                </div>
+              );
+            })}
+            {cit.text && (
+              <div className="col-span-full text-right text-[11px] text-slate-400 -mt-1">
+                {parseLine(cit.text)}
+              </div>
+            )}
+          </div>,
+        );
+        i = cit.newIdx;
+        continue;
+      }
+
       elements.push(
-        <div key={`tbl-${i}`} className="my-4 overflow-x-auto rounded-lg border border-gray-200">
-          <table className="w-full text-[13.5px] text-left">
+        <div
+          key={`tbl-${i}`}
+          className="my-5 overflow-x-auto rounded-xl bg-white"
+          style={{
+            border: '1px solid #e5e7eb',
+            boxShadow: '0 1px 3px rgba(15,23,42,0.04), 0 1px 2px rgba(15,23,42,0.02)',
+          }}
+        >
+          <table className="w-full text-[13px] text-left border-collapse">
             <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
+              <tr style={{ background: 'linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%)', borderBottom: '1px solid #cbd5e1' }}>
                 {headerCells.map((cell, ci) => (
-                  <th key={ci} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap">
+                  <th
+                    key={ci}
+                    className={`px-4 py-3 text-[11.5px] font-bold uppercase tracking-[0.1em] text-slate-700 whitespace-nowrap ${
+                      numericCols[ci] ? 'text-right' : 'text-left'
+                    }`}
+                  >
                     {parseLine(cell)}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {bodyRows.map((cells, ri) => (
-                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                  {cells.map((cell, ci) => (
-                    <td key={ci} className="px-3 py-2 text-gray-600 border-t border-gray-100">
-                      {parseLine(cell)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
+              {bodyRows.map((cells, ri) => {
+                // Subtle zebra striping — every other row gets a tinted bg
+                // so the eye gets visual anchors as it scans down. Modern
+                // fintech (Stripe Dashboard / Linear analytics) use this
+                // pattern for medium-density tables.
+                const stripe = ri % 2 === 1 ? '#fafbfc' : '#ffffff';
+                return (
+                  <tr
+                    key={ri}
+                    className="transition-colors hover:bg-blue-50/30"
+                    style={{
+                      background: stripe,
+                      borderBottom: ri < bodyRows.length - 1 ? '1px solid #f1f5f9' : undefined,
+                    }}
+                  >
+                    {cells.map((cell, ci) => {
+                      const isFirstCol = ci === 0;
+                      const isNum = numericCols[ci];
+                      const isLastCol = ci === cells.length - 1;
+                      // Heuristic: short last-column text in a 3+col table = source/note
+                      const isSourceCol = !isNum && isLastCol && cell.length < 40 && colCount >= 3;
+                      return (
+                        <td
+                          key={ci}
+                          className={`px-4 py-2.5 align-middle ${
+                            isNum
+                              ? 'text-right text-[14.5px] font-bold text-slate-900 tabular-nums whitespace-nowrap'
+                              : isFirstCol
+                                ? 'text-[13px] font-semibold text-slate-800'
+                                : isSourceCol
+                                  ? 'text-[11.5px] text-slate-500'
+                                  : 'text-[13px] text-slate-600 leading-relaxed'
+                          }`}
+                          style={isNum ? { fontFamily: TK_MONO } : undefined}
+                        >
+                          {parseLine(cell)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
               {cit.text && (
-                <tr className="bg-gray-50/70">
-                  <td colSpan={colCount} className="px-3 py-1.5 text-right border-t border-gray-100">
+                <tr>
+                  <td
+                    colSpan={colCount}
+                    className="px-4 py-1.5 text-right text-[11px] text-slate-400"
+                    style={{ borderTop: '1px solid #f1f5f9', background: '#fafbfc' }}
+                  >
                     {parseLine(cit.text)}
                   </td>
                 </tr>

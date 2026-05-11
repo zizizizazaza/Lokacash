@@ -349,18 +349,37 @@ const SuperAgentHome: React.FC<SuperAgentHomeProps> = ({
       return;
     }
     let cancelled = false;
-    api.getQuota()
-      .then(q => {
-        if (cancelled) return;
-        setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
-        if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setRoundtableQuota({ used: 1, limit: 3 });
-        setFastQuota({ used: 4, limit: 20 });
-      });
-    return () => { cancelled = true; };
+    const fetchQuota = () => {
+      api.getQuota()
+        .then(q => {
+          if (cancelled) return;
+          setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
+          if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          // Only seed placeholder counts on the very first fetch; if we've
+          // already shown real numbers, keep them rather than reset.
+          setRoundtableQuota(prev => prev ?? { used: 1, limit: 3 });
+          setFastQuota(prev => prev ?? { used: 4, limit: 20 });
+        });
+    };
+    fetchQuota();
+
+    // Refresh whenever the chat page broadcasts a usage change, the tab
+    // becomes visible again, or the window regains focus — otherwise the
+    // badge stays stuck at mount-time numbers while quota actually drained.
+    const onPlanChanged = () => fetchQuota();
+    const onVisibility = () => { if (document.visibilityState === 'visible') fetchQuota(); };
+    window.addEventListener('plan-changed', onPlanChanged);
+    window.addEventListener('focus', fetchQuota);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('plan-changed', onPlanChanged);
+      window.removeEventListener('focus', fetchQuota);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [ready, authenticated]);
 
   useEffect(() => {

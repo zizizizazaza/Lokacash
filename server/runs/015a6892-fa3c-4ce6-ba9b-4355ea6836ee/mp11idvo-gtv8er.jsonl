@@ -1,0 +1,9 @@
+{"ts":"2026-05-11T10:09:32.100Z","type":"turn_start","userId":"cmmn8oiqb022f0dky01c0ls1p","sessionId":"015a6892-fa3c-4ce6-ba9b-4355ea6836ee","userMessagePreview":"分析一下sol适合开多还是开空"}
+{"ts":"2026-05-11T10:09:32.119Z","type":"first_pass_start","tools":7,"historyMessages":1,"hasMemoryRecall":false,"hasImages":false,"imageCount":0,"firstPassModel":"default"}
+{"ts":"2026-05-11T10:09:37.519Z","type":"first_pass_done","narrationLen":38,"toolCalls":[{"name":"web3_token_analysis","argsLen":34},{"name":"web_research","argsLen":26}]}
+{"ts":"2026-05-11T10:09:37.519Z","type":"tool_call_start","name":"web3_token_analysis","args":{"query":"SOL 当前价格、衍生品数据和市场情绪分析"}}
+{"ts":"2026-05-11T10:09:37.521Z","type":"tool_call_start","name":"web_research","args":{"query":"SOL 近期市场情绪和新闻"}}
+{"ts":"2026-05-11T10:09:43.107Z","type":"tool_call_done","name":"web_research","ok":true,"durationMs":5586,"contentLen":9599,"sourcesCount":24}
+{"ts":"2026-05-11T10:10:10.208Z","type":"tool_call_done","name":"web3_token_analysis","ok":true,"durationMs":32689,"contentLen":1542,"sourcesCount":1}
+{"ts":"2026-05-11T10:10:10.208Z","type":"synthesis_start","promptKind":"crypto","toolsPhaseDurationS":33}
+{"ts":"2026-05-11T10:11:15.465Z","type":"end","status":"success","stage":"completed","answerLen":3352,"sourcesCount":25,"toolsPhaseDurationS":33,"promptKind":"crypto"}

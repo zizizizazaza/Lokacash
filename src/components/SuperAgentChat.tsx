@@ -21,7 +21,7 @@ import HighlightedTextarea from './chat/HighlightedTextarea';
 import ModeSelector from './chat/ModeSelector';
 import type { RoundtableQuota, FastQuota } from './chat/ModeSelector';
 import { RoundtableWorkbench, KnowledgeGraphView, buildKnowledgeGraph } from './chat/RoundtableWorkbench';
-import { Web3ToolResultCard, Web3ToolCallPills, Web3ToolPill, SearchSourcesCard } from './chat/Web3ToolRenderers';
+import { Web3ToolResultCard, Web3ToolCallPills, Web3ToolPill, Web3TokenChip, Web3ToolGroup, SearchSourcesCard, groupStagesForUI } from './chat/Web3ToolRenderers';
 
 // ── Phase-1 refactor: shared types / constants / helpers extracted to ./chat/* ──
 import type {
@@ -1908,6 +1908,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const [xProfileCards, setXProfileCards] = useState<Record<number, { handle: string; profileUrl: string; followers?: number; following?: number; joinedDisplay?: string; avatarUrl?: string }>>({});
     // Token snapshot cards keyed by message index (live CoinGecko data injected via agent:chat:token)
     const [tokenCards, setTokenCards] = useState<Record<number, TokenSnapshotData>>({});
+    // Narration prefix from SuperAgent v2 first-pass (the "我来帮你分析..." line
+    // that appears before tools execute). Routed over a separate socket event
+    // so it does NOT count as `msg.content` — otherwise the ThinkingInlineTrigger
+    // would prematurely flip to a "Done" pill before tools have run.
+    const [narrationByIdx, setNarrationByIdx] = useState<Record<number, string>>({});
     /** Auto-fetched URL pills, keyed by the assistant message index they
      *  belong to. Populated from `agent:chat:webfetch` events emitted by
      *  the backend's webFetch pre-step (see services/webFetch). */
@@ -2158,6 +2163,67 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     const chatGenRef = useRef(0);
     const activeChatGenRef = useRef(0);
 
+    // ── Typewriter smoothing buffer ───────────────────────────────
+    // Claude Sonnet 4.6 delivers ~30 chars per ~400ms chunk (≈ 50 chars/sec
+    // overall but visibly chunky to the eye). Rather than appending each
+    // upstream burst directly to msg.content, we queue characters here and
+    // drain them at a steady 30ms cadence so the assistant message paints
+    // like a smooth ChatGPT/Vibe-Trading typewriter regardless of which
+    // model produced the stream. The drain rate is adaptive — it scales
+    // with buffer depth so we never fall behind upstream.
+    const typewriterBuffersRef = useRef<Map<number, string>>(new Map());
+    const typewriterTimerRef = useRef<number | null>(null);
+
+    const drainTypewriter = useCallback(() => {
+        let anyContent = false;
+        typewriterBuffersRef.current.forEach((chars, idx) => {
+            if (!chars) return;
+            anyContent = true;
+            // Drain ceil(buffer.length / 12) per 30ms tick.
+            // - When buffer is small (≤12 chars): drain 1/tick → 33 chars/sec
+            // - When buffer grows (claude finished, lots queued): drain
+            //   proportionally to clear in ~360ms regardless of size.
+            // This keeps display latency bounded while making the pace
+            // feel character-by-character on the eye.
+            const drainN = Math.max(1, Math.ceil(chars.length / 12));
+            const head = chars.slice(0, drainN);
+            const tail = chars.slice(drainN);
+            if (tail.length === 0) {
+                typewriterBuffersRef.current.delete(idx);
+            } else {
+                typewriterBuffersRef.current.set(idx, tail);
+            }
+            setMessages(prev => {
+                const updated = [...prev];
+                if (!updated[idx] || !updated[idx].isStreaming) return prev;
+                updated[idx] = { ...updated[idx], content: (updated[idx].content || '') + head };
+                return updated;
+            });
+        });
+        if (!anyContent && typewriterTimerRef.current !== null) {
+            window.clearInterval(typewriterTimerRef.current);
+            typewriterTimerRef.current = null;
+        }
+    }, []);
+
+    const ensureTypewriterRunning = useCallback(() => {
+        if (typewriterTimerRef.current === null) {
+            typewriterTimerRef.current = window.setInterval(drainTypewriter, 30);
+        }
+    }, [drainTypewriter]);
+
+    const cancelTypewriter = useCallback((msgIdx?: number) => {
+        if (typeof msgIdx === 'number') {
+            typewriterBuffersRef.current.delete(msgIdx);
+        } else {
+            typewriterBuffersRef.current.clear();
+        }
+        if (typewriterBuffersRef.current.size === 0 && typewriterTimerRef.current !== null) {
+            window.clearInterval(typewriterTimerRef.current);
+            typewriterTimerRef.current = null;
+        }
+    }, []);
+
     useEffect(() => {
         progressChunkIdxRef.current = 0;
         const onRouting = (data: { sessionId: string }) => {
@@ -2245,7 +2311,45 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 Object.entries(data.data).filter(([k]) => k !== 'status'),
                             )
                             : data.data;
-                        mods[modIdx].data = { ...(mods[modIdx].data || {}), ...incomingData };
+                        // For the web3 module, multiple parallel tool calls
+                        // (e.g. SOL + ETH in the same turn) all emit through
+                        // moduleType='web3'. A naive shallow merge would let
+                        // each new emission OVERWRITE the previous tool's
+                        // stages array — causing the live "X tools" count to
+                        // undercount and disagree with the persisted version
+                        // shown after page reload. Concat-and-dedup-by-stage-id
+                        // here so all parallel calls accumulate. Backend tags
+                        // stage IDs with a per-instance prefix to make the
+                        // dedup key unique across tool instances.
+                        const prevData: any = mods[modIdx].data || {};
+                        let mergedData: any = { ...prevData, ...incomingData };
+                        if (data.moduleType === 'web3') {
+                            const prevStages: any[] = Array.isArray(prevData.stages) ? prevData.stages : [];
+                            const incomingStages: any[] = Array.isArray((incomingData as any).stages) ? (incomingData as any).stages : [];
+                            if (prevStages.length || incomingStages.length) {
+                                // Dedup by `dedupKey` (instanceId + stage) so two
+                                // parallel web3 tool calls don't collide on shared
+                                // stage names. Fall back to plain `stage` on older
+                                // payloads that predate dedupKey.
+                                const byKey = new Map<string, any>();
+                                const keyOf = (s: any) =>
+                                    typeof s.dedupKey === 'string'
+                                        ? s.dedupKey
+                                        : typeof s.stage === 'string'
+                                            ? s.stage
+                                            : null;
+                                for (const s of prevStages) {
+                                    const k = keyOf(s);
+                                    if (k) byKey.set(k, s);
+                                }
+                                for (const s of incomingStages) {
+                                    const k = keyOf(s);
+                                    if (k) byKey.set(k, s);
+                                }
+                                mergedData = { ...mergedData, stages: [...byKey.values()] };
+                            }
+                        }
+                        mods[modIdx].data = mergedData;
                     }
                 }
 
@@ -2253,11 +2357,24 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             });
         };
 
+        const onNarration = (data: { sessionId: string; delta: string }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0 || !data.delta) return;
+            // Append to narrationByIdx[msgIdx] but DO NOT touch msg.content.
+            // This keeps the streamingStarted gate in ThinkingInlineTrigger
+            // false so the "Working" / tool-specific pill stays visible until
+            // the synthesis (chat:progress) actually starts.
+            setNarrationByIdx(prev => ({
+                ...prev,
+                [msgIdx]: (prev[msgIdx] || '') + data.delta,
+            }));
+        };
+
         const onProgress = (data: { sessionId: string; content: string }) => {
             if (data.sessionId !== sessionId) return;
-            // Drop stale events from a previous generation
             const msgIdx = activeMsgIdxRef.current;
-            if (msgIdx < 0) return;
+            if (msgIdx < 0 || !data.content) return;
             if (import.meta.env.DEV) {
                 progressChunkIdxRef.current += 1;
                 const n = progressChunkIdxRef.current;
@@ -2265,18 +2382,22 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     saLog('← agent:chat:progress (sample)', { n, chunkLen: data?.content?.length ?? 0 });
                 }
             }
-            setMessages(prev => {
-                const updated = [...prev];
-                if (!updated[msgIdx] || !updated[msgIdx].isStreaming) return prev;
-                updated[msgIdx] = { ...updated[msgIdx], content: updated[msgIdx].content + data.content };
-                return updated;
-            });
+            // Push to the typewriter buffer instead of appending directly to
+            // msg.content — drainTypewriter will paint chars at a steady 30ms
+            // cadence so Claude's chunky 400ms-per-burst stream feels smooth.
+            const existing = typewriterBuffersRef.current.get(msgIdx) || '';
+            typewriterBuffersRef.current.set(msgIdx, existing + data.content);
+            ensureTypewriterRunning();
         };
 
         const onStreamDone = (data: { sessionId: string; content?: string; sources?: SearchSource[] }) => {
             saLog('← agent:chat:stream_done', { expect: sessionId, got: data?.sessionId, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
             const msgIdx = activeMsgIdxRef.current;
+            // Server provides the authoritative final content below — discard
+            // any chars still queued in the typewriter buffer so they don't
+            // race the final replacement.
+            cancelTypewriter(msgIdx);
             try {
                 sessionStorage.removeItem(SA_PENDING_KEY);
             } catch {
@@ -2321,6 +2442,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     .then((q) => {
                         setRoundtableQuota({ used: q.roundtable.used, limit: q.roundtable.limit });
                         if (q.fast) setFastQuota({ used: q.fast.used, limit: q.fast.limit });
+                        // Tell the Home screen + Settings to refetch too —
+                        // they cache quota on mount and stale otherwise.
+                        try { window.dispatchEvent(new CustomEvent('plan-changed')); } catch { /* ignore */ }
                     })
                     .catch(() => { /* keep last good values */ });
             }
@@ -2329,6 +2453,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         const onError = (data: { sessionId: string; error: string; mode?: string; resetAt?: string; hint?: string }) => {
             saLog('← agent:chat:error', { expect: sessionId, got: data?.sessionId, error: data?.error, match: data.sessionId === sessionId });
             if (data.sessionId !== sessionId) return;
+            // Drop any queued typewriter chars so they don't keep painting
+            // after the bubble has been replaced by an error state.
+            cancelTypewriter(activeMsgIdxRef.current);
             try {
                 sessionStorage.removeItem(SA_PENDING_KEY);
             } catch {
@@ -2741,6 +2868,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:quota_degraded', onQuotaDegraded);
         socket.on('agent:chat:started', onStarted);
         socket.on('agent:chat:module', onModule);
+        socket.on('agent:chat:narration', onNarration);
         socket.on('agent:chat:progress', onProgress);
         socket.on('agent:chat:content_replace', onContentReplace);
         socket.on('agent:chat:stream_done', onStreamDone);
@@ -2765,6 +2893,7 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:quota_degraded', onQuotaDegraded);
             socket.off('agent:chat:started', onStarted);
             socket.off('agent:chat:module', onModule);
+            socket.off('agent:chat:narration', onNarration);
             socket.off('agent:chat:progress', onProgress);
             socket.off('agent:chat:content_replace', onContentReplace);
             socket.off('agent:chat:stream_done', onStreamDone);
@@ -2780,6 +2909,9 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:agent_responded', onAgentResponded);
             socket.off('agent:chat:round_started', onRoundStarted);
             socket.off('agent:chat:round_completed', onRoundCompleted);
+            // Stop the typewriter interval and discard queued chars so a
+            // session-change / unmount doesn't leave a ticking timer behind.
+            cancelTypewriter();
         };
     }, [sessionId]);
 
@@ -3308,20 +3440,39 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     const transformedHistory: Message[] = history.map(
                         (m: { role: string; content?: string; createdAt: string; metadata?: string | null }) => {
                             let sources: SearchSource[] | undefined;
-                            // For user turns the backend persists `{ images: [{ url }] }`
-                            // in metadata so the bubble can re-render the same
-                            // attachment thumbnails after reload. Pull both in
-                            // one parse so we don't double-decode.
+                            // For user turns the backend persists images in
+                            // metadata so the bubble can re-render the same
+                            // attachment thumbnails after reload.
+                            //
+                            // Two shapes coexist on disk:
+                            //   - `images`         — current/most-recent image turn (raw bytes
+                            //                        still re-fed to the LLM next turn)
+                            //   - `archivedImages` — previous image turns that the server has
+                            //                        already replaced with a text imageSummary
+                            //                        (see archivePriorUserImageTurns in
+                            //                        server/src/socket/index.ts) to keep prompt
+                            //                        token usage low. The bytes are kept
+                            //                        client-display-only.
+                            //
+                            // Both should render in the user bubble when reopening history;
+                            // without the archivedImages fallback, every chat with >1 image
+                            // turn would visually lose all but the latest image after the next
+                            // archive pass.
                             let images: string[] | undefined;
                             if (m.metadata) {
                                 try {
                                     const parsed = JSON.parse(m.metadata) as any;
                                     sources = parsed?.sources;
-                                    if (m.role === 'user' && Array.isArray(parsed?.images)) {
-                                        const urls = parsed.images
-                                            .map((img: any) => (typeof img?.url === 'string' ? img.url : null))
-                                            .filter(Boolean) as string[];
-                                        if (urls.length) images = urls;
+                                    if (m.role === 'user') {
+                                        const rawImgs = Array.isArray(parsed?.images)
+                                            ? parsed.images
+                                            : (Array.isArray(parsed?.archivedImages) ? parsed.archivedImages : null);
+                                        if (rawImgs) {
+                                            const urls = rawImgs
+                                                .map((img: any) => (typeof img?.url === 'string' ? img.url : null))
+                                                .filter(Boolean) as string[];
+                                            if (urls.length) images = urls;
+                                        }
                                     }
                                 } catch {}
                             }
@@ -4316,6 +4467,19 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         }}
                                                     />
                                                 )}
+                                                {/* SuperAgent v2 narration prefix — rendered immediately after
+                                                    the trigger pill, BEFORE the tool/process cards, so the
+                                                    "我来帮你分析..." opener leads the bubble visually (not
+                                                    buried under OKX cards). Hidden once synthesis content
+                                                    starts arriving (msg.content non-empty) since the persisted
+                                                    finalContent already prepends the narration line. */}
+                                                {msg.role === 'assistant' && msg.isStreaming && narrationByIdx[i] && !msg.content && (
+                                                    <div className="my-3 px-1">
+                                                        <p className="text-[14.5px] leading-relaxed text-gray-700" style={{ fontFamily: "'Open Runde', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif", fontWeight: 500 }}>
+                                                            {narrationByIdx[i]}
+                                                        </p>
+                                                    </div>
+                                                )}
                                                 {/* Lite-mode banner: Auto fell back to no-agent because both buckets are empty */}
                                                 {msg.role === 'assistant' && msg.liteMode && (
                                                     <div className="mb-3 flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200">
@@ -4438,58 +4602,76 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     }
                                                     void web3Calls; void web3CardStages; // pairing now happens per-stage below
 
+                                                    // ── Partition web3Stages:
+                                                    //    1. Token resolution → inline chip
+                                                    //    2. Everything else → grouped by subject+provider via groupStagesForUI
+                                                    const resolveStages = web3Stages.filter(
+                                                        (s) => s.stage === 'search_crypto_asset' && s.state === 'completed' && s.rawData,
+                                                    );
+                                                    const { groups: web3Groups } = groupStagesForUI(
+                                                        web3Stages.filter(
+                                                            (s) => !(s.stage === 'search_crypto_asset' && s.state === 'completed' && s.rawData),
+                                                        ),
+                                                    );
+                                                    const { groups: stockGroups } = groupStagesForUI(stocksToolStages);
+
+                                                    // Pull rawData-bearing stages out for result card rendering below the groups.
+                                                    const allResultStages = [
+                                                        ...web3Stages.filter(
+                                                            (s) => s.rawData != null && !(s.stage === 'search_crypto_asset' && s.state === 'completed'),
+                                                        ),
+                                                        ...stocksToolStages.filter((s) => s.rawData != null),
+                                                    ];
+
                                                     return (
                                                         <div className="mb-3 space-y-3">
-                                                            {/* Search block: cluster of pills (web/X) over the
-                                                                Sources card. Pills + card stay grouped because
-                                                                a single Sources card represents both pills. */}
-                                                            {(searchPills.length > 0 || dedupedSources.length > 0) && (
-                                                                <div className="space-y-1.5">
+                                                            {/* Row 1: search pills + token-resolve chips horizontal. */}
+                                                            {(searchPills.length > 0 || resolveStages.length > 0) && (
+                                                                <div className="flex flex-wrap items-center gap-1.5">
                                                                     {searchPills.length > 0 && (
                                                                         <Web3ToolCallPills calls={searchPills} hideLabel />
                                                                     )}
-                                                                    {dedupedSources.length > 0 && (
-                                                                        <SearchSourcesCard sources={dedupedSources} initialCount={6} />
-                                                                    )}
+                                                                    {resolveStages.map((s, idx) => (
+                                                                        <Web3TokenChip key={`tk-${idx}`} data={s.rawData} />
+                                                                    ))}
                                                                 </div>
                                                             )}
-                                                            {/* Web3 tool blocks: each pill paired with its card.
-                                                                Card may be absent for stages still in flight
-                                                                (no rawData yet) — pill alone is fine. */}
-                                                            {web3Stages.map((s, idx) => (
-                                                                <div key={`web3-${s.stage}-${idx}`} className="space-y-1.5">
-                                                                    <Web3ToolPill
-                                                                        toolName={s.stage}
-                                                                        args={s.argsData}
-                                                                        state={s.state}
-                                                                    />
-                                                                    {s.rawData != null && (
-                                                                        <Web3ToolResultCard
-                                                                            toolName={s.stage}
-                                                                            rawData={s.rawData}
+                                                            {dedupedSources.length > 0 && (
+                                                                <SearchSourcesCard sources={dedupedSources} initialCount={3} />
+                                                            )}
+                                                            {/* Row 2: grouped tool clusters. "Token data (sui)" /
+                                                                "OKX (sui)" / "Stock data (aapl)" — each one container
+                                                                with the subject called out once and sibling tools
+                                                                rendering as compact pills inside. */}
+                                                            {(web3Groups.length > 0 || stockGroups.length > 0) && (
+                                                                <div className="flex flex-wrap items-start gap-2">
+                                                                    {web3Groups.map((g) => (
+                                                                        <Web3ToolGroup
+                                                                            key={`g-${g.key}`}
+                                                                            label={g.label}
+                                                                            subject={g.subject}
+                                                                            category={g.category}
+                                                                            stages={g.stages}
                                                                         />
-                                                                    )}
-                                                                </div>
-                                                            ))}
-                                                            {/* Stocks tool blocks: identical pill+card layout
-                                                                — same Web3Stage shape, same renderers. The
-                                                                source module is `analysis` instead of `web3`,
-                                                                but the visual treatment is unified so the
-                                                                stocks side feels just as rich. */}
-                                                            {stocksToolStages.map((s, idx) => (
-                                                                <div key={`stk-${s.stage}-${idx}`} className="space-y-1.5">
-                                                                    <Web3ToolPill
-                                                                        toolName={s.stage}
-                                                                        args={s.argsData}
-                                                                        state={s.state}
-                                                                    />
-                                                                    {s.rawData != null && (
-                                                                        <Web3ToolResultCard
-                                                                            toolName={s.stage}
-                                                                            rawData={s.rawData}
+                                                                    ))}
+                                                                    {stockGroups.map((g) => (
+                                                                        <Web3ToolGroup
+                                                                            key={`sg-${g.key}`}
+                                                                            label={g.label}
+                                                                            subject={g.subject}
+                                                                            category={g.category}
+                                                                            stages={g.stages}
                                                                         />
-                                                                    )}
+                                                                    ))}
                                                                 </div>
+                                                            )}
+                                                            {/* Result cards — rawData details stacked under the group row. */}
+                                                            {allResultStages.map((s, idx) => (
+                                                                <Web3ToolResultCard
+                                                                    key={`rc-${s.stage}-${idx}`}
+                                                                    toolName={s.stage}
+                                                                    rawData={s.rawData}
+                                                                />
                                                             ))}
                                                         </div>
                                                     );
@@ -4518,7 +4700,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     const { body: bodyNoQuestions } = msg.role === 'assistant' && !msg.isStreaming
                                                         ? extractFollowUpQuestions(cleaned)
                                                         : { body: cleaned };
-                                                    const { quote, body } = msg.role === 'assistant' && !msg.isStreaming
+                                                    // QuoteCard extraction runs during streaming too — as soon as the
+                                                    // "## 标的信息 / Quote Snapshot" heading + at least one bullet has
+                                                    // arrived, the regex matches and the card pops above the body
+                                                    // instead of waiting for the full reply. If it doesn't match yet,
+                                                    // it returns { quote: null, body: input } which is a no-op.
+                                                    const { quote, body } = msg.role === 'assistant'
                                                         ? extractQuoteSnapshot(bodyNoQuestions)
                                                         : { quote: null, body: bodyNoQuestions };
                                                     const liveQuote = quoteCards[i];
@@ -4531,108 +4718,27 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                     const okxNewsBundles = web3ModData?.okxNews || [];
                                                     return (
                                                         <>
-                                                            {/* Live stock quote card from real-time data */}
-                                                            {liveQuote && (() => {
-                                                                const isUp = liveQuote.change?.startsWith('+');
-                                                                const isDown = liveQuote.change?.startsWith('-');
-                                                                const chgColor = isUp ? 'text-emerald-600' : isDown ? 'text-red-500' : 'text-gray-500';
-                                                                const chgBg = isUp
-                                                                    ? 'bg-emerald-500/8 ring-1 ring-emerald-500/20'
-                                                                    : isDown
-                                                                    ? 'bg-red-500/8 ring-1 ring-red-500/20'
-                                                                    : 'bg-gray-100 ring-1 ring-gray-200/60';
-                                                                const cardBg = isUp
-                                                                    ? 'bg-gradient-to-br from-emerald-50/40 via-white to-white'
-                                                                    : isDown
-                                                                    ? 'bg-gradient-to-br from-red-50/40 via-white to-white'
-                                                                    : 'bg-gradient-to-br from-gray-50/40 via-white to-white';
-                                                                // Match OKX snapshot by base currency (symbol or name contains it)
-                                                                const lqSym = (liveQuote.symbol || '').toUpperCase();
-                                                                const lqName = (liveQuote.name || '').toUpperCase();
-                                                                const matchBase = (base: string) =>
-                                                                    base === lqSym || base === lqName || lqSym.includes(base) || lqName.includes(base);
-                                                                const matchingOkx = okxSnapshots.find((s) => matchBase(s.baseCcy.toUpperCase()));
-                                                                const matchingOkxNews = okxNewsBundles.find((b) => matchBase(b.baseCcy.toUpperCase()));
-                                                                const mktStyles: Record<string, string> = {
-                                                                    '美股': 'bg-blue-500/10 text-blue-600', '港股': 'bg-amber-500/10 text-amber-600', 'A股': 'bg-red-500/10 text-red-600',
-                                                                    'US': 'bg-blue-500/10 text-blue-600', 'HK': 'bg-amber-500/10 text-amber-600', 'A-Share': 'bg-red-500/10 text-red-600',
-                                                                };
-                                                                const mktCls = liveQuote.market ? (mktStyles[liveQuote.market] || 'bg-gray-100 text-gray-500') : '';
-                                                                const lang = liveQuote.lang || 'zh';
-                                                                const L = lang === 'en'
-                                                                    ? { open: 'Open', prevClose: 'Prev Close', high: 'High', low: 'Low', volume: 'Volume', amount: 'Amount', marketCap: 'Mkt Cap', pe: 'PE', pb: 'PB', turnover: 'Turnover' }
-                                                                    : { open: '开盘', prevClose: '昨收', high: '最高', low: '最低', volume: '成交量', amount: '成交额', marketCap: '市值', pe: 'PE', pb: 'PB', turnover: '换手率' };
-                                                                const ok = (v?: string) => v && !/^(n\/?a|--|—|0\.?0*|undefined|null)$/i.test(v.trim());
-                                                                const stats: { label: string; value: string }[] = [];
-                                                                if (ok(liveQuote.open)) stats.push({ label: L.open, value: liveQuote.open! });
-                                                                if (ok(liveQuote.prevClose)) stats.push({ label: L.prevClose, value: liveQuote.prevClose! });
-                                                                if (ok(liveQuote.high)) stats.push({ label: L.high, value: liveQuote.high! });
-                                                                if (ok(liveQuote.low)) stats.push({ label: L.low, value: liveQuote.low! });
-                                                                if (ok(liveQuote.volume)) stats.push({ label: L.volume, value: liveQuote.volume! });
-                                                                if (ok(liveQuote.amount)) stats.push({ label: L.amount, value: liveQuote.amount! });
-                                                                if (ok(liveQuote.marketCap)) stats.push({ label: L.marketCap, value: liveQuote.marketCap! });
-                                                                if (ok(liveQuote.pe)) stats.push({ label: L.pe, value: liveQuote.pe! });
-                                                                if (ok(liveQuote.pb)) stats.push({ label: L.pb, value: liveQuote.pb! });
-                                                                if (ok(liveQuote.turnover)) stats.push({ label: L.turnover, value: liveQuote.turnover! });
-                                                                return (
-                                                                    <div className={`mb-5 rounded-2xl overflow-hidden ring-1 ring-black/[0.04] shadow-[0_2px_12px_-2px_rgba(0,0,0,0.06)] ${cardBg}`}>
-                                                                        {/* Header */}
-                                                                        <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
-                                                                            <div className="min-w-0">
-                                                                                <div className="flex items-center gap-2.5">
-                                                                                    <span className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-none">{liveQuote.symbol}</span>
-                                                                                    {liveQuote.market && <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${mktCls} tracking-wide uppercase`}>{liveQuote.market}</span>}
-                                                                                </div>
-                                                                                {liveQuote.name && <p className="text-[12px] text-gray-400 mt-1 font-light tracking-wide">{liveQuote.name}</p>}
-                                                                            </div>
-                                                                            {liveQuote.price && (
-                                                                                <div className="text-right shrink-0 flex flex-col items-end">
-                                                                                    <p className="text-[28px] font-black text-gray-900 tabular-nums leading-none tracking-tight">{liveQuote.price}</p>
-                                                                                    {liveQuote.change && (
-                                                                                        <span className={`mt-1.5 inline-flex items-center text-[12px] font-bold px-2.5 py-1 rounded-lg ${chgBg} ${chgColor} tabular-nums`}>
-                                                                                            {isUp && <span className="mr-0.5">▲</span>}
-                                                                                            {isDown && <span className="mr-0.5">▼</span>}
-                                                                                            {liveQuote.change}
-                                                                                        </span>
-                                                                                    )}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                        {/* Divider */}
-                                                                        {stats.length > 0 && (
-                                                                            <div className="mx-5 h-px bg-gradient-to-r from-transparent via-gray-200/80 to-transparent" />
-                                                                        )}
-                                                                        {/* Stats grid */}
-                                                                        {stats.length > 0 && (
-                                                                            <div className="px-5 py-3.5">
-                                                                                <div className="grid grid-cols-5 gap-x-4 gap-y-3">
-                                                                                    {stats.map((s) => (
-                                                                                        <div key={s.label} className="min-w-0">
-                                                                                            <p className="text-[9px] uppercase tracking-[0.08em] text-gray-400 font-medium leading-none mb-1">{s.label}</p>
-                                                                                            <p className="text-[13px] font-semibold text-gray-800 tabular-nums truncate leading-none">{s.value}</p>
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                );
-                                                            })()}
-                                                            {/* Fallback: markdown-parsed quote card (merged with OKX when matching) */}
-                                                            {!liveQuote && quote && (() => {
-                                                                const qSym = (quote.symbol || '').toUpperCase();
-                                                                const qName = (quote.name || '').toUpperCase();
-                                                                const matchBaseMd = (base: string) =>
-                                                                    base === qSym || base === qName || qSym.includes(base) || qName.includes(base);
-                                                                const matchingOkxForMd = okxSnapshots.find((s) => matchBaseMd(s.baseCcy.toUpperCase()));
-                                                                const matchingOkxNewsForMd = okxNewsBundles.find((b) => matchBaseMd(b.baseCcy.toUpperCase()));
-                                                                // Derive lang from user's prior message so QuoteCard renders labels
-                                                                // (情绪与新闻 / 新闻 / 多/空/中 / 重要) in the matching language.
+                                                            {/* UNIFIED QuoteCard render — `liveQuote` (structured from socket,
+                                                                carries sparkline7d) wins over markdown `quote`. Both flow
+                                                                through <QuoteCard> so the layout stays consistent across
+                                                                streaming + persisted reload. */}
+                                                            {(liveQuote || quote) && (() => {
+                                                                const cardQuote: any = liveQuote || quote;
+                                                                const cSym = (cardQuote.symbol || '').toUpperCase();
+                                                                const cName = (cardQuote.name || '').toUpperCase();
+                                                                const matchBaseCard = (base: string) =>
+                                                                    base === cSym || base === cName || cSym.includes(base) || cName.includes(base);
+                                                                const matchingOkxCard = okxSnapshots.find((s) => matchBaseCard(s.baseCcy.toUpperCase()));
+                                                                const matchingOkxNewsCard = okxNewsBundles.find((b) => matchBaseCard(b.baseCcy.toUpperCase()));
                                                                 const prevUserForCard = messages.slice(0, i).reverse().find((m) => m.role === 'user');
-                                                                const cardLang: 'zh' | 'en' = prevUserForCard && /[\u4e00-\u9fff]/.test(prevUserForCard.content) ? 'zh' : 'en';
-                                                                const quoteWithLang = { ...quote, lang: quote.lang || cardLang };
-                                                                return <QuoteCard quote={quoteWithLang} okxSnap={matchingOkxForMd} okxNews={matchingOkxNewsForMd} />;
+                                                                const cardLang: 'zh' | 'en' = prevUserForCard && /[一-鿿]/.test(prevUserForCard.content) ? 'zh' : 'en';
+                                                                const quoteWithLang = { ...cardQuote, lang: cardQuote.lang || cardLang };
+                                                                return <QuoteCard quote={quoteWithLang} okxSnap={matchingOkxCard} okxNews={matchingOkxNewsCard} />;
                                                             })()}
+                                                            {/* DEAD-CODE REMOVED: the old `{liveQuote && (...)}` inline 5-col
+                                                                layout and the `{!liveQuote && quote && ...}` markdown fallback
+                                                                were unified into the single block above. Git history preserves
+                                                                the previous implementation if needed. */}
                                                             {liveXProfile && (() => {
                                                                 const fmtN = (n?: number) => {
                                                                     if (n == null || Number.isNaN(n)) return '—';

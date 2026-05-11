@@ -131,6 +131,8 @@ export type Web3TokenSnapshot = {
     totalSupply?: number;
     maxSupply?: number;
     circulatingPctOfMax?: number;
+    /** Optional 7d price series, oldest → newest. Drives the hero sparkline on TokenCard. */
+    sparkline7d?: number[];
   };
   community: {
     twitterFollowers?: number;

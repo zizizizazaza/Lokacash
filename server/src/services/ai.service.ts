@@ -1,5 +1,8 @@
 ﻿import { config } from '../config.js';
 import { CRYPTO_SYMBOLS_FOR_PROMPT } from '../constants/cryptoAssets.js';
+import * as https from 'node:https';
+import * as http from 'node:http';
+import { URL as NodeURL } from 'node:url';
 
 export function getGlobalTimeContext(): string {
   const now = new Date();
@@ -457,6 +460,165 @@ ${userText || '(empty)'}`;
     };
   }
 
+  /**
+   * Streaming chat WITH tool definitions (function calling).
+   *
+   * Returns a structured result containing:
+   *   - `narration`     accumulated text the model emitted before / between tool calls
+   *   - `toolCalls`     parsed tool call requests (id + name + parsed JSON args)
+   *   - `finishReason`  OpenAI finish_reason (`tool_calls` if the model wants tools)
+   *
+   * `onTextChunk` is invoked for every content delta — callers stream this
+   * straight to the user as `chat:token` for the "narrate before act" UX.
+   *
+   * Used by `runSuperAgentV2` to combine routing + first-token streaming +
+   * tool dispatch into a single LLM round-trip.
+   */
+  async chatStreamWithTools(args: {
+    messages: Array<Record<string, unknown>>;
+    tools: ReadonlyArray<unknown>;
+    onTextChunk: (delta: string) => void;
+    maxTokens?: number;
+    modelOverride?: string;
+    abortSignal?: AbortSignal;
+  }): Promise<{
+    narration: string;
+    toolCalls: Array<{ id: string; name: string; arguments: string }>;
+    finishReason: string;
+    rawAssistantMessage: { role: 'assistant'; content: string; tool_calls?: unknown[] };
+  }> {
+    if (!this.isConfigured) {
+      throw new Error('Loka AI not configured');
+    }
+    const selectedModel = args.modelOverride?.trim() || this.model;
+    const toolsList = args.tools as unknown[];
+    const hasTools = Array.isArray(toolsList) && toolsList.length > 0;
+    const requestBody: Record<string, unknown> = {
+      model: selectedModel,
+      messages: args.messages,
+      max_tokens: args.maxTokens || 4096,
+      temperature: 0.5,
+      stream: true,
+    };
+    if (hasTools) {
+      requestBody.tools = toolsList;
+      requestBody.tool_choice = 'auto';
+      requestBody.parallel_tool_calls = true;
+    }
+    console.log(
+      `[AI chatStreamWithTools] model=${selectedModel}, tools=${(args.tools as unknown[]).length}, messages=${args.messages.length}, max_tokens=${requestBody.max_tokens}`,
+    );
+
+    const fetchStart = Date.now();
+    const response = await fetch(this.baseUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+        // Same gzip workaround as chatStream — avoids undici inflate batching.
+        'Accept-Encoding': 'identity',
+      },
+      body: JSON.stringify(requestBody),
+      signal: args.abortSignal,
+    });
+    const fetchHeadersMs = Date.now() - fetchStart;
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[AI chatStreamWithTools] ERROR ${response.status}: ${errorText.slice(0, 500)}`);
+      throw new Error(`AI API error (${response.status}): ${errorText.slice(0, 200)}`);
+    }
+    console.log(
+      `[AI chatStreamWithTools] Response OK, status=${response.status}, http_headers_ms=${fetchHeadersMs}, content-encoding=${response.headers.get('content-encoding') || 'none'}`,
+    );
+
+    // Streaming parse with tool_call fragment merging.
+    // OpenAI streams tool_calls as a sequence of partial deltas keyed by index;
+    // arguments come as a JSON-string concatenated piece-by-piece.
+    type ToolCallAccum = { id: string; name: string; arguments: string };
+    const toolCallsByIndex = new Map<number, ToolCallAccum>();
+    let narration = '';
+    let finishReason = 'stop';
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith('data: ')) continue;
+        const sse = line.slice(6).trim();
+        if (sse === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(sse);
+          const choice = parsed?.choices?.[0];
+          if (!choice) continue;
+          const delta = choice.delta || {};
+          if (typeof delta.content === 'string' && delta.content.length > 0) {
+            narration += delta.content;
+            try {
+              args.onTextChunk(delta.content);
+            } catch {
+              /* swallow user callback errors */
+            }
+          }
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tcChunk of delta.tool_calls) {
+              const idx = typeof tcChunk.index === 'number' ? tcChunk.index : 0;
+              let accum = toolCallsByIndex.get(idx);
+              if (!accum) {
+                accum = { id: '', name: '', arguments: '' };
+                toolCallsByIndex.set(idx, accum);
+              }
+              if (tcChunk.id) accum.id = tcChunk.id;
+              if (tcChunk.function?.name) accum.name = tcChunk.function.name;
+              if (typeof tcChunk.function?.arguments === 'string') {
+                accum.arguments += tcChunk.function.arguments;
+              }
+            }
+          }
+          if (choice.finish_reason) {
+            finishReason = choice.finish_reason;
+          }
+        } catch {
+          /* malformed line — skip */
+        }
+      }
+    }
+
+    const toolCalls = [...toolCallsByIndex.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, v]) => v)
+      .filter((tc) => tc.name);
+
+    const rawAssistantMessage: {
+      role: 'assistant';
+      content: string;
+      tool_calls?: unknown[];
+    } = {
+      role: 'assistant',
+      content: narration,
+    };
+    if (toolCalls.length > 0) {
+      rawAssistantMessage.tool_calls = toolCalls.map((tc) => ({
+        id: tc.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+        type: 'function',
+        function: { name: tc.name, arguments: tc.arguments || '{}' },
+      }));
+    }
+
+    console.log(
+      `[AI chatStreamWithTools] done finish_reason=${finishReason} narration_len=${narration.length} tool_calls=${toolCalls.length} (${toolCalls.map((t) => t.name).join(',')})`,
+    );
+
+    return { narration, toolCalls, finishReason, rawAssistantMessage };
+  }
+
   /** Streaming chat — returns a ReadableStream for SSE */
   async chatStream(messages: ChatMessage[], agentId?: string, assetContext?: AssetContext, maxTokens?: number, modelOverride?: string): Promise<ReadableStream<Uint8Array>> {
     if (!this.isConfigured) {
@@ -489,14 +651,27 @@ ${userText || '(empty)'}`;
       };
     console.log(`[AI chatStream] model=${selectedModel}, max_tokens=${requestBody.max_tokens}, messages=${apiMessages.length}, inputLen=${JSON.stringify(apiMessages).length}`);
 
+    const useRawHttps = process.env.RAW_HTTPS_STREAM === '1';
+    if (useRawHttps) {
+      console.log(`[AI chatStream] transport=node:https (RAW_HTTPS_STREAM=1)`);
+      return this.chatStreamRaw(JSON.stringify(requestBody));
+    }
+
+    const fetchStart = Date.now();
     const response = await fetch(this.baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
+        // Disable gzip/br compression on the SSE stream. With compression
+        // enabled, undici's inflate stage buffers ~10-15 deltas before
+        // yielding to reader.read(), producing 1.5-2s stalls even though
+        // the upstream is sending one delta every ~125ms (verified via curl).
+        'Accept-Encoding': 'identity',
       },
       body: JSON.stringify(requestBody),
     });
+    const fetchHeadersMs = Date.now() - fetchStart;
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -504,8 +679,101 @@ ${userText || '(empty)'}`;
       throw new Error(`AI API error (${response.status}): ${errorText}`);
     }
 
-    console.log(`[AI chatStream] Response OK, status=${response.status}`);
+    // Diagnostic: log key response headers so we can tell whether the upstream
+    // honored our Accept-Encoding: identity request, and what HTTP version /
+    // transport it picked. These three together usually pinpoint where SSE
+    // batching comes from.
+    const respEncoding = response.headers.get('content-encoding') || 'none';
+    const respTransfer = response.headers.get('transfer-encoding') || 'none';
+    const respCacheCtl = response.headers.get('cache-control') || 'none';
+    const respServer = response.headers.get('server') || 'none';
+    console.log(
+      `[AI chatStream] Response OK, status=${response.status}, http_headers_ms=${fetchHeadersMs}, ` +
+        `content-encoding=${respEncoding}, transfer-encoding=${respTransfer}, server=${respServer}, cache-control=${respCacheCtl}`,
+    );
     return response.body!;
+  }
+
+  /**
+   * Raw node:https streaming path (opt-in via RAW_HTTPS_STREAM=1). Bypasses
+   * undici (Node's built-in fetch) and yields chunks directly from the TCP
+   * socket via res 'data' events. Use this when fetch's stream layer batches
+   * SSE deltas into 1-2s bursts despite Accept-Encoding: identity.
+   */
+  private chatStreamRaw(body: string): Promise<ReadableStream<Uint8Array>> {
+    return new Promise((resolve, reject) => {
+      const url = new NodeURL(this.baseUrl);
+      const isHttps = url.protocol === 'https:';
+      const transport = isHttps ? https : http;
+      const fetchStart = Date.now();
+      const req = transport.request(
+        {
+          method: 'POST',
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname + url.search,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Accept': 'text/event-stream',
+            'Accept-Encoding': 'identity',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          const fetchHeadersMs = Date.now() - fetchStart;
+          const respEncoding = (res.headers['content-encoding'] as string) || 'none';
+          const respTransfer = (res.headers['transfer-encoding'] as string) || 'none';
+          const respCacheCtl = (res.headers['cache-control'] as string) || 'none';
+          const respServer = (res.headers['server'] as string) || 'none';
+          console.log(
+            `[AI chatStream] Response OK, status=${res.statusCode}, http_headers_ms=${fetchHeadersMs}, ` +
+              `content-encoding=${respEncoding}, transfer-encoding=${respTransfer}, server=${respServer}, cache-control=${respCacheCtl}, transport=node:https`,
+          );
+
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+              const errText = Buffer.concat(chunks).toString('utf8').slice(0, 500);
+              console.error(`[AI chatStream] ERROR ${res.statusCode}: ${errText}`);
+              reject(new Error(`AI API error (${res.statusCode}): ${errText}`));
+            });
+            return;
+          }
+
+          // Disable Nagle on the underlying socket so small writes from the
+          // remote side aren't held back by the local TCP stack.
+          if (res.socket && 'setNoDelay' in res.socket && typeof (res.socket as any).setNoDelay === 'function') {
+            (res.socket as any).setNoDelay(true);
+          }
+
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              res.on('data', (chunk: Buffer) => {
+                controller.enqueue(new Uint8Array(chunk));
+              });
+              res.on('end', () => {
+                try { controller.close(); } catch { /* already closed */ }
+              });
+              res.on('error', (err) => {
+                try { controller.error(err); } catch { /* already errored */ }
+              });
+            },
+            cancel() {
+              try { res.destroy(); } catch { /* noop */ }
+            },
+          });
+          resolve(stream);
+        },
+      );
+      req.on('error', (err) => {
+        console.error(`[AI chatStream] node:https request error:`, err.message);
+        reject(err);
+      });
+      req.write(body);
+      req.end();
+    });
   }
 
   /**

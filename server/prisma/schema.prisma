@@ -50,6 +50,8 @@ model User {
   tradeOrders          TradeOrder[]
   transactions         Transaction[]
   subscription         Subscription?
+  memories             UserMemory[]
+  profile              UserProfile?
 
   @@index([email])
   @@index([walletAddress])
@@ -362,6 +364,55 @@ model ChatMessage {
   @@index([userId])
   @@index([userId, sessionId])
   @@index([agentId])
+  // Phase 2.2 — full-text search over message content. The actual GIN
+  // index uses Postgres `pg_trgm` operators which Prisma can't express
+  // natively; the migration SQL adds it manually.
+}
+
+// Phase 2.1.5 — Implicit behavioral profile per user.
+// Aggregates META-level signals (direction bias / domain / risk appetite)
+// from query patterns over time. Deliberately does NOT track per-asset
+// interest — that level of granularity pollutes specific queries (e.g.
+// asking about BTC shouldn't pull in past SOL/ETH context). Surfaces only
+// when confidence threshold is met (≥3 same-type signals).
+model UserProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  longCount       Int      @default(0)
+  shortCount      Int      @default(0)
+  cryptoQueries   Int      @default(0)
+  equityQueries   Int      @default(0)
+  highRiskQueries Int      @default(0)
+  lowRiskQueries  Int      @default(0)
+  totalTurns      Int      @default(0)
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Phase 2.1 — Persistent cross-session memory per user.
+// The agent calls the `remember` tool to save preferences / holdings /
+// strategy notes here; the next user message is enriched with relevant
+// memories before going to the synthesis LLM. Strict per-user isolation
+// is guaranteed by the FK + the index ordering (queries always start with
+// userId, so user A can never see user B's notes).
+model UserMemory {
+  id         String   @id @default(cuid())
+  userId     String
+  content    String   @db.Text
+  /// Comma-separated tags (e.g. "preference,risk,btc"). Stored as a single
+  /// string instead of String[] so MySQL-compatible Postgres deployments
+  /// don't trip on array types — tags are matched with substring search.
+  tags       String   @default("")
+  /// 0-100. Higher importance memories surface first in recall.
+  importance Int      @default(50)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, importance(sort: Desc), createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 // ─── Shared chat links ────────────────────────────────────────────────

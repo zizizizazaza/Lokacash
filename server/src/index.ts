@@ -8,6 +8,10 @@ import { startPriceService, stopPriceService } from './services/price.service.js
 import { startTrustMRRService, stopTrustMRRService } from './services/trustmrr.service.js';
 import { startStripeRevenueService, stopStripeRevenueService } from './services/stripe-revenue.service.js';
 import { prewarmJwks } from './middleware/auth.js';
+// Force skill scan at boot so the "[skills] loaded ..." log appears on
+// startup. Without this import, the SkillsLoader module wouldn't be
+// evaluated until the first SuperAgent v2 turn (which dynamic-imports it).
+import './services/skillsLoader.service.js';
 
 const server = createServer(app);
 

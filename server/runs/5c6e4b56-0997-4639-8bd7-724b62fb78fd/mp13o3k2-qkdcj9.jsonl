@@ -1,0 +1,9 @@
+{"ts":"2026-05-11T11:09:57.890Z","type":"turn_start","userId":"cmmn8oiqb022f0dky01c0ls1p","sessionId":"5c6e4b56-0997-4639-8bd7-724b62fb78fd","userMessagePreview":"sui适合开多吗现在？"}
+{"ts":"2026-05-11T11:09:57.905Z","type":"first_pass_start","tools":7,"historyMessages":1,"hasMemoryRecall":false,"hasImages":false,"imageCount":0,"firstPassModel":"default"}
+{"ts":"2026-05-11T11:10:04.332Z","type":"first_pass_done","narrationLen":42,"toolCalls":[{"name":"web3_token_analysis","argsLen":63},{"name":"web_research","argsLen":56}]}
+{"ts":"2026-05-11T11:10:04.333Z","type":"tool_call_start","name":"web3_token_analysis","args":{"query":"SUI token price derivatives funding rate sentiment"}}
+{"ts":"2026-05-11T11:10:04.333Z","type":"tool_call_start","name":"web_research","args":{"query":"SUI token current market sentiment and news"}}
+{"ts":"2026-05-11T11:10:08.765Z","type":"tool_call_done","name":"web_research","ok":true,"durationMs":4432,"contentLen":6422,"sourcesCount":14}
+{"ts":"2026-05-11T11:10:31.602Z","type":"tool_call_done","name":"web3_token_analysis","ok":true,"durationMs":27269,"contentLen":1366,"sourcesCount":1}
+{"ts":"2026-05-11T11:10:31.602Z","type":"synthesis_start","promptKind":"crypto","toolsPhaseDurationS":27}
+{"ts":"2026-05-11T11:11:36.671Z","type":"end","status":"success","stage":"completed","answerLen":3789,"sourcesCount":15,"toolsPhaseDurationS":27,"promptKind":"crypto"}
