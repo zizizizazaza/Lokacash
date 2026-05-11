@@ -123,6 +123,7 @@ type CoinDetail = {
     circulating_supply?: number;
     total_supply?: number | null;
     max_supply?: number | null;
+    sparkline_7d?: { price?: number[] };
   };
   community_data?: {
     twitter_followers?: number | null;
@@ -189,6 +190,7 @@ type TokenSnapshot = {
     totalSupply?: number;
     maxSupply?: number;
     circulatingPctOfMax?: number;
+    sparkline7d?: number[];
   };
   community: {
     twitterFollowers?: number;
@@ -896,7 +898,7 @@ async function fetchCoinDetail(geckoId: string): Promise<CoinDetail | null> {
     const data = (await fetchRestJson(
       `/coins/${encodeURIComponent(
         geckoId,
-      )}?localization=false&tickers=true&market_data=true&community_data=true&developer_data=true&sparkline=false`,
+      )}?localization=false&tickers=true&market_data=true&community_data=true&developer_data=true&sparkline=true`,
     )) as CoinDetail;
     coinDetailCache.set(geckoId, { data, at: Date.now() });
     // Best-effort eviction: cap the map at ~50 entries so a long-running
@@ -1023,6 +1025,11 @@ function buildTokenSnapshot(detail: CoinDetail | null, fallbackRow?: CoinMarkets
       totalSupply: md.total_supply ?? fallbackRow?.total_supply ?? undefined,
       maxSupply: max,
       circulatingPctOfMax: circPct,
+      // CoinGecko's `/coins/:id?sparkline=true` returns `market_data.sparkline_7d.price`
+      // (168 hourly points). NOT `sparkline_in_7d` — that's the markets endpoint's field name.
+      sparkline7d: Array.isArray(md.sparkline_7d?.price) && md.sparkline_7d!.price!.length >= 2
+        ? md.sparkline_7d!.price!.filter((p) => Number.isFinite(p))
+        : undefined,
     },
     community: {
       twitterFollowers: cd.twitter_followers ?? undefined,

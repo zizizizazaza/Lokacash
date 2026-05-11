@@ -1566,6 +1566,101 @@ Text: "${query}"`;
       const sinceRequestStart = () => Date.now() - requestStartedAt;
       const asSeconds = (ms: number) => (ms / 1000).toFixed(3);
 
+      // ── Auto-mode quota for v2 path ──────────────────────────────────
+      // v2 doesn't run evaluateRouting, so the v1 Auto cascade further
+      // down (line ~1970) is unreachable when v2 takes over. Charge the
+      // Fast bucket here before the v2 gate. Two cases defer back to v1:
+      //   (a) the query explicitly asks for Roundtable-style depth
+      //       (comparison / "deep dive" / debate) — v1 cascade picks
+      //       Roundtable and runs the multi-agent path v2 doesn't have.
+      //   (b) Fast bucket is empty — v1 cascade will try Roundtable next
+      //       and, if also empty, degrade to lite mode + quota_degraded.
+      let v2AutoEligible = true;
+      if (
+        !isGuest &&
+        data.mode === 'auto' &&
+        process.env.SUPERAGENT_FUNCTION_CALLING === '1'
+      ) {
+        const desiredTier = decideAutoMode(
+          { isSimpleChat: false, queryType: 'general' },
+          userContent,
+        );
+        if (desiredTier === 'roundtable') {
+          v2AutoEligible = false;
+          console.log(
+            `[agent:chat:v2] Auto→roundtable trigger detected, deferring to v1 cascade sessionId=${sessionId}`,
+          );
+        } else {
+          try {
+            const primary = await consumeQuota(userId, 'fast');
+            if (primary.allowed) {
+              console.log(
+                `[agent:chat:v2] Auto→fast user=${userId} remaining=${primary.remaining}`,
+              );
+            } else {
+              v2AutoEligible = false;
+              console.log(
+                `[agent:chat:v2] Auto→fast exhausted user=${userId}, deferring to v1 cascade`,
+              );
+            }
+          } catch (err) {
+            v2AutoEligible = false;
+            console.error(
+              '[agent:chat:v2] Auto quota check failed, deferring to v1:',
+              (err as Error).message,
+            );
+          }
+        }
+      }
+
+      // ══════════════════════════════════════════════════════════════════
+      //   SuperAgent v2 — native function calling orchestrator
+      //   Activate via env: SUPERAGENT_FUNCTION_CALLING=1
+      //   Falls back to v1 only for: roundtable mode and unhandled errors.
+      //   Image inputs are handled inside v2 via Claude Sonnet 4.6 vision.
+      // ══════════════════════════════════════════════════════════════════
+      if (
+        process.env.SUPERAGENT_FUNCTION_CALLING === '1' &&
+        data.mode !== 'roundtable' &&
+        (data.mode !== 'auto' || v2AutoEligible)
+      ) {
+        try {
+          const { runSuperAgentV2 } = await import('./superAgentV2.js');
+          const startedAt = Date.now();
+          const v2Result = await runSuperAgentV2({
+            userId,
+            sessionId,
+            userContent,
+            originalUserContent,
+            isGuest,
+            hidden: data.hidden,
+            socket,
+            emitToUser: (event: string, payload: unknown) => emitToUser(userId, event, payload),
+            emitter,
+            abortController,
+            domain: data.domain,
+            assetHint: data.assetHint,
+            images: hasImages ? images : undefined,
+            aiService,
+          });
+          activeChatSessions.delete(sessionId);
+          chatSessionStartTimes.delete(sessionId);
+          chatAbortControllers.delete(sessionId);
+          console.log(
+            `[agent:chat:v2] status=${v2Result.status} elapsed_s=${asSeconds(Date.now() - startedAt)} sessionId=${sessionId}`,
+          );
+          return;
+        } catch (v2Err) {
+          // Failure mode: log loudly and fall through to v1 path so the user
+          // still gets an answer. This makes the env flag safe to enable in
+          // production without risking a regression — bugs degrade silently
+          // to the proven legacy path.
+          console.error(
+            `[agent:chat:v2] FAILED, falling through to v1: ${(v2Err as Error).message}`,
+          );
+        }
+      }
+
       // ══════════════════════════════════════════════════════════════════
       //   Aegean Deep-Dive early gate (feature-flag gated; OFF by default)
       //   See: docs/aegean-deep-analysis-migration.md
@@ -2445,6 +2540,10 @@ Text: "${query}"`;
       let finalAnalysisStages: any[] = [];
       let finalPanelists: any[] = [];
       let savedQuoteCard: any = null;
+      // Sparkline7d for stock quote cards — populated when get_daily_history completes.
+      // Decoupled from savedQuoteCard so daily_history can arrive either before
+      // or after the realtime_quote → quote card emission.
+      let savedSparkline7d: number[] | undefined;
       let savedTokenCard: any = null;
       let savedXProfileCard: Record<string, unknown> | null = null;
 
@@ -2890,6 +2989,25 @@ Text: "${query}"`;
                           raw = { rawText };
                         }
                       }
+                      // Extract sparkline from daily history BEFORE trimming.
+                      // get_daily_history returns { data: [{close, ...}, ...] }
+                      // — keep the last ~30 closes so QuoteCard can render a
+                      // sparkline matching the crypto TokenCard treatment.
+                      if (step.tool === 'get_daily_history' && raw && typeof raw === 'object' && Array.isArray((raw as any).data)) {
+                        const closes = ((raw as any).data as any[])
+                          .map((row) => Number(row?.close ?? row?.Close))
+                          .filter((n) => Number.isFinite(n));
+                        if (closes.length >= 2) {
+                          savedSparkline7d = closes.slice(-30);
+                          // Re-emit the quote card with sparkline if it was
+                          // already sent before this tool completed.
+                          if (savedQuoteCard) {
+                            const updated = { ...savedQuoteCard, sparkline7d: savedSparkline7d };
+                            savedQuoteCard = updated;
+                            emitToUser(userId, 'agent:chat:quote', { sessionId, quote: updated });
+                          }
+                        }
+                      }
                       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
                         const trimmed: Record<string, any> = {};
                         for (const [k, v] of Object.entries(raw as Record<string, any>)) {
@@ -3050,6 +3168,10 @@ Text: "${query}"`;
                           pe: q.pe != null ? Number(q.pe).toFixed(2) : undefined,
                           pb: q.pb != null ? Number(q.pb).toFixed(2) : undefined,
                           turnover: q.turnover != null ? Number(q.turnover).toFixed(2) + '%' : undefined,
+                          // If get_daily_history already completed, include its close-price
+                          // sparkline so the card renders the chart on first paint. Otherwise
+                          // a follow-up re-emit will attach it once history completes.
+                          sparkline7d: savedSparkline7d,
                       };
                       savedQuoteCard = quotePayload;
                       // Validate: only emit the quote card if the stock name or symbol

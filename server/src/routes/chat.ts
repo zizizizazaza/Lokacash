@@ -6,6 +6,12 @@ import { authRequired, authOptional, type AuthRequest } from '../middleware/auth
 import { z } from 'zod';
 import { LokaAIService, type ChatMessage } from '../services/ai.service.js';
 import { config } from '../config.js';
+import { searchUserMessages, searchUserSessions } from '../services/sessionSearch.service.js';
+import {
+  listUserMemories,
+  saveMemory,
+  deleteMemory,
+} from '../services/memory.service.js';
 
 const router = Router();
 const aiService = new LokaAIService();
@@ -407,6 +413,79 @@ router.post('/transcribe', authRequired, upload.single('audio'), async (req: Aut
 
     const result = await response.json() as { text?: string };
     res.json({ text: result.text || '' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Phase 2.2 — Per-user FTS over chat history ───────────────────────
+//
+// GET /chat/search?q=...&sessionId=...&limit=...
+//   Returns up to `limit` (≤50) past messages where `content` matched the
+//   query via Postgres pg_trgm similarity. Always scoped to the calling
+//   user — no cross-user leakage possible.
+router.get('/search', authRequired, async (req: AuthRequest, res, next) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'auth_required' });
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) return res.json({ hits: [], sessions: [] });
+    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit ?? '20'), 10) || 20));
+    const sessionId = req.query.sessionId ? String(req.query.sessionId) : undefined;
+    const wantSessions = String(req.query.groupBySession || '') === '1';
+    if (wantSessions && !sessionId) {
+      const sessions = await searchUserSessions(userId, q, limit);
+      return res.json({ sessions });
+    }
+    const hits = await searchUserMessages(userId, q, { limit, sessionId });
+    return res.json({ hits });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Phase 2.1 — User memory CRUD (for the Settings UI) ─────────────────
+router.get('/memories', authRequired, async (req: AuthRequest, res, next) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'auth_required' });
+    const limit = Math.max(1, Math.min(500, parseInt(String(req.query.limit ?? '100'), 10) || 100));
+    const memories = await listUserMemories(userId, limit);
+    return res.json({ memories });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/memories', authRequired, async (req: AuthRequest, res, next) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'auth_required' });
+    const schema = z.object({
+      content: z.string().min(2).max(2000),
+      tags: z.array(z.string()).optional(),
+      importance: z.number().int().min(0).max(100).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.format() });
+    const saved = await saveMemory({
+      userId,
+      content: parsed.data.content,
+      tags: parsed.data.tags,
+      importance: parsed.data.importance,
+    });
+    return res.json({ memory: saved });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/memories/:id', authRequired, async (req: AuthRequest, res, next) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'auth_required' });
+    const ok = await deleteMemory(userId, String(req.params.id));
+    return res.json({ ok });
   } catch (err) {
     next(err);
   }

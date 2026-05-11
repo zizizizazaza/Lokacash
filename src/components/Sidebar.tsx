@@ -6,6 +6,7 @@ import { navItems, RECENTS } from '../constants';
 import { api } from '../services/api';
 import { socket } from '../services/socket';
 import PlanUpgradeEntry from './PlanUpgradeEntry';
+import { ChatSearchPanel } from './ChatSearchPanel';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -337,6 +338,7 @@ export const Sidebar: React.FC<{
         <div className="px-3 flex-1 overflow-y-auto min-h-0">
           {(isLoggedIn || !privyReady) && (
             <>
+              {isLoggedIn && <ChatSearchPanel onCloseMobileDrawer={onCloseMobileDrawer} />}
               <p className="px-2 pb-2 text-[11px] font-medium text-gray-400 select-none">Recents</p>
               {!privyReady || (isLoadingConversations && conversations.length === 0) ? (
                 <RecentsSkeleton />
@@ -484,6 +486,7 @@ export const Sidebar: React.FC<{
         <div className="px-3 flex-1 overflow-y-auto min-h-0">
           {(isLoggedIn || !privyReady) && (
             <>
+              {isLoggedIn && <ChatSearchPanel isDark={isDark} onCloseMobileDrawer={onCloseMobileDrawer} />}
               <p className={`px-2 pb-2 text-[11px] font-medium ${textMuted} select-none`}>Recents</p>
               {!privyReady || (isLoadingConversations && conversations.length === 0) ? (
                 <RecentsSkeleton isDark={isDark} />
