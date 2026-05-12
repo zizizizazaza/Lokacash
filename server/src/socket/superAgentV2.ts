@@ -131,6 +131,45 @@ You have 7 tools. You can call multiple in parallel:
 - Crypto tokens (BTC/ETH/SOL/SAHARA/HYPE/PEPE/etc.) → **web3_token_analysis**, NEVER stock_analysis.
 - Stocks (AAPL/TSLA/NVDA/BABA/600519.SH/700.HK) → **stock_analysis**, NEVER web3_token_analysis.
 
+### Multi-turn follow-ups — DO NOT TRUST HISTORY FOR FRESH DATA (applies to ALL asset classes)
+
+When this is a follow-up turn (history contains prior assistant messages), the previous turn's data is STALE the moment it was written. This rule applies **equally to crypto tokens, stocks (US / HK / A-share), macro indicators, and news / sentiment** — every category. Past assistant messages will be prefixed with a relative-age tag (\`[12 小时前]\` / \`[12h ago]\` / \`[just now]\`) — USE this tag to judge freshness.
+
+**Hard rules — must call the appropriate tool, NO EXCEPTIONS:**
+
+1. **Different asset than the previous turn → tools.** Previous turn's data covers a DIFFERENT asset; you have ZERO live data on the new one. Applies in BOTH directions across asset classes:
+   - Previous turn was SUI (crypto), now user asks BTC/SOL/ETH (crypto) → call \`web3_token_analysis\` for each + \`web_research\`.
+   - Previous turn was NVDA (US stock), now user asks TSLA / AAPL → call \`stock_analysis\` + \`web_research\`.
+   - Previous turn was 长电科技 (A-share), now user asks 长川科技 / 中芯国际 → call \`stock_analysis\` + \`web_research\`.
+   - Previous turn was about BTC (crypto), now user asks about NVDA (stock) — completely different domain → call \`stock_analysis\` + \`web_research\`. NEVER reuse crypto context for stocks or vice versa.
+   - NEVER answer asset-specific questions from training-data prices.
+
+2. **Same asset, but the previous turn's tag is older than the freshness window for that asset class → tools.** Even if the user repeats the EXACT same question.
+   - **Crypto (BTC/ETH/SOL/SUI/SAHARA/etc.)** — freshness window is **5 minutes**. Crypto can move 5–15% in an hour. If the tag says anything beyond \`[just now]\` / \`[1-4 分钟前]\` / \`[1-4m ago]\`, re-call \`web3_token_analysis\`.
+     - Example: last night SOL at $145 (tag \`[10 小时前]\`); user asks "SOL 现在怎么样" / "SOL 还能买吗" today → **MUST re-call**. Price may now be $158 or $130; answering with $145 would be wrong.
+   - **US / HK stocks intraday** — freshness window is **30 minutes**. If the tag is \`[30+ 分钟前]\` / \`[30m+ ago]\` or older, re-call \`stock_analysis\`.
+     - Example: last hour you analyzed NVDA at $487 (tag \`[45 分钟前]\`); user asks "NVDA 现在多少" → **MUST re-call**.
+   - **Stocks across a session boundary** — if the tag crosses a trading day (\`[12 小时前]\` / \`[1 天前]\` or more), prices and after-hours news may have moved materially → always re-call.
+     - Example: yesterday you analyzed TSLA at $245 (tag \`[18 小时前]\`); user asks today "TSLA 还能买吗" → **MUST re-call** — earnings, news, gap moves could have happened overnight.
+   - **A-share intraday** — same 30-minute window as US; same session-boundary rule. Plus: 北向资金 / 涨跌停 / 资金流向 are even more time-sensitive than price → call \`stock_analysis\`.
+   - **News / sentiment** ("latest news on X" / "X 最新消息" / "市场对 Y 怎么看") — freshness window is **15 minutes**. Always re-call \`web_research\`. News by definition is "what just changed."
+
+3. **Any "now / 现在 / latest / 今天 / 这周 / 最新" framing → tools.** Explicit freshness request, regardless of asset class.
+
+4. **Any directional decision question → tools.** Crypto: "long or short / 开多还是开空 / 该不该抄底". Stocks: "适合买入吗 / 现在适合加仓吗 / should I buy / hold or sell". A-share: "高位是否撤出 / 该追还是该跑". These all need CURRENT derivatives / earnings revisions / news → tools always.
+
+5. **Catalyst / event-driven follow-ups → tools.** "earnings just dropped / 业绩公布了 / FOMC 刚结束 / 鲍威尔讲话后 / unlock 之后 / airdrop 之后" — the event itself is fresh state by definition → call the matching data tool + \`web_research\` for the actual statements.
+
+**Only-skip cases (pure clarification of the PAST reply, no new market state implied):**
+   - "刚才那个 RSI 数怎么算的？"
+   - "再解释一下你说的对称三角形整理是什么意思"
+   - "把刚才那个表格用英文重写一下"
+   - "上面说的 PE 86 是动态还是 TTM？"
+   - "你刚才提到的支撑位再列得详细点"
+These ask about the PRIOR reply's structure / methodology / language — not about current market state.
+
+**Tie-breaker:** if you're uncertain whether to call tools on a follow-up, ERR ON THE SIDE OF CALLING THEM. A 30s tool call producing real numbers is much better UX than a 5s hallucinated answer that misprices an asset by 10-30%. Applies equally to crypto, stocks, and macro.
+
 ### Web_research pairing — DEFAULT ON
 
 **Whenever you call a data tool that touches a market or asset, you MUST also call web_research in parallel.** Data without sentiment/news context produces a half-blind report. Specifically:
@@ -184,6 +223,16 @@ For **reference / generic images**:
 - Default: NO asset tool calls. The image is the source material.
 - May call \`web_research\` only if the user asks for current external context ("is this product still active", "did this launch").
 - May call \`load_skill\` if user wants the diagram/quote analyzed through a framework.
+
+### IMAGE NARRATION CONTRACT (CRITICAL — read every time you see an image)
+
+Even when you decide NOT to call any tools (reference image, or you already have everything you need from the image), you MUST still keep this first-pass response to a SHORT acknowledgement only. The full analysis is written by a SECOND LLM pass that ALSO receives the image and the user's question, with a 16k token budget and the right structural prompts (Quote Snapshot / sections / follow-ups).
+
+- **HARD LIMIT for image-related first-pass output: ≤ 80 characters (Chinese) / ≤ 40 words (English).** Same as the no-image case.
+- Example (Chinese): "我来分析这张图。" or "我看到这是一张架构图，让我来解析一下。"
+- Example (English): "Let me break down what's in this image." or "Looking at this chart — let me unpack the key takeaways."
+- **DO NOT** write a full analysis, tables, headings, multi-paragraph commentary, or follow-up questions in the first pass — even though you can see the image clearly and feel ready to answer. That output will be DUPLICATED with the synthesis pass and produce a doubled response. **This has happened in production — do not make this mistake.**
+- The first pass's job for images is ONLY: (1) acknowledge in one short sentence, (2) decide tool calls (often zero for reference images). The synthesis pass handles depth.
 
 ### CRITICAL output rules
 
@@ -258,14 +307,19 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
 
   // ── 1. Build the first-pass message list. We include a small history
   //    window (8 turns) so the model can keep multi-turn context.
+  //    Also pull createdAt so we can prefix old assistant replies with a
+  //    relative-time hint ("[12 小时前 / 12h ago]"). Without this hint the
+  //    model can't tell whether the previous turn's data is fresh enough to
+  //    skip a re-fetch, and tends to assume "I just answered this, no need
+  //    to call tools again". For crypto, even 1 hour is too old.
   const recent = await prisma.chatMessage
     .findMany({
       where: { userId, sessionId },
       orderBy: { createdAt: 'asc' },
       take: 8,
-      select: { role: true, content: true },
+      select: { role: true, content: true, createdAt: true },
     })
-    .catch(() => [] as Array<{ role: string; content: string }>);
+    .catch(() => [] as Array<{ role: string; content: string; createdAt: Date }>);
 
   // ── Phase 2.1 recall: prepend relevant cross-session memories to the user
   //    message so the LLM sees them naturally as context. Guests get an empty
@@ -336,12 +390,51 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     userMessageContent = enrichedUserContent;
   }
 
+  // Truncate past assistant messages to a short snippet (~500 chars) before
+  // sending to the FIRST-PASS / routing LLM. Why: a full 8000-char synthesis
+  // report from the previous turn makes the routing model pattern-match into
+  // "I should just answer directly" mode — it sees a long structured analysis
+  // in history and writes another one WITHOUT calling tools, fabricating
+  // prices from training data (e.g. "BTC is at $62,150" when it's actually
+  // $80k+). Keeping the snippet short preserves multi-turn context (the model
+  // still knows what was discussed) but breaks the pattern-match into "I have
+  // enough data already".
+  //
+  // Past USER messages are kept verbatim (they're short and they're what the
+  // model needs to understand the conversation). The synthesis pass gets a
+  // separate, fuller history block built downstream.
+  const FIRST_PASS_ASSISTANT_CAP = 500;
+  const nowMs = Date.now();
+  const formatRelativeAge = (createdAt: Date | undefined): string => {
+    if (!createdAt) return '';
+    const ageMs = Math.max(0, nowMs - new Date(createdAt).getTime());
+    const ageMin = Math.floor(ageMs / 60_000);
+    if (ageMin < 1) return isZh ? '[刚刚] ' : '[just now] ';
+    if (ageMin < 60) return isZh ? `[${ageMin} 分钟前] ` : `[${ageMin}m ago] `;
+    const ageH = Math.floor(ageMin / 60);
+    if (ageH < 24) return isZh ? `[${ageH} 小时前] ` : `[${ageH}h ago] `;
+    const ageD = Math.floor(ageH / 24);
+    return isZh ? `[${ageD} 天前] ` : `[${ageD}d ago] `;
+  };
+  const truncatedRecent = recent.map((m) => {
+    const agePrefix = formatRelativeAge((m as any).createdAt);
+    let content = m.content;
+    if (m.role === 'assistant' && content.length > FIRST_PASS_ASSISTANT_CAP) {
+      content =
+        content.slice(0, FIRST_PASS_ASSISTANT_CAP) +
+        (isZh
+          ? '\n\n[…前一轮的完整报告已省略；如需新数据请重新调用工具…]'
+          : '\n\n[…prior turn\'s full report omitted; re-call tools for fresh data…]');
+    }
+    return {
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: agePrefix ? `${agePrefix}${content}` : content,
+    };
+  });
+
   const messages: Array<Record<string, unknown>> = [
     { role: 'system', content: buildSystemPromptV2() },
-    ...recent.map((m) => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content,
-    })),
+    ...truncatedRecent,
     { role: 'user', content: userMessageContent },
   ];
 
@@ -709,7 +802,26 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   }
 
   // ── 6. Persist + finalise.
-  const finalContent = `${firstPass.narration}\n\n${synthFullContent}`.trim();
+  // Safety net for the image+no-tools doubling bug: when there are images and
+  // zero tool calls, the first-pass model sometimes ignores the "narration
+  // must be short" rule and writes a FULL 1500-char analysis in the narration
+  // slot. Synthesis then ALSO writes a full analysis (also seeing the image),
+  // and naive concatenation produces a duplicated response. If narration is
+  // suspiciously long (> 200 chars) and we have synthesis content, drop the
+  // narration from the final content — the synthesis version is authoritative.
+  // (We still streamed the narration live, so the user saw an instant preview;
+  // we just don't persist the duplicated text.)
+  const narrationLooksOversized = firstPass.narration.length > 200;
+  const droppedDuplicatedNarration =
+    hasImages && firstPass.toolCalls.length === 0 && narrationLooksOversized && synthFullContent.length > 0;
+  if (droppedDuplicatedNarration) {
+    console.log(
+      `[superAgentV2] dropping oversized first-pass narration (${firstPass.narration.length} chars) to avoid duplication with synthesis (${synthFullContent.length} chars)`,
+    );
+  }
+  const finalContent = droppedDuplicatedNarration
+    ? synthFullContent.trim()
+    : `${firstPass.narration}\n\n${synthFullContent}`.trim();
 
   // Build the thinkingFlow.modules array the SuperAgentChat UI uses to render
   // the "Done · X tools · Y sources · Zs" header and the Process panel.

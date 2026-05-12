@@ -2304,16 +2304,24 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
           <table className="w-full text-[13px] text-left border-collapse">
             <thead>
               <tr style={{ background: 'linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%)', borderBottom: '1px solid #cbd5e1' }}>
-                {headerCells.map((cell, ci) => (
-                  <th
-                    key={ci}
-                    className={`px-4 py-3 text-[11.5px] font-bold uppercase tracking-[0.1em] text-slate-700 whitespace-nowrap ${
-                      numericCols[ci] ? 'text-right' : 'text-left'
-                    }`}
-                  >
-                    {parseLine(cell)}
-                  </th>
-                ))}
+                {headerCells.map((cell, ci) => {
+                  const isLastHeader = ci === colCount - 1;
+                  // Same alignment + shrink rule as body cells below — must
+                  // match or the header floats away from its column data.
+                  const numRightAlignH = numericCols[ci] && isLastHeader;
+                  return (
+                    <th
+                      key={ci}
+                      className={`px-4 py-3 text-[11.5px] font-bold uppercase tracking-[0.1em] text-slate-700 whitespace-nowrap ${
+                        numericCols[ci]
+                          ? numRightAlignH ? 'text-right' : 'text-left'
+                          : 'text-left'
+                      }`}
+                    >
+                      {parseLine(cell)}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -2336,21 +2344,47 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
                       const isFirstCol = ci === 0;
                       const isNum = numericCols[ci];
                       const isLastCol = ci === cells.length - 1;
+                      // Right-align numeric only when it's the LAST column.
+                      // Middle numeric columns (e.g. "层级 / 价位 / 逻辑")
+                      // get left-align so values sit close to the next text
+                      // column instead of floating to the right with a gap.
+                      const numRightAlign = isNum && isLastCol;
+                      const numLeftAlign = isNum && !isLastCol;
                       // Heuristic: short last-column text in a 3+col table = source/note
                       const isSourceCol = !isNum && isLastCol && cell.length < 40 && colCount >= 3;
+                      // Strip inline `**bold**` markdown weight so it can't
+                      // escalate above the column-level weight (otherwise
+                      // "$79,000-$80,500" in a bold numeric column renders
+                      // as font-weight: 700 + 700 → inconsistent). The cell
+                      // background owns the visual weight, not the markdown.
+                      const stripStrong = '[&_strong]:[font-weight:inherit] [&_strong]:[color:inherit]';
                       return (
                         <td
                           key={ci}
-                          className={`px-4 py-2.5 align-middle ${
+                          className={`px-4 py-2.5 align-middle ${stripStrong} ${
                             isNum
-                              ? 'text-right text-[14.5px] font-bold text-slate-900 tabular-nums whitespace-nowrap'
+                              ? `${numRightAlign ? 'text-right' : 'text-left'} text-[14px] font-semibold text-slate-900 tabular-nums whitespace-nowrap`
                               : isFirstCol
-                                ? 'text-[13px] font-semibold text-slate-800'
+                                ? 'text-[13px] font-semibold text-slate-800 whitespace-nowrap'
                                 : isSourceCol
                                   ? 'text-[11.5px] text-slate-500'
                                   : 'text-[13px] text-slate-600 leading-relaxed'
                           }`}
-                          style={isNum ? { fontFamily: TK_MONO } : undefined}
+                          style={
+                            isNum
+                              ? {
+                                  // Inter (sans) for table numerics — clean
+                                  // unslashed zeros, tabular figures for
+                                  // alignment. Avoids the "0 with diagonal
+                                  // slash" look of programmer monospace fonts
+                                  // (JetBrains Mono / Fira Code / Consolas
+                                  // all slash by default).
+                                  fontFamily: TK_SANS,
+                                  fontFeatureSettings: '"tnum" 1, "zero" 0, "ss01" 1',
+                                  letterSpacing: '-0.005em',
+                                }
+                              : undefined
+                          }
                         >
                           {parseLine(cell)}
                         </td>
