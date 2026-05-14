@@ -56,6 +56,17 @@ export class WebResearchTool extends BaseTool {
           // v2 lets the main LLM do the synthesis using the tool result, so
           // we skip the Python-side inner synthesis to save 3-5 seconds.
           skipInnerSynthesis: true,
+          // Propagate "you're queued" signals to the chat layer so the user
+          // sees a position+ETA indicator while waiting for a Python slot.
+          onQueued: (position, etaMs) => {
+            ctx.emitToUser('agent:chat:queued', {
+              sessionId: ctx.sessionId,
+              tool: 'web_research',
+              position,
+              etaMs,
+              message: `You're #${position} in queue — research backend is busy. Starting in ~${Math.round(etaMs / 1000)}s.`,
+            });
+          },
         },
       );
       summary = result.summary || '';

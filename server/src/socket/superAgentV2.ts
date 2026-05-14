@@ -46,6 +46,50 @@ import {
 } from '../services/userProfile.service.js';
 import { skillsLoader } from '../services/skillsLoader.service.js';
 
+/**
+ * Persist the assistant turn to ChatMessage. Centralised so every exit path
+ * (success / cancelled / failed) writes a row — without this helper, only
+ * the happy path persisted and any AbortError mid-stream lost the partial
+ * answer the user already saw on screen.
+ *
+ * `metadata.status` distinguishes how the turn ended:
+ *   - 'completed' — normal happy path
+ *   - 'cancelled' — user pressed Stop or upstream aborted
+ *   - 'failed'    — AI service / unexpected error (still persisted so the
+ *                   history doesn't show an orphan user message)
+ *
+ * Guests have no DB presence; hidden turns (background prefetches) are also
+ * intentionally not persisted.
+ */
+async function persistAssistantTurn(params: {
+  userId: string;
+  sessionId: string;
+  content: string;
+  isGuest: boolean;
+  hidden?: boolean;
+  metadata: Record<string, unknown>;
+}): Promise<void> {
+  const { userId, sessionId, content, isGuest, hidden, metadata } = params;
+  if (isGuest || hidden) return;
+  try {
+    await prisma.chatMessage.create({
+      data: {
+        userId,
+        sessionId,
+        role: 'assistant',
+        content,
+        agentId: 'superagent',
+        metadata: JSON.stringify(metadata),
+      },
+    });
+  } catch (e) {
+    console.warn(
+      `[superAgentV2] DB persist failed (status=${metadata.status}):`,
+      (e as Error).message,
+    );
+  }
+}
+
 interface RunSuperAgentV2Args {
   userId: string;
   sessionId: string;
@@ -80,6 +124,16 @@ interface RunSuperAgentV2Result {
   status: 'completed' | 'cancelled' | 'failed';
   finalContent: string;
   sources: SignalSearchSource[];
+  /** How many tools the routing LLM decided to call this turn. Surfaced so
+   *  the caller (socket/index.ts) can decide whether to refund the Auto-mode
+   *  Fast quota when the turn turned out to be pure chitchat
+   *  (0 tools + short reply ≈ user didn't actually use a heavy tool slot). */
+  toolCallsCount?: number;
+  /** Length of the routing LLM's direct narration (no synthesis). Used
+   *  alongside toolCallsCount to decide refund: short narration + 0 tools
+   *  = clear chitchat. Long narration + 0 tools = potential hallucination,
+   *  do not refund. */
+  routingNarrationLen?: number;
 }
 
 const SYSTEM_PROMPT_V2_BASE = `You are Loka Super Agent — a research assistant that helps investors analyze equities, crypto tokens, market sentiment, and run portfolio simulations.
@@ -96,13 +150,16 @@ NEVER mix languages within a single response. Translating a Chinese template int
 
 ## Tools
 
-You have 7 tools. You can call multiple in parallel:
+You have 10 tools. You can call multiple in parallel:
 
 **Research / data tools** (call these to gather market data for the synthesis step)
-- **stock_analysis** — for traditional equity tickers (AAPL, TSLA, NVDA, BABA, 600519.SH, 700.HK). Returns technicals + fundamentals + recommendation.
+- **stock_analysis** — for traditional equity tickers (AAPL, TSLA, NVDA, BABA, 600519.SH, 700.HK). Returns realtime quote + technicals + daily K-line.
 - **web3_token_analysis** — for cryptocurrencies (BTC, ETH, SOL, SAHARA, etc.). Returns spot price, derivatives funding, on-chain context, news sentiment.
 - **web_research** — for any news / sentiment / industry research / on-X account profiling. Pulls from Twitter/X + Web search.
 - **portfolio_simulate** — ONLY when the user explicitly asks for a "simulate / what-if / multi-investor debate" scenario.
+- **financial_report** — A-SHARE EARNINGS ONLY (6-digit Chinese tickers like 600519, 000333, 300604). Pulls 业绩预告 / 业绩快报 / 业绩报表 / 同花顺财务摘要 — multi-period revenue / net profit / margin / cash flow time-series. Call this in PARALLEL with stock_analysis whenever the user asks about A-share earnings ("业绩怎么样" / "营收" / "净利润" / "业绩预告" / "财务摘要" / "暴雷"). Do NOT call for US or HK tickers.
+- **sec_filings** — US SEC EDGAR FILINGS ONLY (US tickers like NVDA, AAPL, TSLA, GOOGL, BRK-B). Returns recent 10-K / 10-Q / 8-K / Form 4 / 13F metadata + official document URLs. Call when the user asks about US official disclosures, risk factors, MD&A, insider trading, institutional holdings ("show NVDA 10-K", "AAPL risk factors", "TSLA insider trading", "Buffett 13F"). Do NOT call for A-share or HK; the tool returns metadata + URLs, NOT full filing text — quote the URL for the user.
+- **hsgt_flow** — HK Stock Connect (沪深港通) capital flow data. Three modes: (a) \`direction=northbound\` 北向资金（mainland 买 A 股）历史；(b) \`direction=southbound\` 南向资金（mainland 买港股）历史；(c) \`direction=summary\` 4 通道当日快照。Optionally pass a 6-digit A-share \`ticker\` to get per-stock NB holdings trend (e.g. "外资在加仓茅台吗"). Call when the user asks about Stock Connect flows: "北向资金今天怎么样" / "南向资金趋势" / "外资买了多少 A 股" / "南下港股资金" / "陆股通净买入" / "外资在加仓 X 吗". A-share NB flow is a strong smart-money sentiment proxy.
 
 **Memory tools** (use opportunistically — these don't require user permission)
 - **remember** — call when the user shares a DURABLE fact about themselves (preference, holding, strategy framework, watchlist, account size). Don't call for transient questions or facts about the market. Examples: "我做现货不开杠杆" → remember it. "BTC 现在多少钱" → don't remember (transient).
@@ -130,6 +187,17 @@ You have 7 tools. You can call multiple in parallel:
 ### Asset routing
 - Crypto tokens (BTC/ETH/SOL/SAHARA/HYPE/PEPE/etc.) → **web3_token_analysis**, NEVER stock_analysis.
 - Stocks (AAPL/TSLA/NVDA/BABA/600519.SH/700.HK) → **stock_analysis**, NEVER web3_token_analysis.
+
+### Earnings / disclosure pairing (NEW — add to the parallel batch when relevant)
+- **A-share + earnings question** ("X 业绩" / "营收" / "净利润" / "业绩预告" / "财务摘要") → call **stock_analysis** + **financial_report** + **web_research** in parallel. stock_analysis gives current price; financial_report gives quarterly fundamentals; web_research gives market reaction. Skipping financial_report leaves you guessing at numbers.
+- **US stock + disclosure question** ("X 10-K" / "risk factors" / "MD&A" / "insider trading" / "Form 4" / "13F" / "going concern") → call **stock_analysis** + **sec_filings** + **web_research** in parallel. sec_filings returns official URLs + metadata; web_research surfaces media commentary on the filing.
+- **A-share question without earnings angle** ("现在涨跌怎么样") → stock_analysis + web_research only; do NOT call financial_report unnecessarily.
+- **US stock question without disclosure angle** ("NVDA 现在多少") → stock_analysis + web_research only; do NOT call sec_filings unnecessarily.
+
+### Stock Connect flow pairing
+- **A-share question + smart-money / 外资 / 北向 angle** ("X 北向加仓了吗" / "外资在买 X 吗") → call **stock_analysis** + **hsgt_flow** (with ticker arg) + **web_research** in parallel.
+- **Pure flow question without specific ticker** ("北向资金今天怎么样" / "南向资金趋势") → call **hsgt_flow** alone (with appropriate \`direction\`) + optionally **web_research** for narrative context. No need for stock_analysis when the user isn't asking about a specific stock.
+- **HK stock question + mainland appetite angle** ("南下资金还在买港股吗" / "港股通买了腾讯多少") → **hsgt_flow** (direction=southbound) + **web_research**.
 
 ### Multi-turn follow-ups — DO NOT TRUST HISTORY FOR FRESH DATA (applies to ALL asset classes)
 
@@ -169,6 +237,18 @@ When this is a follow-up turn (history contains prior assistant messages), the p
 These ask about the PRIOR reply's structure / methodology / language — not about current market state.
 
 **Tie-breaker:** if you're uncertain whether to call tools on a follow-up, ERR ON THE SIDE OF CALLING THEM. A 30s tool call producing real numbers is much better UX than a 5s hallucinated answer that misprices an asset by 10-30%. Applies equally to crypto, stocks, and macro.
+
+⚠️ **PATTERN-MATCHING TRAP — DO NOT WRITE FROM TRAINING MEMORY** (highest priority guard):
+After 2-3 detailed analyses in the same session, you may feel pattern-matched into "I should just write another detailed analysis". When the next question mentions a NEW asset symbol you haven't pulled tool data for in THIS session (e.g. previous turns covered SOL/BTC/ETH, now user asks PEPE), there is a strong temptation to write a detailed report from training memory.
+
+**THIS IS HALLUCINATION**. Any specific number you generate without a tool call — price, market cap, 24h volume, RSI value, funding rate, holder count, on-chain whale activity, % change — is GUARANTEED to be invented from training data, which is months out of date for crypto and stale for stocks. Crypto prices can shift 100x between training cutoff and now.
+
+The CORRECT response is ALWAYS:
+1. Acknowledge in ≤ 1 sentence ("我来分析 PEPE 当前的市场情况")
+2. Emit \`web3_token_analysis\` (or \`stock_analysis\`) + \`web_research\` tool_calls IMMEDIATELY
+3. STOP writing prose. Let the second pass synthesize from real tool data.
+
+If you find yourself starting to write "$0.00001234" or "RSI 78.5" or "市值约 $4B" without a tool call in this turn, STOP MID-WORD and emit tool_calls instead. There is no exception.
 
 ### Web_research pairing — DEFAULT ON
 
@@ -312,14 +392,32 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   //    model can't tell whether the previous turn's data is fresh enough to
   //    skip a re-fetch, and tends to assume "I just answered this, no need
   //    to call tools again". For crypto, even 1 hour is too old.
-  const recent = await prisma.chatMessage
+  // Pull `metadata` too so we can filter out assistant turns that ended in
+  // cancelled / failed state — those rows hold a partial narration like
+  // "Let me check BTC..." that LOOKS like a complete answer to the routing
+  // LLM, causing it to skip tool calls on the follow-up turn and hallucinate
+  // numbers from training data. Take 2x the budget so filtering leaves
+  // enough valid context.
+  const rawHistory = await prisma.chatMessage
     .findMany({
       where: { userId, sessionId },
       orderBy: { createdAt: 'asc' },
-      take: 8,
-      select: { role: true, content: true, createdAt: true },
+      take: 16,
+      select: { role: true, content: true, createdAt: true, metadata: true },
     })
-    .catch(() => [] as Array<{ role: string; content: string; createdAt: Date }>);
+    .catch(() => [] as Array<{ role: string; content: string; createdAt: Date; metadata: string | null }>);
+  const recent = rawHistory
+    .filter((m) => {
+      if (m.role !== 'assistant') return true;
+      if (!m.metadata) return true;
+      try {
+        const meta = JSON.parse(m.metadata) as { status?: string };
+        return meta.status !== 'cancelled' && meta.status !== 'failed';
+      } catch {
+        return true;
+      }
+    })
+    .slice(-8);
 
   // ── Phase 2.1 recall: prepend relevant cross-session memories to the user
   //    message so the LLM sees them naturally as context. Guests get an empty
@@ -390,20 +488,24 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     userMessageContent = enrichedUserContent;
   }
 
-  // Truncate past assistant messages to a short snippet (~500 chars) before
-  // sending to the FIRST-PASS / routing LLM. Why: a full 8000-char synthesis
-  // report from the previous turn makes the routing model pattern-match into
-  // "I should just answer directly" mode — it sees a long structured analysis
-  // in history and writes another one WITHOUT calling tools, fabricating
-  // prices from training data (e.g. "BTC is at $62,150" when it's actually
-  // $80k+). Keeping the snippet short preserves multi-turn context (the model
-  // still knows what was discussed) but breaks the pattern-match into "I have
-  // enough data already".
+  // ── Smart history truncation for the FIRST-PASS / routing LLM.
   //
-  // Past USER messages are kept verbatim (they're short and they're what the
-  // model needs to understand the conversation). The synthesis pass gets a
-  // separate, fuller history block built downstream.
-  const FIRST_PASS_ASSISTANT_CAP = 500;
+  // Why this is tiered instead of a flat 500-char cap:
+  //   - Routing LLM needs JUST ENOUGH context to know what was discussed,
+  //     not enough to write a full report from memory.
+  //   - Most recent assistant turn: medium-size (preserves what was just said,
+  //     so follow-up clarifications work).
+  //   - Older assistant turns: aggressive truncation (just enough to know
+  //     the topic).
+  //   - User messages: never truncate (they're short and load-bearing).
+  //   - Whole-history budget cap: stops linearly growing prompt size as
+  //     conversations get long.
+  //
+  // Bonus: relative-age prefix on each past message ([12h ago], [just now])
+  // lets the freshness rules in the system prompt trigger on stale data.
+  const FIRST_PASS_ASSISTANT_RECENT_CAP = 800;  // most recent assistant turn
+  const FIRST_PASS_ASSISTANT_OLDER_CAP = 250;   // older assistant turns
+  const FIRST_PASS_HISTORY_TOTAL_BUDGET = 4500; // global cap across all history
   const nowMs = Date.now();
   const formatRelativeAge = (createdAt: Date | undefined): string => {
     if (!createdAt) return '';
@@ -416,21 +518,51 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     const ageD = Math.floor(ageH / 24);
     return isZh ? `[${ageD} 天前] ` : `[${ageD}d ago] `;
   };
-  const truncatedRecent = recent.map((m) => {
+
+  // Identify the index of the most recent assistant message (0-based in `recent`),
+  // which gets the higher truncation budget. All earlier assistant turns get
+  // the aggressive shorter cap.
+  let mostRecentAssistantIdx = -1;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    if (recent[i].role === 'assistant') {
+      mostRecentAssistantIdx = i;
+      break;
+    }
+  }
+
+  const truncatedRecent = recent.map((m, idx) => {
     const agePrefix = formatRelativeAge((m as any).createdAt);
     let content = m.content;
-    if (m.role === 'assistant' && content.length > FIRST_PASS_ASSISTANT_CAP) {
-      content =
-        content.slice(0, FIRST_PASS_ASSISTANT_CAP) +
-        (isZh
-          ? '\n\n[…前一轮的完整报告已省略；如需新数据请重新调用工具…]'
-          : '\n\n[…prior turn\'s full report omitted; re-call tools for fresh data…]');
+    if (m.role === 'assistant') {
+      const cap = idx === mostRecentAssistantIdx
+        ? FIRST_PASS_ASSISTANT_RECENT_CAP
+        : FIRST_PASS_ASSISTANT_OLDER_CAP;
+      if (content.length > cap) {
+        const suffix = isZh
+          ? `\n\n[…${idx === mostRecentAssistantIdx ? '上一轮' : '更早的'}完整报告已省略；如需新数据请重新调用工具…]`
+          : `\n\n[…${idx === mostRecentAssistantIdx ? 'prior' : 'older'} report omitted; re-call tools for fresh data…]`;
+        content = content.slice(0, cap) + suffix;
+      }
     }
     return {
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: agePrefix ? `${agePrefix}${content}` : content,
     };
   });
+
+  // ── Global history-budget guard: even with per-message caps, an 8-turn
+  //    conversation can pile up 6-8k chars. Hard-cap total history at
+  //    FIRST_PASS_HISTORY_TOTAL_BUDGET. We trim FROM THE FRONT (oldest first)
+  //    since the most recent turns are the most relevant to the routing
+  //    decision.
+  let totalHistoryChars = truncatedRecent.reduce((sum, m) => sum + (typeof m.content === 'string' ? m.content.length : 0), 0);
+  while (totalHistoryChars > FIRST_PASS_HISTORY_TOTAL_BUDGET && truncatedRecent.length > 2) {
+    const dropped = truncatedRecent.shift()!;
+    totalHistoryChars -= typeof dropped.content === 'string' ? dropped.content.length : 0;
+    console.log(
+      `[superAgentV2] history budget exceeded — dropped oldest ${dropped.role} message (${typeof dropped.content === 'string' ? dropped.content.length : 0} chars). total=${totalHistoryChars}/${FIRST_PASS_HISTORY_TOTAL_BUDGET}`,
+    );
+  }
 
   const messages: Array<Record<string, unknown>> = [
     { role: 'system', content: buildSystemPromptV2() },
@@ -481,15 +613,39 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Surface the friendly `userFacingMessage` (set by ai.service.ts
+    // fetchWithRetry on transient gateway failures via UpstreamUnavailableError)
+    // so the client UI shows "Service is busy" instead of a stack trace.
+    const friendlyMsg = (err as any)?.userFacingMessage || (err as any)?.userMessage;
     console.error('[superAgentV2] first-pass failed:', message);
     trace.close({ type: 'end', status: 'failed', stage: 'first_pass', error: message });
-    emitter.emitStreamCancelled(message);
+    emitter.emitStreamCancelled(friendlyMsg || 'AI service error. Please retry.');
+    await persistAssistantTurn({
+      userId,
+      sessionId,
+      content: friendlyMsg || 'AI service error. Please retry.',
+      isGuest,
+      hidden: args.hidden,
+      metadata: { v: 'v2', status: 'failed', stage: 'first_pass', error: message },
+    });
+    // Mark the replay buffer as 'done' — otherwise clients reconnecting via
+    // `agent:chat:replay` will see status='running' and re-enter the spinner.
+    finishChatReplayBuffer(sessionId);
     return { status: 'failed', finalContent: '', sources: [] };
   }
 
   if (abortController.signal.aborted) {
     trace.close({ type: 'end', status: 'cancelled', stage: 'after_first_pass' });
     emitter.emitStreamCancelled('user_stop');
+    await persistAssistantTurn({
+      userId,
+      sessionId,
+      content: firstPass.narration,
+      isGuest,
+      hidden: args.hidden,
+      metadata: { v: 'v2', status: 'cancelled', stage: 'after_first_pass' },
+    });
+    finishChatReplayBuffer(sessionId);
     return { status: 'cancelled', finalContent: firstPass.narration, sources: [] };
   }
 
@@ -505,13 +661,119 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   // the user doesn't stare at an empty bubble while tools run for 30s+. We
   // detect the user's language from their message and pick a matching string.
   if (firstPass.toolCalls.length > 0 && firstPass.narration.trim().length === 0) {
-    const isZh = /[一-鿿]/.test(userContent || '');
-    const fallback = isZh
+    const isZhUser = /[一-鿿]/.test(userContent || '');
+    const fallback = isZhUser
       ? '我来帮你研究一下，先调用工具收集最新数据。'
       : "Let me dig into this — pulling the latest data now.";
     firstPass.narration = fallback;
     emitToUser('agent:chat:narration', { sessionId, delta: fallback });
-    console.log(`[superAgentV2] narration fallback injected (lang=${isZh ? 'zh' : 'en'}, ${fallback.length} chars)`);
+    console.log(`[superAgentV2] narration fallback injected (lang=${isZhUser ? 'zh' : 'en'}, ${fallback.length} chars)`);
+  }
+
+  // ── Hallucination guard: catch the "no tools but wrote a detailed asset
+  //    analysis from training data" failure mode. Symptoms:
+  //      - tool_calls.length === 0
+  //      - narration is long (> 200 chars) AND contains specific market
+  //        numbers (prices like $0.0000102, percent like +210%, etc)
+  //      - user's question references a tradable asset
+  //
+  //    This happens when multi-turn history poisoning makes the routing
+  //    LLM think "I already have enough crypto context, I'll just answer".
+  //    The numbers it generates are pure hallucination from training data.
+  //
+  //    Recovery: retry the first pass with an EMPHATIC system message
+  //    appended telling the model it MUST call tools for this asset query.
+  const looksLikeAssetQuery = (q: string): boolean => {
+    if (!q) return false;
+    // Detect any 6-digit A-share ticker, US ticker (1-5 caps), HK 4-5 digit,
+    // common crypto symbols, or Chinese asset keywords. Loose but covers the
+    // typical case where we should have called tools.
+    if (/\b(BTC|ETH|SOL|SAHARA|PEPE|HYPE|DOGE|SHIB|ADA|XRP|BNB|LINK|MATIC|TRX|AVAX|DOT|LTC|UNI|ATOM|TON|NEAR|APT|ARB|OP|SUI|TIA|JTO|WIF|INJ|SEI|RUNE|FIL|MKR|AAVE|COMP|SNX|CRV|LDO|RPL|BLUR|JUP)\b/i.test(q)) return true;
+    if (/\b[A-Z]{2,5}(\.HK|\.SS|\.SH|\.SZ|\.US)?\b/.test(q) && !/^(I|AM|PM|HK|US)$/.test(q.trim())) return true;
+    if (/\b\d{6}(\.(SH|SZ))?\b/.test(q)) return true;
+    if (/\b\d{4,5}(\.HK)?\b/.test(q)) return true;
+    if (/(股票|股价|币|代币|开多|开空|抄底|追涨|加仓|减仓|建仓|套牢|多头|空头|memecoin|altcoin|stablecoin)/i.test(q)) return true;
+    return false;
+  };
+  const looksFabricated = (text: string): boolean => {
+    // Lowered from 200 → 100 chars: real-world hallucinations as short as
+    // 195 chars were slipping through (e.g. "SOL 站稳 $140 可试多 / 止损 $135
+    // / 资金费率 -0.000018 / 置信度 55%" — 5 fabricated numbers in 195 chars).
+    if (!text || text.length < 100) return false;
+    let signals = 0;
+    // Specific prices / numbers
+    if (/\$[0-9]+(\.[0-9]+)?[KMB]?/.test(text)) signals++;
+    if (/\$0\.0+\d/.test(text)) signals++;  // crypto sub-cent prices
+    if (/[+\-]\d+(\.\d+)?%/.test(text)) signals++;  // percent changes
+    if (/RSI\s*\(?14\)?[:：\s]*\d/.test(text)) signals++;
+    if (/资金费率|funding rate/i.test(text) && /\d+\.?\d*%/.test(text)) signals++;
+    if (/(持币地址|holders?|未平仓|open interest)/i.test(text) && /\d/.test(text)) signals++;
+    return signals >= 2;
+  };
+
+  const hallucinationDetected =
+    firstPass.toolCalls.length === 0 &&
+    firstPass.narration.length > 100 &&
+    looksLikeAssetQuery(userContent) &&
+    looksFabricated(firstPass.narration);
+
+  if (hallucinationDetected) {
+    console.warn(
+      `[superAgentV2] hallucination guard triggered: tools=0 but query="${userContent.slice(0, 60)}" + narration_len=${firstPass.narration.length} contains asset numbers. Retrying with stricter prompt.`,
+    );
+    trace.write({
+      type: 'hallucination_guard',
+      reason: 'no_tools_but_asset_analysis',
+      narrationLen: firstPass.narration.length,
+    });
+    // Wipe the bad narration on the client side BEFORE retrying so the user
+    // doesn't briefly see the fabricated answer.
+    emitToUser('agent:chat:narration_reset', { sessionId });
+    // Build a stricter retry. Append a hard user-side message that overrides
+    // history-driven inertia and tells the model "TOOLS, NOW".
+    const isZhUser = /[一-鿿]/.test(userContent || '');
+    const stricterMessages = [
+      ...messages,
+      {
+        role: 'assistant',
+        content: firstPass.narration,
+      },
+      {
+        role: 'user',
+        content: isZhUser
+          ? `[系统强制]你刚才的回复违反了规则——你写出了具体的市场数据（价格 / 涨跌幅 / RSI / 资金费率 等），但你**完全没有调用任何工具**。这意味着那些数字是你从训练数据里编出来的，是 hallucination，会严重误导用户。\n\n现在请按以下步骤重做：(1) 不要再凭记忆写任何具体数字；(2) 立即调用 \`web3_token_analysis\`（如果是加密货币）或 \`stock_analysis\`（如果是股票）+ \`web_research\` 来获取真实当前数据；(3) 等工具返回后再写最终报告。\n\n用户的原始问题是："${userContent}"。请只输出"我马上重新查询"作为 narration，然后立即 emit tool_calls，不要再凭记忆写分析。`
+          : `[SYSTEM FORCED] Your previous response violated rules — you wrote specific market data (prices / percent changes / RSI / funding rates / etc.) WITHOUT calling any tools. Those numbers are hallucinated from training data and will severely mislead the user.\n\nRedo as follows: (1) Do NOT write any specific numbers from memory; (2) Immediately call \`web3_token_analysis\` (for crypto) or \`stock_analysis\` (for stocks) + \`web_research\` to get real current data; (3) Wait for tool results before writing the final report.\n\nUser's original question: "${userContent}". Output only "Let me re-query right now" as narration, then immediately emit tool_calls.`,
+      },
+    ];
+    try {
+      const retry = await aiService.chatStreamWithTools({
+        messages: stricterMessages,
+        tools,
+        maxTokens: 1024,
+        modelOverride: firstPassModelOverride,
+        onTextChunk: (delta) => {
+          if (abortController.signal.aborted) return;
+          emitToUser('agent:chat:narration', { sessionId, delta });
+        },
+        abortSignal: abortController.signal,
+      });
+      if (retry.toolCalls.length > 0) {
+        console.log(
+          `[superAgentV2] hallucination retry succeeded: tools=[${retry.toolCalls.map((t) => t.name).join(', ')}]`,
+        );
+        firstPass = retry;
+      } else {
+        console.warn(
+          `[superAgentV2] hallucination retry STILL produced no tools (narration_len=${retry.narration.length}). Falling back to original output.`,
+        );
+        // Keep the original output — at least the user gets something. The
+        // hallucination guard already logged the warning for ops to inspect.
+      }
+    } catch (err) {
+      console.error(
+        `[superAgentV2] hallucination retry failed: ${(err as Error).message}. Keeping original output.`,
+      );
+    }
   }
 
   emitter.emitModule('route', 'completed', { tools: firstPass.toolCalls.map((t) => t.name) });
@@ -530,20 +792,25 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
       appendChatReplayContent(sessionId, firstPass.narration);
       emitter.emitProgress(firstPass.narration);
     }
-    if (!isGuest && !args.hidden) {
-      try {
-        await prisma.chatMessage.create({
-          data: { userId, sessionId, role: 'assistant', content: firstPass.narration, agentId: 'superagent' },
-        });
-      } catch (e) {
-        console.warn('[superAgentV2] DB persist (no-tools) failed:', (e as Error).message);
-      }
-    }
+    await persistAssistantTurn({
+      userId,
+      sessionId,
+      content: firstPass.narration,
+      isGuest,
+      hidden: args.hidden,
+      metadata: { v: 'v2', status: 'completed', stage: 'no_tools' },
+    });
     emitter.emitModule('done', 'completed', {});
     emitter.emitStreamDone(firstPass.narration);
     finishChatReplayBuffer(sessionId);
     trace.close({ type: 'end', status: 'success', stage: 'no_tools', answerLen: firstPass.narration.length });
-    return { status: 'completed', finalContent: firstPass.narration, sources: [] };
+    return {
+      status: 'completed',
+      finalContent: firstPass.narration,
+      sources: [],
+      toolCallsCount: 0,
+      routingNarrationLen: firstPass.narration.length,
+    };
   }
 
   // ── 4. Execute all tool calls in parallel.
@@ -606,6 +873,20 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   if (abortController.signal.aborted) {
     trace.close({ type: 'end', status: 'cancelled', stage: 'after_tools' });
     emitter.emitStreamCancelled('user_stop');
+    await persistAssistantTurn({
+      userId,
+      sessionId,
+      content: firstPass.narration,
+      isGuest,
+      hidden: args.hidden,
+      metadata: {
+        v: 'v2',
+        status: 'cancelled',
+        stage: 'after_tools',
+        tools: toolResults.map((r) => ({ name: r.name, ok: r.result.ok, ms: r.result.durationMs })),
+      },
+    });
+    finishChatReplayBuffer(sessionId);
     return { status: 'cancelled', finalContent: firstPass.narration, sources: [] };
   }
 
@@ -663,6 +944,9 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     stock_analysis: 'Equity research data (technical + fundamental)',
     portfolio_simulate: 'Portfolio simulation results',
     load_skill: 'Methodology / framework reference',
+    financial_report: 'A-share earnings (同花顺财务摘要 / 东方财富业绩预告)',
+    sec_filings: 'US SEC EDGAR official filings (10-K / 10-Q / 8-K / Form 4 / 13F)',
+    hsgt_flow: 'HK Stock Connect capital flow (北向 / 南向 / 4-channel snapshot)',
   };
   const contextString = toolResults
     .map((r, i) => {
@@ -784,9 +1068,16 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[superAgentV2] synthesis failed:', message);
-    // Fallback: surface tool results raw so the user gets *something*.
+    // Prefer the friendly user-facing message (set on UpstreamUnavailableError)
+    // when surfaced via fetchWithRetry. Otherwise show a generic notice.
+    const friendlyMsg =
+      (err as any)?.userFacingMessage ||
+      (err as any)?.userMessage ||
+      'AI synthesis temporarily unavailable. Showing raw tool results below.';
+    // Fallback: surface tool results raw so the user gets *something*, with
+    // a clean banner instead of a stack-trace dump.
     synthFullContent =
-      `(synthesis failed: ${message})\n\n---\n\n` +
+      `> ⚠️ ${friendlyMsg}\n\n---\n\n` +
       toolResults
         .map((r) => `### ${r.name}\n\n${r.result.content || `(${r.result.error || 'no output'})`}`)
         .join('\n\n---\n\n');
@@ -798,6 +1089,25 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   if (abortController.signal.aborted) {
     trace.close({ type: 'end', status: 'cancelled', stage: 'during_synthesis', partialAnswerLen: synthFullContent.length });
     emitter.emitStreamCancelled('user_stop');
+    // Persist the PARTIAL stream content the user already saw on screen.
+    // Without this, the assistant bubble vanishes on refresh and the user
+    // is left with their question but no trace of the half-answer.
+    await persistAssistantTurn({
+      userId,
+      sessionId,
+      content: synthFullContent,
+      isGuest,
+      hidden: args.hidden,
+      metadata: {
+        v: 'v2',
+        status: 'cancelled',
+        stage: 'during_synthesis',
+        partial: true,
+        tools: toolResults.map((r) => ({ name: r.name, ok: r.result.ok, ms: r.result.durationMs })),
+        sources: dedupedSources,
+      },
+    });
+    finishChatReplayBuffer(sessionId);
     return { status: 'cancelled', finalContent: synthFullContent, sources: dedupedSources };
   }
 
@@ -916,35 +1226,28 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     data: { duration: toolsPhaseDurationS },
   });
 
-  if (!isGuest && !args.hidden) {
-    try {
-      await prisma.chatMessage.create({
-        data: {
-          userId,
-          sessionId,
-          role: 'assistant',
-          content: finalContent,
-          agentId: 'superagent',
-          metadata: JSON.stringify({
-            v: 'v2',
-            thinkingFlow: {
-              modules: flowModules,
-              isActive: false,
-              route: 'Super Agent (v2)',
-              // tools-only duration (frozen before synthesis), matching v1.
-              toolsPhaseDurationS,
-            },
-            tools: toolResults.map((r) => ({ name: r.name, ok: r.result.ok, ms: r.result.durationMs })),
-            sources: dedupedSources,
-            ...(collectedTokenCard ? { tokenCard: collectedTokenCard } : {}),
-            ...(collectedQuoteCard ? { quoteCard: collectedQuoteCard } : {}),
-          }),
-        },
-      });
-    } catch (e) {
-      console.warn('[superAgentV2] DB persist (final) failed:', (e as Error).message);
-    }
-  }
+  await persistAssistantTurn({
+    userId,
+    sessionId,
+    content: finalContent,
+    isGuest,
+    hidden: args.hidden,
+    metadata: {
+      v: 'v2',
+      status: 'completed',
+      thinkingFlow: {
+        modules: flowModules,
+        isActive: false,
+        route: 'Super Agent (v2)',
+        // tools-only duration (frozen before synthesis), matching v1.
+        toolsPhaseDurationS,
+      },
+      tools: toolResults.map((r) => ({ name: r.name, ok: r.result.ok, ms: r.result.durationMs })),
+      sources: dedupedSources,
+      ...(collectedTokenCard ? { tokenCard: collectedTokenCard } : {}),
+      ...(collectedQuoteCard ? { quoteCard: collectedQuoteCard } : {}),
+    },
+  });
 
   // `done.duration` is the FALLBACK time field for old sessions that lack
   // toolsPhaseDurationS. Send the same tools-phase value so older replays
@@ -976,5 +1279,11 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
   }
   finishChatReplayBuffer(sessionId);
 
-  return { status: 'completed', finalContent, sources: dedupedSources };
+  return {
+    status: 'completed',
+    finalContent,
+    sources: dedupedSources,
+    toolCallsCount: firstPass.toolCalls.length,
+    routingNarrationLen: firstPass.narration.length,
+  };
 }

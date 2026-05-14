@@ -13,6 +13,11 @@ type OAuthProvider = 'google' | 'twitter';
 // Update this URL to your actual waitlist form
 const WAITLIST_URL = 'https://forms.gle/lokacash-waitlist';
 
+// Feature flag — set to true to re-enable the invitation-code gate.
+// Backend invitation API + DB schema are kept intact so flipping this back
+// on requires no other changes.
+const INVITE_GATE_ENABLED = false;
+
 const AuthModal: React.FC<AuthModalProps> = ({ onLogin, onClose, initialStep = 'login' }) => {
     const [step, setStep] = useState<'login' | 'invite'>(initialStep);
 
@@ -50,6 +55,10 @@ const AuthModal: React.FC<AuthModalProps> = ({ onLogin, onClose, initialStep = '
 
     const afterLogin = () => {
         setAuthError(null);
+        if (!INVITE_GATE_ENABLED) {
+            onLogin();
+            return;
+        }
         // If already has invite code saved, let them in immediately
         const stored = localStorage.getItem('loka_invite_code');
         if (stored) {
@@ -143,28 +152,30 @@ const AuthModal: React.FC<AuthModalProps> = ({ onLogin, onClose, initialStep = '
                             <p className="text-sm text-gray-500 font-medium">Create a smart wallet or connect your own.</p>
                         </div>
 
-                        {/* Invite code notice */}
-                        <div
-                            className="flex items-start gap-3 px-4 py-3 rounded-2xl"
-                            style={{ background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.2)' }}
-                        >
-                            <svg className="w-4 h-4 mt-0.5 shrink-0" style={{ color: '#00C853' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                            </svg>
-                            <p className="text-[11px] text-gray-600 font-medium leading-relaxed">
-                                An <span className="font-black text-black">invitation code</span> is required after sign in.{' '}
-                                Don't have one?{' '}
-                                <a
-                                    href={WAITLIST_URL}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="font-black underline underline-offset-2"
-                                    style={{ color: '#00C853' }}
-                                >
-                                    Join the waitlist →
-                                </a>
-                            </p>
-                        </div>
+                        {/* Invite code notice — hidden when INVITE_GATE_ENABLED is false */}
+                        {INVITE_GATE_ENABLED && (
+                            <div
+                                className="flex items-start gap-3 px-4 py-3 rounded-2xl"
+                                style={{ background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.2)' }}
+                            >
+                                <svg className="w-4 h-4 mt-0.5 shrink-0" style={{ color: '#00C853' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                                </svg>
+                                <p className="text-[11px] text-gray-600 font-medium leading-relaxed">
+                                    An <span className="font-black text-black">invitation code</span> is required after sign in.{' '}
+                                    Don't have one?{' '}
+                                    <a
+                                        href={WAITLIST_URL}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="font-black underline underline-offset-2"
+                                        style={{ color: '#00C853' }}
+                                    >
+                                        Join the waitlist →
+                                    </a>
+                                </p>
+                            </div>
+                        )}
 
                         {/* Auth Options */}
                         <div className="space-y-3">

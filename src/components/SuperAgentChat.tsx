@@ -344,7 +344,67 @@ const ThinkingProcessSidePanel: React.FC<{
 
     const AnalysisModule: React.FC<{ mod: ThinkingModule }> = ({ mod }) => {
         const d = mod.data as AnalysisModuleData | undefined;
-        if (!d) return null;
+
+        // v1 path emits the legacy 3-section structure on `data.stages`
+        // (Fundamental / Technical / Sentiment). v2 path emits per-tool
+        // stages on `data.toolStages` instead. Either shape (or both!) may
+        // be present — render whichever has content. ALWAYS render at least
+        // the header so the Process panel never silently drops the analysis
+        // section just because data is empty or unexpectedly shaped.
+        const legacyStages: any[] | null = Array.isArray((d as any)?.stages) ? (d as any).stages : null;
+        const v2ToolStages: any[] | null = Array.isArray((d as any)?.toolStages) ? (d as any).toolStages : null;
+        const tickers: string[] = Array.isArray((d as any)?.tickers) ? (d as any).tickers : [];
+
+        // v2 path: render per-tool list. Take this branch whenever
+        // toolStages is present (even if also has legacy stages — v2 data
+        // is more informative).
+        if (v2ToolStages && v2ToolStages.length > 0) {
+            return (
+                <div>
+                    <div className="flex items-center gap-2.5 mb-3">
+                        <StatusIcon status={mod.status} />
+                        <span className="text-[14px] font-bold text-gray-900">Analyzing</span>
+                        {tickers.length > 0 && (
+                            <span className="text-[11px] text-gray-400 font-mono">{tickers.join(', ')}</span>
+                        )}
+                        <span className="ml-auto text-[11px] text-gray-400">
+                            {v2ToolStages.length} tool{v2ToolStages.length === 1 ? '' : 's'}
+                        </span>
+                    </div>
+                    <div className="ml-7 space-y-1.5 mb-3">
+                        {v2ToolStages.map((s: any, i: number) => (
+                            <div key={`${s?.stage || 'stage'}-${i}`} className="flex items-center gap-2 text-[12px] text-gray-600">
+                                <StatusIcon status={s?.state === 'completed' ? 'done' : s?.state === 'failed' ? 'error' : 'active'} size="sm" />
+                                <span className="font-medium">{s?.title_zh || s?.title_en || s?.stage || 'tool'}</span>
+                                {s?.durationMs != null && (
+                                    <span className="text-[10px] text-gray-400 font-mono">
+                                        {s.durationMs < 1000 ? `${s.durationMs}ms` : `${(s.durationMs / 1000).toFixed(1)}s`}
+                                    </span>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // If d is genuinely empty (no data) but the module exists, render a
+        // minimal header so the Process panel reflects the module being
+        // counted. This is the safety net for any analysis emit that
+        // somehow lost its data payload through a shallow-merge race.
+        if (!legacyStages || legacyStages.length === 0) {
+            return (
+                <div>
+                    <div className="flex items-center gap-2.5 mb-3">
+                        <StatusIcon status={mod.status} />
+                        <span className="text-[14px] font-bold text-gray-900">Analyzing</span>
+                        {tickers.length > 0 && (
+                            <span className="text-[11px] text-gray-400 font-mono">{tickers.join(', ')}</span>
+                        )}
+                    </div>
+                </div>
+            );
+        }
 
         return (
             <div>
@@ -353,7 +413,7 @@ const ThinkingProcessSidePanel: React.FC<{
                     <span className="text-[14px] font-bold text-gray-900">Analyzing</span>
                 </div>
                 <div className="ml-7 space-y-2.5 mb-3">
-                    {d.stages.map((stage) => {
+                    {legacyStages.map((stage: any) => {
                         const hasResults = stage.status === 'done' && stage.result && stage.result.length > 0;
                         const iconColor = stage.status === 'done' ? 'text-gray-500' : stage.status === 'active' ? 'text-blue-500' : 'text-gray-300';
                         return (
@@ -1913,6 +1973,17 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
     // so it does NOT count as `msg.content` — otherwise the ThinkingInlineTrigger
     // would prematurely flip to a "Done" pill before tools have run.
     const [narrationByIdx, setNarrationByIdx] = useState<Record<number, string>>({});
+    // Per-message queue indicator. Set when the backend emits
+    // `agent:chat:queued` (the user's request is waiting behind other Python
+    // tool spawns). Cleared once any tool starts producing data or the
+    // synthesis stream begins. English-only copy per product spec.
+    const [queueStateByIdx, setQueueStateByIdx] = useState<Record<number, {
+        tool: string;
+        position: number;
+        etaMs: number;
+        message: string;
+        receivedAt: number;
+    }>>({});
     /** Auto-fetched URL pills, keyed by the assistant message index they
      *  belong to. Populated from `agent:chat:webfetch` events emitted by
      *  the backend's webFetch pre-step (see services/webFetch). */
@@ -1960,6 +2031,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         return keys.length > 0 ? allTocHeadings[keys[keys.length - 1]] : [];
     })();
     const [activeTocId, setActiveTocId] = useState<string>('');
+    // Short-lived lock so scroll-spy doesn't overwrite a click-driven active
+    // selection when the page can't actually scroll the target to the fold
+    // line (e.g. short reports where the bottom section sits below the fold
+    // even at max scroll — without this the highlight snaps back instantly).
+    const tocClickLockRef = useRef<number>(0);
     const tocVisibleMsgIdx = visibleTocIdx >= 0 ? visibleTocIdx : (() => {
         const keys = Object.keys(allTocHeadings).map(Number);
         return keys.length > 0 ? keys[keys.length - 1] : -1;
@@ -2016,16 +2092,28 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const heads = allTocHeadings[bestIdx] || [];
             const ids = heads.map(h => h.id);
 
-            // Active heading within the visible message
+            // Active heading within the visible message. The "fold line" is
+            // 30% down the viewport — a heading becomes active when its top
+            // crosses into the upper third of the visible area, not only when
+            // it's pinned to the very top. Without this, long sections leave
+            // the previous heading highlighted long after the user scrolled
+            // past it because the next heading hadn't reached the strict
+            // top-80px threshold yet.
+            const foldLine = Math.max(80, containerRect.height * 0.3);
             let current = ids[0] || '';
             for (const id of ids) {
                 const el = document.getElementById(id);
                 if (el) {
                     const rect = el.getBoundingClientRect();
-                    if (rect.top - containerRect.top <= 80) current = id;
+                    if (rect.top - containerRect.top <= foldLine) current = id;
                 }
             }
-            setActiveTocId(current);
+            // Honour a recent TOC click — see tocClickLockRef. Without this,
+            // clicking section 3/4 on a short report (where the target can't
+            // reach the fold line) would flicker back to whatever scroll-spy
+            // computed from the actual layout. Skip the active update but
+            // still let the float-position calc run.
+            if (Date.now() >= tocClickLockRef.current) setActiveTocId(current);
 
             // Float position – the TOC pins near the top of the viewport while
             // the answer is being read. Only when the bottom action bar approaches
@@ -2349,6 +2437,36 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                 mergedData = { ...mergedData, stages: [...byKey.values()] };
                             }
                         }
+                        // Same dedup-merge for the 'analysis' module — v2 has
+                        // multiple tools (stock_analysis / financial_report /
+                        // sec_filings / hsgt_flow) all emitting toolStages
+                        // entries to the SAME 'analysis' module type. Without
+                        // this merge, each tool's emit would overwrite the
+                        // previous tool's stages and the Process panel would
+                        // only show whichever tool emitted last.
+                        if (data.moduleType === 'analysis') {
+                            const prevToolStages: any[] = Array.isArray(prevData.toolStages) ? prevData.toolStages : [];
+                            const incomingToolStages: any[] = Array.isArray((incomingData as any).toolStages) ? (incomingData as any).toolStages : [];
+                            if (prevToolStages.length || incomingToolStages.length) {
+                                // Dedup by (stage + argsData JSON) so the same tool
+                                // re-emitting on state transition (active → completed)
+                                // updates the existing entry, while two distinct
+                                // tools with the same name but different args
+                                // (e.g. stock_analysis on AAPL vs TSLA) accumulate.
+                                const byKey = new Map<string, any>();
+                                const keyOf = (s: any) => {
+                                    const stage = typeof s?.stage === 'string' ? s.stage : 'unknown';
+                                    const argsKey = (() => {
+                                        try { return JSON.stringify(s?.argsData ?? null); }
+                                        catch { return ''; }
+                                    })();
+                                    return `${stage}::${argsKey}`;
+                                };
+                                for (const s of prevToolStages) byKey.set(keyOf(s), s);
+                                for (const s of incomingToolStages) byKey.set(keyOf(s), s);
+                                mergedData = { ...mergedData, toolStages: [...byKey.values()] };
+                            }
+                        }
                         mods[modIdx].data = mergedData;
                     }
                 }
@@ -2369,6 +2487,36 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                 ...prev,
                 [msgIdx]: (prev[msgIdx] || '') + data.delta,
             }));
+            // First narration chunk = backend is now actively processing, so
+            // any queue state for this message is stale — drop it.
+            setQueueStateByIdx(prev => {
+                if (!prev[msgIdx]) return prev;
+                const next = { ...prev };
+                delete next[msgIdx];
+                return next;
+            });
+        };
+
+        const onQueued = (data: {
+            sessionId: string;
+            tool: string;
+            position: number;
+            etaMs: number;
+            message: string;
+        }) => {
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            if (msgIdx < 0) return;
+            setQueueStateByIdx(prev => ({
+                ...prev,
+                [msgIdx]: {
+                    tool: data.tool,
+                    position: data.position,
+                    etaMs: data.etaMs,
+                    message: data.message,
+                    receivedAt: Date.now(),
+                },
+            }));
         };
 
         const onProgress = (data: { sessionId: string; content: string }) => {
@@ -2388,6 +2536,13 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             const existing = typewriterBuffersRef.current.get(msgIdx) || '';
             typewriterBuffersRef.current.set(msgIdx, existing + data.content);
             ensureTypewriterRunning();
+            // Synthesis stream has started — clear any stale queue indicator.
+            setQueueStateByIdx(prev => {
+                if (!prev[msgIdx]) return prev;
+                const next = { ...prev };
+                delete next[msgIdx];
+                return next;
+            });
         };
 
         const onStreamDone = (data: { sessionId: string; content?: string; sources?: SearchSource[] }) => {
@@ -2448,6 +2603,37 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                     })
                     .catch(() => { /* keep last good values */ });
             }
+        };
+
+        // User pressed Stop OR upstream aborted mid-stream. The backend persists
+        // the partial answer to DB and finishes the replay buffer, but the UI
+        // still needs to drop the spinner and stop the timer. Without this
+        // handler, isStreaming stayed true and the bubble kept showing
+        // "Drafting response Ns" forever — refresh didn't help because the
+        // replay buffer would have been stuck on 'running' too (also fixed).
+        const onCancelled = (data: { sessionId: string; reason?: string }) => {
+            saLog('← agent:chat:cancelled', { expect: sessionId, got: data?.sessionId, reason: data?.reason, match: data.sessionId === sessionId });
+            if (data.sessionId !== sessionId) return;
+            const msgIdx = activeMsgIdxRef.current;
+            cancelTypewriter(msgIdx);
+            try { sessionStorage.removeItem(SA_PENDING_KEY); } catch { /* ignore */ }
+            setMessages(prev => {
+                const updated = [...prev];
+                if (!updated[msgIdx]) return prev;
+                // Keep whatever streamed so far (partial answer the user already saw),
+                // just flip off the streaming flag.
+                updated[msgIdx] = {
+                    ...updated[msgIdx],
+                    isStreaming: false,
+                    timestamp: new Date().toLocaleTimeString(),
+                };
+                return updated;
+            });
+            setIsStreaming(false);
+            setThinkingProcesses(prev => {
+                if (!prev[msgIdx]) return prev;
+                return { ...prev, [msgIdx]: { ...prev[msgIdx], isActive: false } };
+            });
         };
 
         const onError = (data: { sessionId: string; error: string; mode?: string; resetAt?: string; hint?: string }) => {
@@ -2869,9 +3055,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
         socket.on('agent:chat:started', onStarted);
         socket.on('agent:chat:module', onModule);
         socket.on('agent:chat:narration', onNarration);
+        socket.on('agent:chat:queued', onQueued);
         socket.on('agent:chat:progress', onProgress);
         socket.on('agent:chat:content_replace', onContentReplace);
         socket.on('agent:chat:stream_done', onStreamDone);
+        socket.on('agent:chat:cancelled', onCancelled);
         socket.on('agent:chat:error', onError);
         socket.on('agent:chat:tool_trace', onToolTrace);
         socket.on('agent:chat:thinking_log', onThinkingLog);
@@ -2894,9 +3082,11 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
             socket.off('agent:chat:started', onStarted);
             socket.off('agent:chat:module', onModule);
             socket.off('agent:chat:narration', onNarration);
+            socket.off('agent:chat:queued', onQueued);
             socket.off('agent:chat:progress', onProgress);
             socket.off('agent:chat:content_replace', onContentReplace);
             socket.off('agent:chat:stream_done', onStreamDone);
+            socket.off('agent:chat:cancelled', onCancelled);
             socket.off('agent:chat:error', onError);
             socket.off('agent:chat:tool_trace', onToolTrace);
             socket.off('agent:chat:thinking_log', onThinkingLog);
@@ -4346,6 +4536,12 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                                 <button
                                                                     onClick={() => {
                                                                         const el = document.getElementById(h.id);
+                                                                        // Set active immediately so the user gets visual
+                                                                        // feedback even when the page can't scroll the
+                                                                        // target to the fold line (short reports where
+                                                                        // multiple sections share the viewport).
+                                                                        setActiveTocId(h.id);
+                                                                        tocClickLockRef.current = Date.now() + 800;
                                                                         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
                                                                     }}
                                                                     className={`group w-full text-left flex items-start gap-1.5 rounded-lg px-2 py-2 text-[12px] leading-snug transition-all ${
@@ -4478,6 +4674,26 @@ const SuperAgentChat: React.FC<SuperAgentChatProps> = ({ initialMessage, onBack,
                                                         <p className="text-[14.5px] leading-relaxed text-gray-700" style={{ fontFamily: "'Open Runde', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif", fontWeight: 500 }}>
                                                             {narrationByIdx[i]}
                                                         </p>
+                                                    </div>
+                                                )}
+                                                {/* Queue indicator — surfaces when the user's Python tool is
+                                                    waiting behind other heavy tools (semaphore queue). Shows
+                                                    English-only copy with live position + ETA. Disappears when
+                                                    the tool starts producing data (narration or progress) or
+                                                    when the message finishes streaming. */}
+                                                {msg.role === 'assistant' && msg.isStreaming && queueStateByIdx[i] && !msg.content && (
+                                                    <div className="my-3 flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl bg-indigo-50 border border-indigo-200">
+                                                        <svg className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-[12px] font-semibold text-indigo-900 leading-snug">
+                                                                Queued (position #{queueStateByIdx[i].position})
+                                                            </p>
+                                                            <p className="text-[11px] text-indigo-700 leading-snug mt-0.5">
+                                                                Heavy data tool ({queueStateByIdx[i].tool}) is busy. Starting in ~{Math.max(1, Math.round(queueStateByIdx[i].etaMs / 1000))}s.
+                                                            </p>
+                                                        </div>
                                                     </div>
                                                 )}
                                                 {/* Lite-mode banner: Auto fell back to no-agent because both buckets are empty */}

@@ -21,6 +21,11 @@ export interface ChatReplayBuffer {
    *  back to a session whose stream is still mid-flight. */
   mode?: string;
   completedAt?: number;
+  /** Last time anything was pushed into this buffer. Used by the periodic
+   *  cleanup cron to evict stale buffers — when a user navigates away
+   *  mid-stream the original finish hook never fires, so the buffer would
+   *  otherwise leak forever. */
+  lastTouchedAt: number;
   /** Most recent TokenCard snapshot pushed via `agent:chat:token`. Stored here
    *  so a client navigating away mid-stream and back can restore the card from
    *  replay (the underlying socket event fires only once and is otherwise lost
@@ -43,6 +48,15 @@ export interface ChatReplayBuffer {
 
 const chatReplayBuffers = new Map<string, ChatReplayBuffer>();
 const REPLAY_TTL_MS = 60_000;
+/** Buffers idle longer than this get force-evicted by the cleanup cron — the
+ *  user clearly navigated away mid-stream or the run never finished cleanly. */
+const STALE_BUFFER_THRESHOLD_MS = 10 * 60 * 1000; // 10 min
+/** How often the cleanup cron runs. */
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 min
+
+function touchBuffer(b: ChatReplayBuffer): void {
+  b.lastTouchedAt = Date.now();
+}
 
 export function startChatReplayBuffer(sessionId: string, mode?: string): void {
   chatReplayBuffers.set(sessionId, {
@@ -51,16 +65,22 @@ export function startChatReplayBuffer(sessionId: string, mode?: string): void {
     content: '',
     status: 'running',
     mode,
+    lastTouchedAt: Date.now(),
   });
 }
 
 export function getChatReplayBuffer(sessionId: string): ChatReplayBuffer | undefined {
-  return chatReplayBuffers.get(sessionId);
+  const b = chatReplayBuffers.get(sessionId);
+  if (b) touchBuffer(b);
+  return b;
 }
 
 export function recordChatToolTraceStep(sessionId: string, step: any): void {
   const b = chatReplayBuffers.get(sessionId);
-  if (b && b.status === 'running') b.toolTraceSteps.push(step);
+  if (b && b.status === 'running') {
+    b.toolTraceSteps.push(step);
+    touchBuffer(b);
+  }
 }
 
 /**
@@ -70,7 +90,10 @@ export function recordChatToolTraceStep(sessionId: string, step: any): void {
  */
 export function recordChatTokenCard(sessionId: string, tokenCard: any): void {
   const b = chatReplayBuffers.get(sessionId);
-  if (b) b.tokenCard = tokenCard;
+  if (b) {
+    b.tokenCard = tokenCard;
+    touchBuffer(b);
+  }
 }
 
 /**
@@ -80,7 +103,10 @@ export function recordChatTokenCard(sessionId: string, tokenCard: any): void {
  */
 export function recordChatRoutedMode(sessionId: string, routedMode: string): void {
   const b = chatReplayBuffers.get(sessionId);
-  if (b) b.routedMode = routedMode;
+  if (b) {
+    b.routedMode = routedMode;
+    touchBuffer(b);
+  }
 }
 
 /**
@@ -94,16 +120,23 @@ export function recordChatRtEvent(sessionId: string, type: string, payload: any)
   if (!b || b.status !== 'running') return;
   if (!b.rtEvents) b.rtEvents = [];
   b.rtEvents.push({ type, payload });
+  touchBuffer(b);
 }
 
 export function appendChatReplayContent(sessionId: string, chunk: string): void {
   const b = chatReplayBuffers.get(sessionId);
-  if (b && b.status === 'running') b.content += chunk;
+  if (b && b.status === 'running') {
+    b.content += chunk;
+    touchBuffer(b);
+  }
 }
 
 export function replaceChatReplayContent(sessionId: string, content: string): void {
   const b = chatReplayBuffers.get(sessionId);
-  if (b) b.content = content;
+  if (b) {
+    b.content = content;
+    touchBuffer(b);
+  }
 }
 
 export function finishChatReplayBuffer(sessionId: string): void {
@@ -113,6 +146,39 @@ export function finishChatReplayBuffer(sessionId: string): void {
   b.completedAt = Date.now();
   setTimeout(() => chatReplayBuffers.delete(sessionId), REPLAY_TTL_MS);
 }
+
+// ─────────────────────────────────────────────────────────────────
+//   Stale-buffer cleanup cron
+//   Buffers can leak when the user navigates away mid-stream and
+//   finishChatReplayBuffer() is never called. Every 5 minutes we
+//   scan and evict buffers idle for >10 minutes. Logs a one-line
+//   summary when evictions happen so ops can spot anomalies.
+// ─────────────────────────────────────────────────────────────────
+let lastCleanupReportedAt = 0;
+setInterval(() => {
+  const now = Date.now();
+  let evicted = 0;
+  let remaining = 0;
+  for (const [sessionId, buf] of chatReplayBuffers) {
+    const idleMs = now - buf.lastTouchedAt;
+    if (idleMs > STALE_BUFFER_THRESHOLD_MS) {
+      chatReplayBuffers.delete(sessionId);
+      evicted += 1;
+    } else {
+      remaining += 1;
+    }
+  }
+  if (evicted > 0) {
+    console.log(
+      `[replayBuffer] cleanup: evicted=${evicted} stale buffer(s) (idle > ${STALE_BUFFER_THRESHOLD_MS / 60_000}min), remaining=${remaining}`,
+    );
+    lastCleanupReportedAt = now;
+  } else if (remaining > 50 && now - lastCleanupReportedAt > 30 * 60 * 1000) {
+    // Periodic sanity log if buffer count climbs high without evictions
+    console.log(`[replayBuffer] status: buffers=${remaining} (cleanup found 0 stale this cycle)`);
+    lastCleanupReportedAt = now;
+  }
+}, CLEANUP_INTERVAL_MS).unref();
 
 export function createModuleEmitter(userId: string, sessionId: string) {
   return {

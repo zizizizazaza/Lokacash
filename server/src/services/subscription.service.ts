@@ -92,28 +92,77 @@ function normalizePlan(raw: string | null | undefined): PlanTier {
 }
 
 /**
+ * Sentinel error thrown when the User row doesn't exist yet (e.g. /api/auth/sync
+ * hasn't finished). Callers decide whether to retry or degrade to a default
+ * snapshot — the FK is a real constraint, but transient during login bootstrap.
+ */
+export class UserNotSyncedError extends Error {
+  constructor(public userId: string) {
+    super(`user ${userId} not yet synced to DB`);
+    this.name = 'UserNotSyncedError';
+  }
+}
+
+/**
  * Returns the subscription for `userId`. Creates a default Free row on first
  * access so every authenticated user has exactly one Subscription record.
+ *
+ * Throws `UserNotSyncedError` if the User row doesn't exist (FK violation on
+ * create) — this happens during the login bootstrap race where the frontend
+ * fires /quota in parallel with /auth/sync. Callers can catch and either
+ * return a transient 425 or render a default snapshot.
  */
 export async function getOrCreateSubscription(userId: string): Promise<Subscription> {
   const existing = await prisma.subscription.findUnique({ where: { userId } });
   if (existing) return existing;
 
+  // Pre-check: if the User row doesn't exist, fail fast with a typed error
+  // instead of letting Prisma throw a generic FK violation.
+  const userExists = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+  if (!userExists) throw new UserNotSyncedError(userId);
+
   const defaults = PLAN_DEFAULTS.free;
   const now = new Date();
-  return prisma.subscription.create({
-    data: {
-      userId,
-      plan: 'free',
-      billingCycle: null,
-      fastUsed: 0,
-      fastLimit: defaults.fast,
-      roundtableUsed: 0,
-      roundtableLimit: defaults.roundtable,
-      resetAt: addDays(now, defaults.windowDays),
-      activatedAt: now,
-    },
-  });
+  try {
+    return await prisma.subscription.create({
+      data: {
+        userId,
+        plan: 'free',
+        billingCycle: null,
+        fastUsed: 0,
+        fastLimit: defaults.fast,
+        roundtableUsed: 0,
+        roundtableLimit: defaults.roundtable,
+        resetAt: addDays(now, defaults.windowDays),
+        activatedAt: now,
+      },
+    });
+  } catch (err) {
+    // Defensive: between the existence check above and the create below the
+    // User row could still vanish, or another race could land. Surface as the
+    // typed sentinel so the route layer can degrade gracefully.
+    const code = (err as { code?: string })?.code;
+    if (code === 'P2003' || code === 'P2025') throw new UserNotSyncedError(userId);
+    throw err;
+  }
+}
+
+/**
+ * Default snapshot returned when the user's Subscription row can't be created
+ * yet (login bootstrap race — User row not synced). Mirrors a fresh free plan
+ * so the frontend can render the quota chip without flashing an error.
+ */
+export function getDefaultQuotaSnapshot(): QuotaSnapshot {
+  const defaults = PLAN_DEFAULTS.free;
+  const placeholderReset = addDays(new Date(), defaults.windowDays);
+  return {
+    plan: 'free',
+    billingCycle: null,
+    currentPeriodEnd: null,
+    cancelAtPeriodEnd: false,
+    fast: { used: 0, limit: defaults.fast, period: `resets ${placeholderReset.toISOString()}` },
+    roundtable: { used: 0, limit: defaults.roundtable, period: `resets ${placeholderReset.toISOString()}` },
+  };
 }
 
 /**
@@ -186,6 +235,38 @@ export async function getQuota(userId: string): Promise<QuotaSnapshot> {
  * Returns `{ allowed: true, remaining }` on success, or
  * `{ allowed: false, error: 'quota_exhausted', mode, resetAt }` on failure.
  */
+/**
+ * Refund one quota slot — inverse of `consumeQuota`. Used by the v2 chitchat
+ * post-hoc refund: if a turn was charged Fast quota but the routing LLM
+ * produced 0 tool calls + short narration (i.e. it was actually chitchat
+ * not a real research request), the slot is refunded so the user isn't
+ * billed for what amounts to a single cheap LLM call.
+ *
+ * Idempotent / safe — clamps at 0 so multiple refund calls or refunds for
+ * already-reset users don't go negative.
+ */
+export async function refundQuota(userId: string, mode: QuotaMode): Promise<{ newRemaining: number } | { error: string }> {
+  const usedField = mode === 'fast' ? 'fastUsed' : 'roundtableUsed';
+  try {
+    const sub = await getOrCreateSubscription(userId);
+    const currentUsed = sub[usedField];
+    if (currentUsed <= 0) {
+      // Nothing to refund — already at 0 (or post-reset). Treat as no-op.
+      return { newRemaining: 0 };
+    }
+    const updated = await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { [usedField]: { decrement: 1 } },
+    });
+    const plan = normalizePlan(updated.plan);
+    const currentLimit = mode === 'fast' ? PLAN_DEFAULTS[plan].fast : PLAN_DEFAULTS[plan].roundtable;
+    const newUsed = mode === 'fast' ? updated.fastUsed : updated.roundtableUsed;
+    return { newRemaining: currentLimit - newUsed };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function consumeQuota(userId: string, mode: QuotaMode): Promise<
   | { allowed: true; remaining: number; resetAt: Date }
   | { allowed: false; error: 'quota_exhausted'; mode: QuotaMode; resetAt: Date }
