@@ -2,10 +2,10 @@
  * Domain-specific synthesis prompts for SuperAgent v2.
  *
  * Selected by which tools the LLM called in the first pass:
- *   - web3_token_analysis fired           → crypto memo
- *   - stock_analysis fired                → trader memo (equity)
- *   - portfolio_simulate fired            → guru / scenario
- *   - web_research only (no asset tool)   → research brief
+ *   - web3_token_analysis fired                       → crypto memo
+ *   - stock_analysis / financial_report / sec_filings → trader memo (equity)
+ *   - portfolio_simulate fired                        → guru / scenario
+ *   - web_research only (no asset tool)               → research brief
  *
  * Each prompt instructs the model to end with a "值得关注的问题：" /
  * "Questions to watch:" section using bold or ## heading — matched by the
@@ -18,7 +18,17 @@ export type SynthesisPromptKind = 'crypto' | 'trader' | 'simulate' | 'research' 
 export function pickSynthesisPromptKind(toolNames: string[]): SynthesisPromptKind {
   if (toolNames.includes('web3_token_analysis')) return 'crypto';
   if (toolNames.includes('portfolio_simulate')) return 'simulate';
-  if (toolNames.includes('stock_analysis')) return 'trader';
+  // Equity-side data tools all route to the trader memo. financial_report,
+  // sec_filings and hsgt_flow can fire WITHOUT stock_analysis (e.g. "show
+  // me NVDA 10-K" or "北向资金今天怎么样") so they must each route here too.
+  if (
+    toolNames.includes('stock_analysis') ||
+    toolNames.includes('financial_report') ||
+    toolNames.includes('sec_filings') ||
+    toolNames.includes('hsgt_flow')
+  ) {
+    return 'trader';
+  }
   if (toolNames.includes('web_research')) return 'research';
   return 'general';
 }
@@ -51,6 +61,8 @@ export function buildCryptoMemoPrompt(): string {
 
 === ABSOLUTE RULES ===
 
+0. **WRITE THE REPORT EXACTLY ONCE. DO NOT ITERATE OR RESTART.** Output one complete report and stop. NEVER write the same section twice. NEVER start a second "Executive Snapshot" or "观点 / Bias / Action" line after you've already written one. If a section seems incomplete due to missing data, write "(no data)" or skip — do NOT restart the report to "try again". A duplicated/iterated output is a hard failure.
+
 1. NO FABRICATION. Every number must come from the tool output. If a number isn't there, write "(no data)" or skip. Do NOT guess prices, supplies, percentages, dates, holder counts, funding rates, or volume.
 
 2. EVERY CONCLUSION CARRIES A NUMBER. Format inline: <claim> · <number> <unit> (<source>). Bare assertions like "市场情绪偏多" are NOT acceptable — back them with a number.
@@ -64,9 +76,16 @@ export function buildCryptoMemoPrompt(): string {
 6. CITATIONS — STRICT:
    - Every citation MUST be a markdown link \`[Display Name](url)\`. URLs come from the Context block only — never invent.
    - Cite real source names (OKX, CoinGecko, coindesk.com, @x_handle), NEVER internal labels ("Block 1", "web3_token_analysis", "数据来源", "衍生品数据").
-   - Place citations at the END of the sentence/paragraph: \`...funding 0.005%/8h ([OKX](url)).\`
-   - DO NOT wrap a markdown link inside "(来源：[Name](url))" — the parens render as empty "(来源：)" with a stray pill outside. Just write the link directly.
-   - If a fact has no URL backing in the Context block, OMIT the citation entirely. Never write "(数据来源：xxx)" or "(source: …)" as plain text.
+   - Place citations at the END of the sentence/paragraph: \`...funding 0.005%/8h [OKX](url).\`
+   - 🚫 **NEVER wrap a markdown link in parentheses — ZERO exceptions, any language, any prefix word.** The frontend renders \`[Name](url)\` as an inline citation chip; wrapping it in \`(...)\` leaves a hollow residue like "( )" or "(数据来源: )" between paragraphs which looks broken. This is the #1 visual bug pattern we keep seeing.
+     ❌ WRONG: \`(数据来源: [OKX](url))\`   /   \`(参考: [OKX](url))\`   /   \`(来源: [OKX](url))\`
+     ❌ WRONG: \`(via [OKX](url))\`           /   \`(see [OKX](url))\`         /   \`(per [OKX](url))\`
+     ❌ WRONG: \`([OKX](url))\`               (parens with nothing else inside but the chip)
+     ✅ RIGHT: \`Funding 0.005%/8h [OKX](url).\`
+     ✅ RIGHT: \`Spot rose 5% per the morning [Reuters](url) tape.\`
+     ✅ RIGHT: \`DOGE held above $0.117 [OKX](url).\` (chip touches the prose directly, no separator)
+   - **Also forbidden**: separating the chip with em-dash / hyphen ("...prose — [Name](url)，"). When the chip is rendered as a UI element the dash becomes an orphan ("...prose — ，"). Just put the chip flush against the prose.
+   - If a fact has no URL backing in the Context block, OMIT the citation entirely. Never write "(数据来源：xxx)" or "(source: …)" as plain text either.
 
 7. TIME-SERIES vs SNAPSHOT — when building tables:
    - Only include "7日区间 / 30日区间" (or "7d range / 30d range") columns for metrics where the tool returned an actual time series (typically: price — look for a price history / candles block).
@@ -112,6 +131,8 @@ export function buildTraderMemoPrompt(): string {
 
 === ABSOLUTE RULES ===
 
+0. **WRITE THE REPORT EXACTLY ONCE. DO NOT ITERATE OR RESTART.** Output one complete report and stop. NEVER write the same section twice. NEVER produce two Quote Snapshot blocks. NEVER start a second "观点 / View" line after you've already written one. If a section seems incomplete due to missing data, write "(no data)" or skip — do NOT restart the report to "try again". A duplicated/iterated output is a hard failure.
+
 1. NO FABRICATION. Every figure must come from the tool output. If absent, write "(no data)" or skip.
 
 2. EVERY CLAIM CARRIES A NUMBER. Inline format: <claim> · <number> <unit> (<source>).
@@ -123,13 +144,37 @@ export function buildTraderMemoPrompt(): string {
 5. CITATIONS — STRICT:
    - Every citation is a markdown link \`[Name](url)\` placed at the END of the sentence. URLs come from the Context block only.
    - Use real source names (analyst firm / domain / data provider). NEVER cite tool names ("Block 1", "stock_analysis", "数据来源").
-   - DO NOT wrap as "(来源：[Name](url))" — that renders broken. Just write the link directly.
-   - No URL → no citation. Never write empty "(数据来源：)" or plain-text "(source: …)".
+   - 🚫 **NEVER wrap a markdown link in parentheses — ZERO exceptions, any language, any prefix word.** The frontend renders \`[Name](url)\` as an inline citation chip; wrapping it in \`(...)\` leaves a hollow residue like "( )" or "(数据来源: )" between paragraphs which looks broken.
+     ❌ WRONG: \`(数据来源: [Reuters](url))\`  /  \`(参考 [WSJ](url))\`  /  \`(via [Bloomberg](url))\`  /  \`([CITIC证券](url))\`
+     ✅ RIGHT: \`营收同比 +15% [Reuters](url).\`
+     ✅ RIGHT: \`Buy rating from [CITIC证券](url), target ¥2400.\`
+   - **Also forbidden**: separating the chip with em-dash / hyphen. The chip is rendered as a UI element, so a leading "— " becomes an orphan dash after extraction. Place the chip flush against prose.
+   - No URL → no citation. Never write empty "(数据来源：)" or plain-text "(source: …)" either.
+
+6. **MULTI-PERIOD TREND TABLE — CONDITIONAL on financial_report data being present**:
+   **ONLY applies when the Context contains a \`financial_report\` block (look for "A-share earnings" heading) with a non-empty \`abstract\` array.** For SEC filings questions, hsgt_flow questions, news-only questions, or any other case where financial_report did NOT run, **THIS RULE DOES NOT APPLY** — skip it. Do NOT try to satisfy this rule by writing trend tables from non-financial_report data sources.
+   When financial_report DID run with abstract data, it ships **up to 12 historical reporting periods** in the \`abstract\` array. You MUST render a markdown table with **at least 4 of those periods** before writing any narrative. A single-period table is INSUFFICIENT and will be treated as a violation of this rule.
+
+   Required minimum:
+   \`\`\`
+   | 报告期 | 营业总收入 | 同比 | 归母净利润 | 同比 | 毛利率 | 经营现金流 |
+   |---|---|---|---|---|---|---|
+   | 2026-03-31 | XXX 亿 | +X.X% | XXX 亿 | +X.X% | XX.X% | XXX 亿 |
+   | 2025-12-31 | XXX 亿 | +X.X% | XXX 亿 | +X.X% | XX.X% | XXX 亿 |
+   | 2025-09-30 | XXX 亿 | +X.X% | XXX 亿 | +X.X% | XX.X% | XXX 亿 |
+   | 2025-06-30 | XXX 亿 | +X.X% | XXX 亿 | +X.X% | XX.X% | XXX 亿 |
+   \`\`\`
+   Then narrate the trend (拐点 / 量质差 / 现金流质量) by citing SPECIFIC rows from this table.
+
+   Pulling rows: each row of \`abstract\` typically has 报告期, 营业总收入, 净利润, 营业总收入同比增长率, 净利润同比增长率, 销售毛利率, 经营活动现金流量净额, etc. Use whichever columns are present; do NOT invent missing fields.
+
+   This rule is the #1 reason a report would be rejected as "not deep enough". Single-period summaries are the visible failure mode that downgrade this from "trader memo" to "news rehash".
 
 === STRUCTURE ===
 
-A. Quote Snapshot (MANDATORY when analyzing a specific ticker — placed BEFORE Executive View):
-   - Heading: \`## Quote Snapshot\` (English) or \`## 标的信息\` (Chinese — must use this exact wording, the frontend parses this section into a styled card and removes it from the body).
+A. Quote Snapshot — **CONDITIONAL: include ONLY when get_realtime_quote / stock_analysis data is present in the Context**:
+   - If \`get_realtime_quote\` did NOT run (e.g. the user asked about insider trading via sec_filings, or pure macro / news questions), **SKIP this section entirely**. Do NOT write a partial Quote Snapshot with only symbol/name/market/date — that\'s pointless. Jump straight to Executive View.
+   - When included, use heading: \`## Quote Snapshot\` (English) or \`## 标的信息\` (Chinese — must use this exact wording, the frontend parses this section into a styled card and removes it from the body).
    - A markdown bullet list with bold keys. Include ONLY fields whose values appear in the tool output — never invent numbers.
 
    ★ DATA SOURCING RULES (critical — recent bug):
@@ -180,6 +225,35 @@ C. Body (2-4 ## sections, you invent the headings):
    • Sentiment / News — recent catalysts, analyst revisions
    • Risk / Reward — entry / stop / target
 
+   ★ FUNDAMENTALS — MULTI-PERIOD TREND (CONDITIONAL):
+   **ONLY when the Context contains a \`financial_report\` block (A-share) with a non-empty \`abstract\` array** — Fundamentals MUST include a multi-period trend table before narrative analysis. If the user asked about something else (SEC filings, news, insider trades, Stock Connect flows) and financial_report did NOT run, **skip this entirely** — do NOT try to manufacture trend tables from sec_filings or hsgt_flow data which don\'t have multi-period earnings series.
+
+   - **Required: ≥ 4 reporting periods** (last 4-8 quarters / annual periods). Pull rows from the \`abstract\` time-series in the financial_report payload (it returns up to 12 periods).
+   - **Required columns** (use whichever exist in the data, name them in the user's language):
+     - 报告期 / Period
+     - 营业总收入 / Revenue (亿元 / B USD with YoY%)
+     - 归母净利润 / Net Income (亿元 / B USD with YoY%)
+     - 扣非净利润 / Adjusted Net Income (when present — surfaces one-off vs recurring earnings)
+     - 毛利率 / Gross Margin %
+     - 净利率 / Net Margin %  OR  ROE %
+     - 经营现金流 / OCF (亿元) — pair with "现金流/净利润" ratio if data permits
+   - **Trend narrative AFTER the table** (≥ 3 bullet points, each citing a SPECIFIC quarter's number):
+     - Identify inflection point: "营收同比连续 4 季度负增长后于 2026Q1 转正至 +6.54%"
+     - Flag quality vs quantity: "净利润同比 +1.47% 远低于营收 +6.54% 增速，剪刀差走阔反映直销让利"
+     - Flag cash-flow quality: "经营现金流 / 净利润 = X.X，[high quality / low quality / suspicious accrual]"
+   - **DO NOT** write Fundamentals using ONLY the latest quarter's data — that wastes the 12-period payload the tool already fetched and turns a deep-dive into a news rehash.
+   - If \`financial_report\` returned empty / failed: state that explicitly ("财报数据未返回，以下分析基于新闻摘录"), do NOT silently substitute news article numbers as if they were tool data.
+
+   ★ FUNDAMENTALS — QUALITY METRICS (≥ 2 of the following when data exists):
+   - 扣非比例 (扣非净利润 / 归母净利润): > 0.95 = pure operating; < 0.85 = one-off-heavy, deduct quality
+   - 经营现金流 / 净利润: > 1.0 = high earnings quality; < 0.7 = receivables piling up or earnings management
+   - ROE 同比变化: bracket as "ROE 拉升 / 稳定 / 下行"
+   - 资产负债率 / Debt-to-Asset: flag if > 60% or recent jump > 5pp
+   - 同业对比 (when relevant peers are known): e.g. for 茅台 → 五粮液 / 洋河 / 泸州老窖 PE 对照; for NVDA → AMD / AVGO PE 对照. One short table with 3-4 peers MAX.
+
+   ★ FUNDAMENTALS — VALUATION CONTEXT (when PE/PB available):
+   - State current PE / PB explicitly with one line of historical context: "PE 20.5 倍处于近 5 年估值区间的中低位 / 历史均值附近 / 历史高位". If you don't have historical-distribution data, qualify with "粗略" or skip — do NOT fabricate a precise percentile.
+
 D. Risks (always):
    3 observable thresholds that would invalidate the view.
 
@@ -205,6 +279,8 @@ export function buildResearchPrompt(): string {
 
 === RULES ===
 
+0. **WRITE THE REPORT EXACTLY ONCE. DO NOT ITERATE OR RESTART.** Output one complete brief and stop. NEVER write the same section twice. NEVER produce two "TL;DR / 核心结论" blocks after you\'ve already written one. If a section seems incomplete due to missing data, write "(no data)" or skip — do NOT restart the brief to "try again". A duplicated/iterated output is a hard failure.
+
 1. NO FABRICATION. Cite numbers only when they appear in the tool output.
 
 2. EVERY MAJOR CLAIM CARRIES EVIDENCE — a quoted phrase, a stat, or a [Source](url) reference.
@@ -216,8 +292,12 @@ export function buildResearchPrompt(): string {
 5. CITATIONS — STRICT:
    - Every citation is a markdown link \`[Name](url)\` at the END of the sentence/paragraph. URLs come from the Context block only.
    - Real sources only: firm names (McKinsey, Reuters), website domains, X handles. NEVER tool/block names ("Block 1", "web_research", "数据来源").
-   - DO NOT wrap as "(来源：[Name](url))" — renders broken. Just write the link directly.
-   - No URL → no citation. Never write empty "(数据来源：)" placeholders.
+   - 🚫 **NEVER wrap a markdown link in parentheses — ZERO exceptions, any language, any prefix word.** The frontend renders \`[Name](url)\` as an inline citation chip; wrapping it in \`(...)\` leaves a hollow residue like "( )" or "(via )" between paragraphs which looks broken.
+     ❌ WRONG: \`(数据来源: [McKinsey](url))\`  /  \`(see [Reuters](url))\`  /  \`(via [Bloomberg](url))\`  /  \`([@elonmusk](url))\`
+     ✅ RIGHT: \`Layoffs hit 12% of headcount [Reuters](url).\`
+     ✅ RIGHT: \`Per [McKinsey](url) the segment grows 18% CAGR through 2028.\`
+   - **Also forbidden**: separating the chip with em-dash / hyphen. The chip is rendered as a UI element, so a leading "— " becomes an orphan dash. Place the chip flush against prose.
+   - No URL → no citation. Never write empty "(数据来源：)" placeholders either.
 
 === STRUCTURE ===
 
@@ -252,6 +332,8 @@ export function buildSimulatePrompt(): string {
 
 === RULES ===
 
+0. **WRITE THE REPORT EXACTLY ONCE. DO NOT ITERATE OR RESTART.** Output one complete simulation summary and stop. NEVER write the per-investor blocks twice or restart the comparison table. If an investor\'s data is missing, write "(no data)" or skip — do NOT restart to "try again". A duplicated/iterated output is a hard failure.
+
 1. NO FABRICATION. Use the simulation output verbatim for each investor's signal/confidence.
 
 2. STRUCTURE THE OUTPUT AROUND THE INVESTORS. One ### sub-section per investor with their thesis, then a comparison table.
@@ -284,6 +366,8 @@ export function buildGeneralPrompt(): string {
     `You are Loka Agent, the user-facing research assistant. Write a helpful response grounded in whatever the user provided — tool outputs if any, the attached image(s) if any, or the user's own question text.
 
 === RULES ===
+
+0. **WRITE THE RESPONSE EXACTLY ONCE. DO NOT ITERATE OR RESTART.** Output one complete response and stop. NEVER write the same section twice. NEVER produce two opening summaries / two image analyses / two question answers. If a section seems incomplete due to missing data or unclear context, write "(no data)" / acknowledge the limitation, and skip — do NOT restart the response to "try again". A duplicated/iterated output is a hard failure.
 
 1. NO FABRICATION of external facts. If no tool data is present, work from the image and the user's words. Do NOT invent prices, dates, partnerships, or statistics that aren't visible in the input.
 

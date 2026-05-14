@@ -9,6 +9,21 @@ category: flow
 
 Analyze capital flows through the Shanghai-Hong Kong and Shenzhen-Hong Kong Stock Connect programs. Northbound flows (foreign capital into A-shares) are a key institutional sentiment indicator for the China market; Southbound flows (mainland capital into Hong Kong) reveal mainland investor preference for HK-listed assets. Together they provide a real-time cross-border capital positioning signal.
 
+## Data tool — `hsgt_flow`
+
+When the user asks about Stock Connect / 北向 / 南向 capital flow, **call the `hsgt_flow` tool** to get live data from akshare (东方财富沪深港通频道). Modes:
+
+- `direction=summary` — today's 4-channel snapshot (default, fastest)
+- `direction=northbound` + `days=30` — 北向资金 30 日历史（沪股通 + 深股通分别返回）
+- `direction=southbound` + `days=30` — 南向资金 30 日历史（港股通沪 + 港股通深）
+- `direction=all` + `days=30` — 北向 + 南向 全部
+- `ticker=600519` — 单只 A 股的北向持仓变动历史（"外资在加仓茅台吗"这类问题）
+
+**配对建议：**
+- 问 "X 北向加仓了吗" → `hsgt_flow(ticker=X)` + `stock_analysis(tickers=[X])` + `web_research`
+- 问 "北向资金今天怎么样" → `hsgt_flow(direction=summary)` 单独即可
+- 问 "南下港股资金趋势" → `hsgt_flow(direction=southbound, days=30)` + `web_research`
+
 ## Core Concepts
 
 ### 1. Stock Connect Architecture

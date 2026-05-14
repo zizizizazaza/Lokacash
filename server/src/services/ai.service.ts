@@ -4,6 +4,38 @@ import * as https from 'node:https';
 import * as http from 'node:http';
 import { URL as NodeURL } from 'node:url';
 
+/** Error type for upstream LLM gateway failures that have been confirmed
+ *  unrecoverable. Synthesis layer catches this and shows `userFacingMessage`
+ *  instead of leaking the full stack to the chat bubble. */
+export class UpstreamUnavailableError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly userFacingMessage: string,
+  ) {
+    super(message);
+    this.name = 'UpstreamUnavailableError';
+  }
+}
+
+/** Sleep that resolves early if the abort signal fires. */
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(t);
+          resolve();
+        },
+        { once: true },
+      );
+    }
+  });
+}
+
 export function getGlobalTimeContext(): string {
   const now = new Date();
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -461,6 +493,106 @@ ${userText || '(empty)'}`;
   }
 
   /**
+   * Wraps an upstream LLM POST with bounded retries on transient failures
+   * (HTTP 429 rate-limit, 5xx gateway errors, network errors). Each retry
+   * uses exponential backoff + honors Retry-After when set.
+   *
+   * NOT retried (these won't fix themselves, fail fast):
+   *   - 400 (malformed) / 401 / 403 (auth) / 404 (wrong endpoint)
+   *   - mid-stream errors (only the initial connect is guarded)
+   *   - user-cancelled (abort signal)
+   *
+   * Returns the Response if any attempt succeeds. Throws
+   * `UpstreamUnavailableError` after all retries fail so the synthesis layer
+   * can surface a clean user-facing message instead of leaking stack traces.
+   */
+  private async fetchWithRetry(
+    url: string,
+    init: { method: string; headers: Record<string, string>; body: string; abortSignal?: AbortSignal },
+    label: string,
+  ): Promise<Response> {
+    const maxAttempts = 3; // initial + 2 retries
+    const baseBackoffMs = 1000;
+    const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (init.abortSignal?.aborted) {
+        throw new Error(`${label}: aborted before attempt ${attempt}`);
+      }
+      try {
+        const fetchStart = Date.now();
+        const response = await fetch(url, {
+          method: init.method,
+          headers: init.headers,
+          body: init.body,
+          signal: init.abortSignal,
+        });
+        const elapsed = Date.now() - fetchStart;
+        if (response.ok) {
+          if (attempt > 1) {
+            console.log(`[${label}] succeeded on retry attempt ${attempt} after ${elapsed}ms`);
+          }
+          return response;
+        }
+        let bodyPreview = '';
+        try {
+          bodyPreview = (await response.text()).slice(0, 300);
+        } catch {
+          bodyPreview = '(could not read body)';
+        }
+        if (retryableStatuses.has(response.status) && attempt < maxAttempts) {
+          // Honor server-sent Retry-After header if present (seconds, integer).
+          const retryAfterRaw = response.headers.get('retry-after');
+          const retryAfterMs = retryAfterRaw && /^\d+$/.test(retryAfterRaw)
+            ? Math.min(15_000, Number.parseInt(retryAfterRaw, 10) * 1000)
+            : null;
+          const backoff = retryAfterMs ?? Math.min(15_000, baseBackoffMs * Math.pow(3, attempt - 1));
+          console.warn(
+            `[${label}] HTTP ${response.status} attempt ${attempt}/${maxAttempts} — retry in ${backoff}ms. Body: ${bodyPreview}`,
+          );
+          await sleepWithAbort(backoff, init.abortSignal);
+          continue;
+        }
+        const err = new UpstreamUnavailableError(
+          `${label}: HTTP ${response.status} (non-retryable). Body: ${bodyPreview}`,
+          response.status,
+          this.toUserFacingMessage(response.status),
+        );
+        console.error(`[${label}] FATAL ${response.status} attempt ${attempt}: ${bodyPreview}`);
+        throw err;
+      } catch (err: any) {
+        if (err instanceof UpstreamUnavailableError) throw err;
+        if (err?.name === 'AbortError' || err?.message?.includes('aborted')) throw err;
+        // Network-level error (ECONNRESET, ENOTFOUND, fetch failed, etc.)
+        lastError = err;
+        if (attempt < maxAttempts) {
+          const backoff = Math.min(15_000, baseBackoffMs * Math.pow(3, attempt - 1));
+          console.warn(
+            `[${label}] network error attempt ${attempt}/${maxAttempts}: ${err?.message || err}. Retry in ${backoff}ms.`,
+          );
+          await sleepWithAbort(backoff, init.abortSignal);
+          continue;
+        }
+      }
+    }
+    throw new UpstreamUnavailableError(
+      `${label}: exhausted ${maxAttempts} attempts. Last error: ${(lastError as Error)?.message || 'unknown'}`,
+      503,
+      'The AI service is temporarily unavailable. Please try again in a moment.',
+    );
+  }
+
+  /** Map an HTTP status to a user-friendly English message. */
+  private toUserFacingMessage(status: number): string {
+    if (status === 429) return 'AI service is rate-limited right now. Please wait a few seconds and try again.';
+    if (status === 401 || status === 403) return 'AI service authentication failed. Please contact support.';
+    if (status === 400) return 'The request was malformed. Please rephrase your question.';
+    if (status >= 500) return 'AI service is having issues right now. Please retry in a moment.';
+    return 'AI service returned an unexpected error. Please retry.';
+  }
+
+  /**
    * Streaming chat WITH tool definitions (function calling).
    *
    * Returns a structured result containing:
@@ -510,24 +642,22 @@ ${userText || '(empty)'}`;
     );
 
     const fetchStart = Date.now();
-    const response = await fetch(this.baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        // Same gzip workaround as chatStream — avoids undici inflate batching.
-        'Accept-Encoding': 'identity',
+    const response = await this.fetchWithRetry(
+      this.baseUrl,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          // Same gzip workaround as chatStream — avoids undici inflate batching.
+          'Accept-Encoding': 'identity',
+        },
+        body: JSON.stringify(requestBody),
+        abortSignal: args.abortSignal,
       },
-      body: JSON.stringify(requestBody),
-      signal: args.abortSignal,
-    });
+      'AI chatStreamWithTools',
+    );
     const fetchHeadersMs = Date.now() - fetchStart;
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[AI chatStreamWithTools] ERROR ${response.status}: ${errorText.slice(0, 500)}`);
-      throw new Error(`AI API error (${response.status}): ${errorText.slice(0, 200)}`);
-    }
     console.log(
       `[AI chatStreamWithTools] Response OK, status=${response.status}, http_headers_ms=${fetchHeadersMs}, content-encoding=${response.headers.get('content-encoding') || 'none'}`,
     );
@@ -658,26 +788,24 @@ ${userText || '(empty)'}`;
     }
 
     const fetchStart = Date.now();
-    const response = await fetch(this.baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        // Disable gzip/br compression on the SSE stream. With compression
-        // enabled, undici's inflate stage buffers ~10-15 deltas before
-        // yielding to reader.read(), producing 1.5-2s stalls even though
-        // the upstream is sending one delta every ~125ms (verified via curl).
-        'Accept-Encoding': 'identity',
+    const response = await this.fetchWithRetry(
+      this.baseUrl,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          // Disable gzip/br compression on the SSE stream. With compression
+          // enabled, undici's inflate stage buffers ~10-15 deltas before
+          // yielding to reader.read(), producing 1.5-2s stalls even though
+          // the upstream is sending one delta every ~125ms (verified via curl).
+          'Accept-Encoding': 'identity',
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-    });
+      'AI chatStream',
+    );
     const fetchHeadersMs = Date.now() - fetchStart;
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[AI chatStream] ERROR ${response.status}: ${errorText.slice(0, 500)}`);
-      throw new Error(`AI API error (${response.status}): ${errorText}`);
-    }
 
     // Diagnostic: log key response headers so we can tell whether the upstream
     // honored our Accept-Encoding: identity request, and what HTTP version /

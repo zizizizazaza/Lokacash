@@ -13,6 +13,7 @@ import path from 'path';
 import fs from 'fs';
 import { config } from '../config.js';
 import { pyFetch } from './consensus.service.js';
+import { withPythonSlot } from './pythonSemaphore.service.js';
 
 // ── Types ──
 
@@ -128,49 +129,59 @@ function detectAssetType(symbol: string): string {
 // ── Step 1: Fetch raw market data via stock-analysis tools ──
 
 export function fetchMarketData(stockCode: string): Promise<MarketData> {
-  return new Promise((resolve, reject) => {
-    const pythonPath = getPythonPath();
-    const scriptPath = path.join(process.cwd(), 'tools', 'stock-analysis', 'fetch_data_only.py');
+  // Guarded by withPythonSlot — fetch_data_only.py loads the same pandas /
+  // akshare stack as stock_analysis (250-350 MB resident). Co-acquiring with
+  // the global semaphore prevents Roundtable from blowing past the cap.
+  return withPythonSlot(
+    () =>
+      new Promise<MarketData>((resolve, reject) => {
+        const pythonPath = getPythonPath();
+        const scriptPath = path.join(process.cwd(), 'tools', 'stock-analysis', 'fetch_data_only.py');
 
-    console.log(`[Investment] Fetching market data for ${stockCode}...`);
+        console.log(`[Investment] Fetching market data for ${stockCode}...`);
 
-    const proc = spawn(pythonPath, [scriptPath, '--stock-code', stockCode], {
-      cwd: path.join(process.cwd(), 'tools', 'stock-analysis'),
-      env: buildEnv() as NodeJS.ProcessEnv,
-    });
+        const proc = spawn(pythonPath, [scriptPath, '--stock-code', stockCode], {
+          cwd: path.join(process.cwd(), 'tools', 'stock-analysis'),
+          env: buildEnv() as NodeJS.ProcessEnv,
+        });
 
-    const chunks: Buffer[] = [];
+        const chunks: Buffer[] = [];
 
-    proc.stdout.on('data', (data: Buffer) => chunks.push(data));
-    proc.stderr.on('data', (data: Buffer) => {
-      const lines = data.toString('utf-8').split('\n');
-      for (const line of lines) {
-        const clean = line.trim();
-        if (clean && !clean.includes('Tushare Token') && !clean.includes('通知渠道')) {
-          console.log(`[Investment:DataFetch] ${clean}`);
-        }
-      }
-    });
+        proc.stdout.on('data', (data: Buffer) => chunks.push(data));
+        proc.stderr.on('data', (data: Buffer) => {
+          const lines = data.toString('utf-8').split('\n');
+          for (const line of lines) {
+            const clean = line.trim();
+            if (clean && !clean.includes('Tushare Token') && !clean.includes('通知渠道')) {
+              console.log(`[Investment:DataFetch] ${clean}`);
+            }
+          }
+        });
 
-    proc.on('close', (code) => {
-      const raw = Buffer.concat(chunks).toString('utf-8').trim();
-      if (code !== 0) {
-        reject(new Error(`fetch_data_only.py exited with code ${code}`));
-        return;
-      }
-      try {
-        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error('No JSON object in fetch_data_only output');
-        const data: MarketData = JSON.parse(jsonMatch[0]);
-        console.log(`[Investment] Market data fetched: quote=${!!data.realtime_quote}, history=${!!data.daily_history}, info=${!!data.stock_info}, news=${!!data.news}, errors=${data.errors.length}`);
-        resolve(data);
-      } catch (e: any) {
-        reject(new Error(`Failed to parse fetch_data_only output: ${e.message}`));
-      }
-    });
+        proc.on('close', (code) => {
+          const raw = Buffer.concat(chunks).toString('utf-8').trim();
+          if (code !== 0) {
+            reject(new Error(`fetch_data_only.py exited with code ${code}`));
+            return;
+          }
+          try {
+            const jsonMatch = raw.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) throw new Error('No JSON object in fetch_data_only output');
+            const data: MarketData = JSON.parse(jsonMatch[0]);
+            console.log(`[Investment] Market data fetched: quote=${!!data.realtime_quote}, history=${!!data.daily_history}, info=${!!data.stock_info}, news=${!!data.news}, errors=${data.errors.length}`);
+            resolve(data);
+          } catch (e: any) {
+            reject(new Error(`Failed to parse fetch_data_only output: ${e.message}`));
+          }
+        });
 
-    proc.on('error', (err) => reject(err));
-  });
+        proc.on('error', (err) => reject(err));
+      }),
+    {
+      tag: `fetch_data_only:${stockCode}`,
+      timeoutMs: 90_000,
+    },
+  );
 }
 
 // ── Step 2: Format raw data into Aegean request payload ──

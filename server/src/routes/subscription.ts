@@ -14,8 +14,10 @@ import prisma from '../db.js';
 import {
   applyPlan,
   consumeQuota,
+  getDefaultQuotaSnapshot,
   getOrCreateSubscription,
   getQuota,
+  UserNotSyncedError,
   type PlanTier,
 } from '../services/subscription.service.js';
 
@@ -36,6 +38,13 @@ router.get('/quota', authRequired, async (req: AuthRequest, res: Response) => {
     const snapshot = await getQuota(userId);
     res.json(snapshot);
   } catch (err) {
+    // Login bootstrap race: /auth/sync hasn't created the User row yet, so
+    // we can't create a Subscription either. Return a transient default
+    // snapshot instead of 500 — the frontend will refresh after the next
+    // user-driven action and pick up the real row.
+    if (err instanceof UserNotSyncedError) {
+      return res.status(200).json(getDefaultQuotaSnapshot());
+    }
     res.status(500).json({ error: (err as Error).message || 'failed to load quota' });
   }
 });

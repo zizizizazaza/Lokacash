@@ -1138,6 +1138,312 @@ const StockPatternCard: React.FC<{ data: any }> = ({ data }) => {
     );
 };
 
+// ── A-share / US / HK extension cards (SuperAgent v2 tools) ────────────────
+
+/** A-share financial reports — shape from financialReportTool.ts:
+ *  { stock_code, period, abstract_count, abstract: [{报告期, 营业总收入, 净利润, ...}],
+ *    yjyg, yjkb, yjbb, errors }. Render a compact multi-period preview table
+ *  (3-4 rows, most recent first) plus optional 业绩预告 chip. */
+const FinancialReportCard: React.FC<{ data: any }> = ({ data }) => {
+    if (data?.error) {
+        return (
+            <CardShell title="财务报告" provider="同花顺 / 东方财富">
+                <div className="text-gray-400 text-xs">{String(data.error).slice(0, 120)}</div>
+            </CardShell>
+        );
+    }
+    const code = data?.stock_code ?? '—';
+    const periodAnchor = data?.period ?? '';
+    const abstractRows: any[] = Array.isArray(data?.abstract) ? data.abstract : [];
+    const previewRows = abstractRows.slice(0, 4);
+    const yjyg = data?.yjyg?.row;
+    const yjkb = data?.yjkb?.row;
+
+    // Pick a few canonical fields per row — akshare's column names vary
+    // slightly across years (rev/profit YoY suffixes). Use lookups.
+    const pick = (row: any, keys: string[]): string => {
+        for (const k of keys) {
+            if (row && row[k] != null && row[k] !== '') return String(row[k]);
+        }
+        return '—';
+    };
+
+    return (
+        <CardShell title="财务报告" subtitle={code} provider={`同花顺 · ${previewRows.length}/${data?.abstract_count ?? 0} 期`}>
+            {previewRows.length > 0 ? (
+                <div className="overflow-x-auto -mx-3.5">
+                    <table className="w-full text-[11px]" style={{ fontFamily: mono }}>
+                        <thead>
+                            <tr className="text-gray-400 uppercase tracking-wider">
+                                <th className="px-3.5 py-1 text-left font-normal">报告期</th>
+                                <th className="px-2 py-1 text-right font-normal">营收</th>
+                                <th className="px-2 py-1 text-right font-normal">同比</th>
+                                <th className="px-2 py-1 text-right font-normal">净利</th>
+                                <th className="px-3.5 py-1 text-right font-normal">毛利率</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {previewRows.map((row, i) => (
+                                <tr key={i} className="border-t border-gray-100">
+                                    <td className="px-3.5 py-1 text-gray-700">{pick(row, ['报告期', 'date'])}</td>
+                                    <td className="px-2 py-1 text-gray-800 tabular-nums text-right">
+                                        {pick(row, ['营业总收入', '营业收入', 'revenue'])}
+                                    </td>
+                                    <td className="px-2 py-1 text-right tabular-nums">
+                                        <span className={
+                                            (pick(row, ['营业总收入同比增长率', '营业收入同比增长率']) || '').toString().startsWith('-')
+                                                ? 'text-rose-500'
+                                                : 'text-emerald-600'
+                                        }>
+                                            {pick(row, ['营业总收入同比增长率', '营业收入同比增长率'])}
+                                        </span>
+                                    </td>
+                                    <td className="px-2 py-1 text-gray-800 tabular-nums text-right">
+                                        {pick(row, ['净利润', '归母净利润'])}
+                                    </td>
+                                    <td className="px-3.5 py-1 text-gray-800 tabular-nums text-right">
+                                        {pick(row, ['销售毛利率', '毛利率'])}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            ) : (
+                <div className="text-gray-400 text-[11px]">财务摘要未返回；请期待业绩预告 / 业绩快报。</div>
+            )}
+            {(yjyg || yjkb) && (
+                <div className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap gap-1.5">
+                    {yjyg && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-50 text-amber-700 font-medium border border-amber-100">
+                            业绩预告 · {data?.yjyg?.period ?? ''}
+                        </span>
+                    )}
+                    {yjkb && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-medium border border-blue-100">
+                            业绩快报 · {data?.yjkb?.period ?? ''}
+                        </span>
+                    )}
+                </div>
+            )}
+            <div className="mt-2 text-[9.5px] text-gray-400 uppercase tracking-[0.12em]" style={{ fontFamily: mono }}>
+                anchor period: {periodAnchor}
+            </div>
+        </CardShell>
+    );
+};
+
+/** SEC EDGAR filings — shape from secFilingsTool.ts:
+ *  { ticker, cik, companyName, sicDescription, exchanges, formTypes,
+ *    totalMatched, filings: { '10-K': [{filingDate, primaryDocDescription,
+ *    primaryDocUrl, ...}], '10-Q': [...], '8-K': [...] } }. Render most
+ *  recent filings grouped by form type with clickable doc links. */
+const SecFilingsCard: React.FC<{ data: any }> = ({ data }) => {
+    if (data?.error) {
+        return (
+            <CardShell title="SEC EDGAR" provider="data.sec.gov">
+                <div className="text-gray-400 text-xs">{String(data.error).slice(0, 100)}</div>
+            </CardShell>
+        );
+    }
+    const ticker = data?.ticker ?? '—';
+    const companyName = data?.companyName ?? '';
+    const filings = data?.filings || {};
+    const formTypes: string[] = Array.isArray(data?.formTypes) ? data.formTypes : Object.keys(filings);
+    return (
+        <CardShell
+            title={ticker}
+            subtitle={companyName}
+            provider={`SEC EDGAR · CIK ${data?.cik ?? ''}`}
+        >
+            <div className="space-y-2.5">
+                {formTypes.map((form) => {
+                    const rows: any[] = Array.isArray(filings[form]) ? filings[form] : [];
+                    if (rows.length === 0) return null;
+                    return (
+                        <div key={form}>
+                            <div className="text-[10px] uppercase tracking-[0.12em] text-gray-400 mb-1" style={{ fontFamily: mono }}>
+                                {form} · {rows.length}
+                            </div>
+                            <ul className="space-y-1">
+                                {rows.slice(0, 3).map((f, i) => (
+                                    <li key={i} className="flex items-baseline justify-between gap-3 text-[11.5px]">
+                                        <a
+                                            href={f.primaryDocUrl}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-blue-600 hover:underline truncate flex-1"
+                                            title={f.primaryDocDescription}
+                                        >
+                                            {String(f.primaryDocDescription || f.form || form).slice(0, 50) || form}
+                                        </a>
+                                        <span className="text-gray-400 tabular-nums shrink-0" style={{ fontFamily: mono }}>
+                                            {f.filingDate}
+                                        </span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    );
+                })}
+                {data?.totalMatched > 0 && (
+                    <div className="text-[10px] text-gray-400 pt-1.5 border-t border-gray-100">
+                        Total: {data.totalMatched} filing(s) · {data?.sicDescription || data?.exchanges?.join(', ') || ''}
+                    </div>
+                )}
+            </div>
+        </CardShell>
+    );
+};
+
+/** HSGT Stock Connect flow — shape from hsgtFlowTool.ts:
+ *  { direction, days, ticker, history_*: [{日期, 当日成交净买额, ...}],
+ *    summary?: [...], per_stock_holdings?: [...] }. Render most recent
+ *  net-flow values with sparkline-ish trend. */
+const HsgtFlowCard: React.FC<{ data: any }> = ({ data }) => {
+    if (data?.error) {
+        return (
+            <CardShell title="沪深港通资金流向" provider="东方财富">
+                <div className="text-gray-400 text-xs">{String(data.error).slice(0, 120)}</div>
+            </CardShell>
+        );
+    }
+    const direction = data?.direction ?? 'summary';
+    const ticker = data?.ticker;
+
+    // Per-stock view takes precedence (either A-share NB or HK SB holdings)
+    if (ticker && Array.isArray(data?.per_stock_holdings) && data.per_stock_holdings.length > 0) {
+        const rows = data.per_stock_holdings.slice(-7).reverse();
+        const isSouthbound = data?.ticker_type === 'HK_southbound';
+        const titleLabel = isSouthbound ? '南向持仓 (港股通买入)' : '北向持仓变动';
+        return (
+            <CardShell title={titleLabel} subtitle={data?.stock_code || ticker} provider="沪深港通">
+                <table className="w-full text-[11px]" style={{ fontFamily: mono }}>
+                    <thead>
+                        <tr className="text-gray-400 uppercase tracking-wider">
+                            <th className="py-1 text-left font-normal">日期</th>
+                            <th className="py-1 text-right font-normal">持股数</th>
+                            <th className="py-1 text-right font-normal">{isSouthbound ? '持股市值' : '持股比例'}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((row: any, i: number) => (
+                            <tr key={i} className="border-t border-gray-100">
+                                <td className="py-1 text-gray-700">{row?.持股日期 || row?.日期 || '—'}</td>
+                                <td className="py-1 text-gray-800 tabular-nums text-right">
+                                    {row?.持股数量 || row?.持股股数 || row?.['持股数量(股)'] || '—'}
+                                </td>
+                                <td className="py-1 text-gray-800 tabular-nums text-right">
+                                    {isSouthbound
+                                        ? (row?.持股市值 || row?.['持股市值(元)'] || row?.市值 || '—')
+                                        : (row?.持股市值占比 || row?.持股比例 || '—')}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </CardShell>
+        );
+    }
+
+    const renderChannel = (label: string, key: string) => {
+        const rows: any[] = Array.isArray((data as any)[key]) ? (data as any)[key] : [];
+        if (rows.length === 0) return null;
+        const recent = rows.slice(-1)[0] || {};
+        const netBuy = recent['当日成交净买额'] ?? recent['当日资金流入'] ?? recent['净买额'] ?? '—';
+        const netBuyNum = typeof netBuy === 'number' ? netBuy : parseFloat(String(netBuy));
+        const isNegative = Number.isFinite(netBuyNum) && netBuyNum < 0;
+        return (
+            <div key={key} className="flex items-baseline justify-between gap-3">
+                <span className="text-[11.5px] text-gray-600">{label}</span>
+                <span className={`text-[12px] font-medium tabular-nums ${isNegative ? 'text-rose-500' : 'text-emerald-600'}`}
+                      style={{ fontFamily: mono }}>
+                    {String(netBuy)}
+                </span>
+            </div>
+        );
+    };
+
+    // Summary mode: today's 4-channel snapshot.
+    // akshare's stock_hsgt_fund_flow_summary_em splits the channel info
+    // across TWO columns: `类型` (沪港通 / 深港通) and `资金方向` (北向 / 南向).
+    // We need to join them so the user sees "沪股通 (北向)" vs "港股通沪 (南向)"
+    // — without that combo, 4 rows show only 2 distinct labels and look broken.
+    if (direction === 'summary' && Array.isArray(data?.summary) && data.summary.length > 0) {
+        const combinedLabel = (row: any): string => {
+            const channel = row?.类型 || row?.板块 || row?.通道 || row?.指标 || '';
+            const dir = row?.资金方向 || row?.方向 || '';
+            // Map (类型 + 方向) to canonical channel names if both known
+            if (channel && dir) {
+                const c = String(channel);
+                const d = String(dir);
+                if (c.includes('沪')) return d.includes('北') ? '沪股通 (北向)' : '港股通沪 (南向)';
+                if (c.includes('深')) return d.includes('北') ? '深股通 (北向)' : '港股通深 (南向)';
+                return `${c} (${d})`;
+            }
+            return channel || dir || '—';
+        };
+        return (
+            <CardShell title="沪深港通资金流向" subtitle="今日快照" provider="东方财富">
+                <table className="w-full text-[11px]" style={{ fontFamily: mono }}>
+                    <thead>
+                        <tr className="text-gray-400 uppercase tracking-wider">
+                            <th className="py-1 text-left font-normal">通道</th>
+                            <th className="py-1 text-right font-normal">净买额</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {data.summary.map((row: any, i: number) => {
+                            const label = combinedLabel(row);
+                            const netBuyRaw = row?.今日资金流入 ?? row?.成交净买额 ?? row?.净买额 ?? row?.当日资金流入 ?? null;
+                            const numVal = typeof netBuyRaw === 'number' ? netBuyRaw : parseFloat(String(netBuyRaw ?? ''));
+                            const isNbZero = Number.isFinite(numVal) && numVal === 0 && /北向/.test(label);
+                            const neg = Number.isFinite(numVal) && numVal < 0;
+                            // Trim float noise to 2 decimal places when it's a finite number
+                            const display = Number.isFinite(numVal)
+                                ? (Math.abs(numVal) >= 100 ? numVal.toFixed(0) : numVal.toFixed(2))
+                                : (netBuyRaw == null ? '—' : String(netBuyRaw));
+                            return (
+                                <tr key={i} className="border-t border-gray-100">
+                                    <td className="py-1 text-gray-700">{label}</td>
+                                    <td className={`py-1 tabular-nums text-right ${isNbZero ? 'text-gray-400' : neg ? 'text-rose-500' : 'text-emerald-600'}`}>
+                                        {display}
+                                        {isNbZero && <span className="ml-1 text-[9px] text-gray-400">(制度性归零)</span>}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </CardShell>
+        );
+    }
+
+    // History mode: show latest day's net buy per active channel + small trend
+    const channelLabels: Array<[string, string]> = [
+        ['沪股通 (NB)', 'history_沪股通'],
+        ['深股通 (NB)', 'history_深股通'],
+        ['港股通沪 (SB)', 'history_港股通沪'],
+        ['港股通深 (SB)', 'history_港股通深'],
+    ];
+    const lines = channelLabels
+        .map(([label, key]) => renderChannel(label, key))
+        .filter(Boolean);
+    return (
+        <CardShell
+            title="沪深港通资金流向"
+            subtitle={`${direction} · ${data?.days ?? ''}d`}
+            provider="东方财富"
+        >
+            {lines.length > 0 ? (
+                <div className="space-y-1.5">{lines}</div>
+            ) : (
+                <div className="text-gray-400 text-[11px]">本期通道数据为空。</div>
+            )}
+        </CardShell>
+    );
+};
+
 // ── Registry ───────────────────────────────────────────────────────────────
 
 type Renderer = React.FC<{ data: any }>;
@@ -1165,6 +1471,10 @@ const TOOL_RENDERERS: Record<string, Renderer> = {
     search_comprehensive_intel: StockNewsCard,
     get_volume_analysis: StockVolumeCard,
     analyze_pattern: StockPatternCard,
+    // ── SuperAgent v2 extension tools (A-share earnings / SEC / HSGT) ──
+    financial_report: FinancialReportCard,
+    sec_filings: SecFilingsCard,
+    hsgt_flow: HsgtFlowCard,
     // get_chip_distribution / get_analysis_context / get_portfolio_snapshot /
     // get_market_indices / get_sector_rankings / *_backtest_summary fall back
     // to GenericToolCard until we add dedicated renderers.
@@ -1214,6 +1524,10 @@ const TOOL_LABELS_ZH: Record<string, string> = {
     get_skill_backtest_summary: '技能回测',
     get_strategy_backtest_summary: '策略回测',
     get_stock_backtest_summary: '个股回测',
+    // ── SuperAgent v2 extension tools ──
+    financial_report: '财务报告',
+    sec_filings: 'SEC 文件',
+    hsgt_flow: '沪深港通',
 };
 
 const TOOL_LABELS_EN: Record<string, string> = {
@@ -1252,6 +1566,10 @@ const TOOL_LABELS_EN: Record<string, string> = {
     get_skill_backtest_summary: 'skill backtest',
     get_strategy_backtest_summary: 'strategy backtest',
     get_stock_backtest_summary: 'stock backtest',
+    // ── SuperAgent v2 extension tools ──
+    financial_report: 'earnings reports',
+    sec_filings: 'SEC filings',
+    hsgt_flow: 'Stock Connect flow',
     // Search-side pseudo-tools (not real LLM tool calls — synthesized from
     // the `search` module's state to give visual parity with web3 pills).
     search_web: 'searching web',
@@ -1293,6 +1611,9 @@ const TOOL_CATEGORY: Record<string, ToolCategory> = {
     // Signal (derivatives / on-chain / liquidations / capital flow)
     get_okx_derivatives: 'signal', get_okx_news_sentiment: 'signal', get_okx_liquidations: 'signal',
     get_chip_distribution: 'signal', get_capital_flow: 'signal',
+    hsgt_flow: 'signal',
+    // SuperAgent v2 extension tools — financial reports + SEC filings = data
+    financial_report: 'data', sec_filings: 'data',
 };
 
 function categorizeToolName(name: string): ToolCategory {
@@ -1507,7 +1828,9 @@ function classifyStageProvider(toolName: string): 'okx' | 'token' | 'stock' | 's
         toolName === 'search_comprehensive_intel' || toolName === 'get_portfolio_snapshot' ||
         toolName === 'get_market_indices' || toolName === 'get_sector_rankings' ||
         toolName === 'get_skill_backtest_summary' || toolName === 'get_strategy_backtest_summary' ||
-        toolName === 'get_stock_backtest_summary' || toolName === 'get_analysis_context'
+        toolName === 'get_stock_backtest_summary' || toolName === 'get_analysis_context' ||
+        // SuperAgent v2 extension tools cluster under the same "Stock data" group
+        toolName === 'financial_report' || toolName === 'sec_filings' || toolName === 'hsgt_flow'
     ) return 'stock';
     if (
         toolName.startsWith('get_token_') || toolName.startsWith('get_trending_') ||

@@ -497,6 +497,7 @@ export function QuoteCard({
       style={{
         fontFamily: TK_SANS,
         fontVariantNumeric: 'tabular-nums',
+        fontFeatureSettings: '"tnum" 1, "zero" 0, "ss01" 1',
         boxShadow: '0 2px 24px -8px rgba(15,23,42,0.08), 0 1px 2px rgba(15,23,42,0.04)',
         border: `1px solid ${TERM.line}`,
       }}
@@ -767,7 +768,13 @@ function buildSparkPath(
   return { line, area, isUp, lastX: last[0], lastY: last[1] };
 }
 
-const TK_MONO = "ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace";
+// Numbers in cards use Inter (sans) rather than a programmer mono. Consolas
+// (Windows default mono) and most monospace fonts ship slashed zeros with no
+// OpenType `zero` toggle, so even `font-feature-settings: "zero" 0` can't
+// remove the slash. Inter + `tabular-nums` keeps column alignment while
+// rendering clean unslashed zeros — see fontFeatureSettings on the card
+// roots which sets `"zero" 0` for inherit-by-default behaviour.
+const TK_MONO = "Inter, 'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 /**
  * Terminal palette — used by TokenCard / QuoteCard's Bloomberg-style theme.
@@ -896,6 +903,49 @@ function exchangeFaviconUrl(name: string): string | null {
   }
   return null;
 }
+
+/**
+ * Exchange row logo with graceful fallback. Renders a Google s2 favicon when
+ * we know the venue's domain, otherwise (or when the favicon 404s) shows a
+ * deterministic colored circle with the venue's first letter. Without this,
+ * unknown exchanges (Byte Exchange, BitDelta, etc.) leave an empty 14px gap
+ * that reads as a missing-image bug.
+ */
+const EX_FALLBACK_COLORS = [
+  '#64748b', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444',
+  '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#6366f1',
+];
+function exchangeFallbackColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return EX_FALLBACK_COLORS[Math.abs(hash) % EX_FALLBACK_COLORS.length];
+}
+const ExchangeIcon: React.FC<{ name: string; url: string | null }> = ({ name, url }) => {
+  const [failed, setFailed] = React.useState(false);
+  const letter = (name?.trim()?.charAt(0) || '?').toUpperCase();
+  const bg = exchangeFallbackColor(name || '?');
+  if (!url || failed) {
+    return (
+      <span
+        aria-hidden
+        className="w-3.5 h-3.5 rounded-sm shrink-0 inline-flex items-center justify-center text-white"
+        style={{ background: bg, fontSize: 9, fontWeight: 700, lineHeight: 1, letterSpacing: 0 }}
+      >
+        {letter}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={url}
+      alt=""
+      aria-hidden
+      className="w-3.5 h-3.5 rounded-sm shrink-0"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+};
 
 /** Returns a price change diff in USD (price * change% / 100) — used for "▲ +$0.0379" line. */
 function priceDelta(priceUsd?: number, changePct?: number): string | null {
@@ -1128,6 +1178,7 @@ export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: st
       style={{
         fontFamily: TK_SANS,
         fontVariantNumeric: 'tabular-nums',
+        fontFeatureSettings: '"tnum" 1, "zero" 0, "ss01" 1',
         boxShadow: '0 2px 24px -8px rgba(15,23,42,0.08), 0 1px 2px rgba(15,23,42,0.04)',
         border: `1px solid ${TERM.line}`,
       }}
@@ -1481,18 +1532,7 @@ export function TokenCard({ token, lang }: { token: TokenSnapshotData; lang?: st
                 style={{ borderBottom: i < topEx.length - 1 ? `1px solid ${TERM.line}` : undefined }}
                 title={ex.spreadPct != null ? `spread ${ex.spreadPct.toFixed(3)}%` : undefined}
               >
-                {logoUrl ? (
-                  <img
-                    src={logoUrl}
-                    alt=""
-                    aria-hidden
-                    className="w-3.5 h-3.5 rounded-sm shrink-0"
-                    loading="lazy"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                  />
-                ) : (
-                  <span className="w-3.5 shrink-0" />
-                )}
+                <ExchangeIcon name={ex.name} url={logoUrl} />
                 <div className="flex-1 min-w-0 flex items-baseline gap-2 flex-wrap">
                   <span className="truncate font-medium" style={{ color: TERM.textStrong }}>{ex.name}</span>
                   {/* Pair shown inline-under-venue on mobile only */}
@@ -1750,9 +1790,42 @@ function extractTrailingCitations(text: string): { cleanText: string; citations:
     //   "多空清算数据；[Source](url)、Bitfinex Alpha分析" → "...；、..."
     // Keep the first separator and drop the run that follows.
     .replace(/([，,：:；;、])\s*(?:[，,：:；;、]\s*)+/g, '$1 ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  return { cleanText, citations };
+    .replace(/\s{2,}/g, ' ');
+
+  // Orphan punctuation cleanup after chip extraction. Two failure modes:
+  //
+  //   (a) Parens wrapped the chip: "(数据来源: [OKX](url))" / "([OKX](url))"
+  //       → leaves "(数据来源: )" / "()" / lone "(" residue.
+  //
+  //   (b) Em-dash / hyphen led into the chip: "...prose — [OKX](url)，next"
+  //       or "...prose — [OKX](url)。"
+  //       → leaves "...prose — ，next" / "...prose — 。" with the dash
+  //       orphaned in front of punctuation. This was the second wave of
+  //       broken renders after we discouraged parens in the prompt and
+  //       the LLM switched to em-dash style instead.
+  //
+  // Only runs when at least one citation was extracted so legitimate prose
+  // ("公式: (a+b)" / "BTC 持续走强 — 这是好事") stays intact.
+  const finalCleanText = citations.length === 0
+    ? cleanText.trim()
+    : cleanText
+        // (a) Trailing labelled-empty parens: "(数据来源: )" / "(参考: )" / "(via )"
+        .replace(/[\(（]\s*(?:数据来源|参考|来源|source|via)\s*[:：]?\s*[\)）]?\s*$/giu, '')
+        // (a) Trailing empty parens or lone "(": "()" / "( )" / "("
+        .replace(/[\(（]\s*[\)）]?\s*$/u, '')
+        // (a) Mid-text labelled-empty parens before sentence boundary
+        .replace(/[\(（]\s*(?:数据来源|参考|来源|source|via)\s*[:：]?\s*[\)）]\s*(?=[。\.\n]|$)/giu, '')
+        // (a) Mid-text empty parens before sentence boundary
+        .replace(/[\(（]\s*[\)）]\s*(?=[。\.\n]|$)/u, '')
+        // (b) Orphan em-dash / en-dash / hyphen left in front of punctuation:
+        // "X — ，Y" → "X，Y"   "X ——。" → "X。"   "X - .Y" → "X.Y"
+        // Allow optional space on either side; collapse to nothing.
+        .replace(/\s*[—–\-]{1,3}\s*(?=[，,。\.；;！!？?])/gu, '')
+        // (b) Orphan em-dash at end of line: "X — \n" → "X\n"
+        .replace(/\s*[—–\-]{1,3}\s*$/gmu, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+  return { cleanText: finalCleanText, citations };
 }
 
 /** Like parseLine but moves all inline http citations to the end as trailing badges. */
@@ -2265,16 +2338,24 @@ export function renderMarkdownContent(text: string, msgIdx?: number): React.Reac
                     boxShadow: '0 1px 2px rgba(15,23,42,0.03)',
                   }}
                 >
-                  <div className="text-[10.5px] tracking-[0.1em] text-slate-500 font-semibold uppercase truncate">
+                  <div className="text-[10.5px] tracking-[0.1em] text-slate-500 font-semibold uppercase truncate [&_strong]:[font-weight:inherit] [&_strong]:[color:inherit]">
                     {parseLine(label)}
                   </div>
                   <div
-                    className={`mt-1.5 truncate leading-snug ${
+                    className={`mt-1.5 leading-snug break-words [&_strong]:[font-weight:inherit] [&_strong]:[color:inherit] ${
                       valueIsNum
-                        ? 'text-[19px] font-bold text-slate-900 tabular-nums'
+                        ? 'text-[18px] font-bold text-slate-900 tabular-nums'
                         : 'text-[14px] font-semibold text-slate-700'
                     }`}
-                    style={valueIsNum ? { fontFamily: TK_MONO } : undefined}
+                    style={
+                      valueIsNum
+                        ? {
+                            fontFamily: TK_SANS,
+                            fontFeatureSettings: '"tnum" 1, "zero" 0, "ss01" 1',
+                            letterSpacing: '-0.01em',
+                          }
+                        : undefined
+                    }
                   >
                     {parseLine(value)}
                   </div>

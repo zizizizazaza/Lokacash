@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { sourcesFromLast30DaysCompact, type SignalSearchSource } from './signalRadarThinking.js';
 import { stripInternalResearchCitations } from '../utils/researchCitations.js';
+import { pythonSemaphore } from './pythonSemaphore.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -154,7 +155,16 @@ export type DeepResearchProgress =
 export const researchService = {
   runDeepResearch(
     topic: string,
-    options: { deep?: boolean; days?: number; searchSources?: string; skipInnerSynthesis?: boolean } = {},
+    options: {
+      deep?: boolean;
+      days?: number;
+      searchSources?: string;
+      skipInnerSynthesis?: boolean;
+      /** Fires (once) if this run gets queued behind other Python tools.
+       *  Caller (typically researchTool.ts) forwards this to the chat
+       *  layer so the user sees a "You're in queue" indicator. */
+      onQueued?: (position: number, etaMs: number) => void;
+    } = {},
     progress?: DeepResearchProgress,
   ) {
     const args = [
@@ -190,13 +200,36 @@ export const researchService = {
       extractedSources: SignalSearchSource[];
       rawStdout: string;
       xProfiles: XProfileSnapshot[];
-    }>((resolve, reject) => {
+    }>(async (resolve, reject) => {
       const runStartedAt = Date.now();
-      const spawnStartedAt = Date.now();
       const asSeconds = (ms: number) => (ms / 1000).toFixed(3);
       const sinceStart = () => Date.now() - runStartedAt;
       const isWin = process.platform === 'win32';
       const pythonExe = isWin ? 'python' : 'python3';
+
+      // ── Acquire concurrency slot before spawning Python. last30days
+      //    loads a stack of HTTP clients + tweepy + bs4 etc; ~250-350 MB
+      //    resident memory per process. Gate prevents OOM under load.
+      const slot = await pythonSemaphore.acquire({
+        tag: `last30days:${topic.slice(0, 30)}`,
+        onQueued: options.onQueued,
+      });
+      // Hard timeout safety — release the slot if the underlying Python
+      // never exits (rare network hang).
+      const HARD_TIMEOUT_MS = 90_000;
+      let slotReleased = false;
+      const releaseSlotOnce = () => {
+        if (slotReleased) return;
+        slotReleased = true;
+        slot.release();
+      };
+      const hardTimeoutTimer = setTimeout(() => {
+        console.error(`[researchService] HARD TIMEOUT after ${HARD_TIMEOUT_MS}ms — releasing semaphore slot for "${topic.slice(0, 50)}"`);
+        releaseSlotOnce();
+      }, HARD_TIMEOUT_MS);
+      hardTimeoutTimer.unref();
+
+      const spawnStartedAt = Date.now();
 
       const emitResearchLine = (line: string) => {
         if (line.includes('[TIMING]')) {
@@ -313,12 +346,15 @@ export const researchService = {
       const timer = setTimeout(() => {
         child.kill('SIGTERM');
         logPythonRunBreakdown('timeout');
+        releaseSlotOnce();
+        clearTimeout(hardTimeoutTimer);
         reject(new Error(`Timeout after ${timeoutSec} seconds`));
       }, timeoutSec * 1000);
 
       child.on('close', async (code) => {
         const childClosedAt = Date.now();
         clearTimeout(timer);
+        clearTimeout(hardTimeoutTimer);
         if (stderrLineBuf.trim()) {
           emitResearchLine(stderrLineBuf.trim());
           stderrLineBuf = '';
@@ -331,6 +367,7 @@ export const researchService = {
         logPythonRunBreakdown('close');
         if (code !== 0) {
           console.error('[researchService] Execution error:', stderrData);
+          releaseSlotOnce();
           return reject(new Error(`Script exited with code ${code}:\n${stderrData}`));
         }
 
@@ -516,6 +553,7 @@ ${finalSummary}`,
           )} total_s=${asSeconds(sinceStart())} topic="${topic}" final_len=${cleanedSummary.length}`,
         );
 
+        releaseSlotOnce();
         resolve({
           summary: cleanedSummary,
           topic,
@@ -525,13 +563,15 @@ ${finalSummary}`,
           xProfiles,
         });
       });
-      
+
       child.on('error', (err) => {
         clearTimeout(timer);
+        clearTimeout(hardTimeoutTimer);
         console.log(
           `[researchService:timing] child_error_after_s=${asSeconds(sinceStart())} topic="${topic}"`,
         );
         logPythonRunBreakdown('child_error');
+        releaseSlotOnce();
         reject(err);
       });
     });

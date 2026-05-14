@@ -1,6 +1,7 @@
 import { BaseTool, type ToolExecutionContext, type ToolResult } from './types.js';
 import { stockAnalysisService } from '../../services/stockanalysis.service.js';
 import { recordChatToolTraceStep } from '../../services/moduleEmitter.js';
+import { pythonSemaphore } from '../../services/pythonSemaphore.service.js';
 
 /**
  * Wraps `stockAnalysisService.runStreamAnalysis` for the LLM. Designed for
@@ -39,7 +40,48 @@ export class StockAnalysisTool extends BaseTool {
     const query = String(args.query || '').trim() || `Analyze: ${tickers.join(', ')}`;
     const isZh = /[一-鿿]/.test(query);
 
-    ctx.emitter.emitModule('analysis', 'active', { tickers });
+    // Per-tool stages array — same shape as v1's stocksToolStages and v2's
+    // web3 stages. Each Python tool call (get_realtime_quote / get_daily_history
+    // / get_chip_distribution / etc.) appends one entry that progresses
+    // 'active' → 'completed' | 'failed' with argsData + rawData. Surfaced on
+    // the 'analysis' module so the frontend reuses Web3ToolGroup +
+    // Web3ToolResultCard to render per-tool pills + cards (identical UX to crypto).
+    type StockToolStage = {
+      stage: string;
+      title_en: string;
+      title_zh: string;
+      state: 'active' | 'completed' | 'failed' | 'skipped';
+      durationMs?: number;
+      argsData?: unknown;
+      rawData?: unknown;
+    };
+    const stocksToolStages: StockToolStage[] = [];
+
+    // Stage title map mirrors v1 socket/index.ts stocksStageTitle().
+    const stocksStageTitle = (toolName: string): { en: string; zh: string } => {
+      const t: Record<string, { en: string; zh: string }> = {
+        get_realtime_quote:           { en: 'Realtime quote',           zh: '获取实时行情' },
+        get_daily_history:            { en: 'Daily history',            zh: '日 K 历史' },
+        get_chip_distribution:        { en: 'Chip distribution',        zh: '筹码分布' },
+        get_analysis_context:         { en: 'Analysis context',         zh: '分析上下文' },
+        get_stock_info:               { en: 'Stock profile',            zh: '股票资料' },
+        get_portfolio_snapshot:       { en: 'Portfolio snapshot',       zh: '组合快照' },
+        get_capital_flow:             { en: 'Capital flow',             zh: '资金流向' },
+        analyze_trend:                { en: 'Trend analysis',           zh: '趋势分析' },
+        calculate_ma:                 { en: 'Moving averages',          zh: '均线计算' },
+        get_volume_analysis:          { en: 'Volume analysis',          zh: '成交量分析' },
+        analyze_pattern:              { en: 'Pattern recognition',      zh: '形态识别' },
+        search_stock_news:            { en: 'Stock news search',        zh: '搜索新闻' },
+        search_comprehensive_intel:   { en: 'Comprehensive intel',      zh: '综合情报搜索' },
+        get_market_indices:           { en: 'Market indices',           zh: '大盘指数' },
+        get_sector_rankings:          { en: 'Sector rankings',          zh: '板块排名' },
+        get_skill_backtest_summary:   { en: 'Skill backtest',           zh: '技能回测' },
+        get_strategy_backtest_summary:{ en: 'Strategy backtest',        zh: '策略回测' },
+        get_stock_backtest_summary:   { en: 'Stock backtest',           zh: '个股回测' },
+      };
+      return t[toolName] || { en: toolName.replace(/_/g, ' '), zh: toolName };
+    };
+    ctx.emitter.emitModule('analysis', 'active', { tickers, toolStages: stocksToolStages });
 
     // ── Helpers for QuoteCard payload (v2 only). v1 has its own copy inside
     //    socket/index.ts that runs off [UI_METADATA] events. v2 builds the
@@ -98,11 +140,43 @@ export class StockAnalysisTool extends BaseTool {
       return null;
     };
 
+    // Acquire a Python concurrency slot BEFORE kicking off the subprocess.
+    // The python-side stock-analysis script spawns its own Python which can
+    // easily eat 300-400MB; this gate prevents OOM on busy chats.
+    const slot = await pythonSemaphore.acquire({
+      tag: `stock_analysis:${tickers.join(',')}`,
+      onQueued: (position, etaMs) => {
+        ctx.emitToUser('agent:chat:queued', {
+          sessionId: ctx.sessionId,
+          tool: 'stock_analysis',
+          position,
+          etaMs,
+          message: `You're #${position} in queue — equity data tool is busy. Starting in ~${Math.round(etaMs / 1000)}s.`,
+        });
+      },
+    });
+    // Hard timeout safety net — release the slot if the underlying Python
+    // never finishes (network hang / akshare wedge / etc).
+    const TIMEOUT_MS = 90_000;
+    let timedOut = false;
+    const hardTimeout = setTimeout(() => {
+      timedOut = true;
+      console.error(`[stockAnalysisTool] HARD TIMEOUT after ${TIMEOUT_MS}ms for ${tickers.join(',')} — releasing slot`);
+      slot.release();
+    }, TIMEOUT_MS);
+    hardTimeout.unref();
+
     return await new Promise<ToolResult>((resolve) => {
       const subSessionId = `${ctx.sessionId}:analysis`;
       let report = '';
       let errored = false;
       let errorMsg = '';
+      const releaseOnce = () => {
+        if (!timedOut) {
+          clearTimeout(hardTimeout);
+          slot.release();
+        }
+      };
 
       // Capture each tool's structured result. Python runs in `data_only: True`
       // mode (final answer suppressed — SuperAgent does cross-module synthesis
@@ -158,6 +232,67 @@ export class StockAnalysisTool extends BaseTool {
           recordChatToolTraceStep(ctx.sessionId, step);
           ctx.emitToUser('agent:chat:tool_trace', { sessionId: ctx.sessionId, step });
 
+          // ── Per-tool stage tracking (mirrors v1 stocksToolStages logic in
+          //    socket/index.ts:2935-3027). Each tool_start appends an 'active'
+          //    entry; matching tool_done promotes it to completed/failed with
+          //    trimmed rawData. emitModule fires on every transition so the
+          //    frontend can paint pills/cards in real time.
+          if (step?.type === 'tool_start' && typeof step.tool === 'string') {
+            const title = stocksStageTitle(step.tool);
+            const argsKey = JSON.stringify(step.args);
+            let existing: StockToolStage | undefined;
+            for (let k = stocksToolStages.length - 1; k >= 0; k--) {
+              const s = stocksToolStages[k];
+              if (s.stage === step.tool && JSON.stringify(s.argsData) === argsKey) {
+                existing = s;
+                break;
+              }
+            }
+            if (!existing || existing.state !== 'active') {
+              stocksToolStages.push({
+                stage: step.tool,
+                title_en: title.en,
+                title_zh: title.zh,
+                state: 'active',
+                argsData: step.args,
+              });
+              ctx.emitter.emitModule('analysis', 'active', { tickers, toolStages: stocksToolStages });
+            }
+          } else if (step?.type === 'tool_done' && typeof step.tool === 'string') {
+            for (let i = stocksToolStages.length - 1; i >= 0; i--) {
+              const s = stocksToolStages[i];
+              if (s.stage === step.tool && s.state === 'active') {
+                s.state = step.success === false ? 'failed' : 'completed';
+                s.durationMs = typeof step.duration === 'number' ? Math.round(step.duration * 1000) : undefined;
+                // Resolve raw payload — prefer parsed result, fall back to
+                // parsing rawText if Python's emit path skipped result.
+                let raw: any = step.result;
+                if ((raw == null) && typeof step.rawText === 'string' && step.rawText.trim()) {
+                  try { raw = JSON.parse(step.rawText); }
+                  catch { raw = { rawText: step.rawText }; }
+                }
+                // Trim large array fields (e.g. 60-row OHLC) so the event
+                // stream + DB metadata don't bloat. Keep first 8 rows + total
+                // count via the _truncated marker frontend renderers detect.
+                if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+                  const trimmed: Record<string, any> = {};
+                  for (const [k, v] of Object.entries(raw as Record<string, any>)) {
+                    if (Array.isArray(v) && v.length > 8) {
+                      trimmed[k] = { _truncated: true, sample: v.slice(0, 8), total: v.length };
+                    } else {
+                      trimmed[k] = v;
+                    }
+                  }
+                  s.rawData = trimmed;
+                } else {
+                  s.rawData = raw;
+                }
+                break;
+              }
+            }
+            ctx.emitter.emitModule('analysis', 'active', { tickers, toolStages: stocksToolStages });
+          }
+
           if (step?.type === 'tool_done' && typeof step.tool === 'string' && step.success !== false) {
             toolResults.push({
               tool: step.tool,
@@ -193,7 +328,10 @@ export class StockAnalysisTool extends BaseTool {
         },
         (finalReport: string) => {
           report = finalReport || '';
-          ctx.emitter.emitModule('analysis', 'completed', { tickers });
+          // Final emit carries the full toolStages so any stage still marked
+          // 'active' (rare — Python failed to send tool_done) flips to
+          // 'completed' / 'failed' for UI consistency.
+          ctx.emitter.emitModule('analysis', 'completed', { tickers, toolStages: stocksToolStages });
 
           // Build a structured digest from the captured tool results so the
           // synthesis model has the actual numbers (price, PE, market cap,
@@ -256,6 +394,7 @@ export class StockAnalysisTool extends BaseTool {
               ? { ...savedQuotePayload, sparkline7d: savedSparkline7d }
               : savedQuotePayload;
           }
+          releaseOnce();
           resolve({
             ok: true,
             // Bump budget: 8k was tight for daily history JSON + realtime
@@ -269,6 +408,7 @@ export class StockAnalysisTool extends BaseTool {
           errored = true;
           errorMsg = errStr || 'stock analysis failed';
           ctx.emitter.emitModule('analysis', 'completed', { error: errorMsg });
+          releaseOnce();
           resolve({ ok: false, content: '', error: errorMsg });
         },
       );
@@ -276,6 +416,7 @@ export class StockAnalysisTool extends BaseTool {
       // Honor cancellation
       ctx.abortSignal.addEventListener('abort', () => {
         if (!report && !errored) {
+          releaseOnce();
           resolve({ ok: false, content: '', error: 'stock_analysis: cancelled' });
         }
       });

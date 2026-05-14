@@ -32,7 +32,7 @@ import { extractAsset } from '../services/assetExtractor.js';
 import { extractUrls, fetchUrl, pageToPromptBlock, type FetchedPage } from '../services/webFetch/index.js';
 import { runAegeanDeepAnalysis } from '../services/aegeanDeepAnalysis.service.js';
 import { transformAegeanDeepAnalysis } from '../services/aegeanDeepAnalysisTransform.js';
-import { consumeQuota } from '../services/subscription.service.js';
+import { consumeQuota, refundQuota } from '../services/subscription.service.js';
 import { consumeGuestAuto, GUEST_CONFIG } from '../services/guest.service.js';
 import { getServiceAuthToken } from '../services/internalChat/serviceToken.js';
 import * as crypto from 'crypto';
@@ -65,6 +65,39 @@ const activeStockAnalysisSessions = new Set<string>();
 const activeChatSessions = new Map<string, string>();
 /** Abort controllers keyed by sessionId — used to cancel a previous agent:chat run when a new one arrives */
 const chatAbortControllers = new Map<string, AbortController>();
+/** Per-USER in-flight tracker. Same user spamming new requests across tabs or
+ *  fast double-clicking aborts their previous request to prevent piling up
+ *  parallel runs (which would double-charge quota + bloat history + waste
+ *  Python slots). Keyed by userId, value = sessionId currently in flight. */
+const userInFlight = new Map<string, { sessionId: string; abortController: AbortController; startedAt: number }>();
+/** Clear the per-user tracker IF its current entry matches this session
+ *  (i.e. THIS user's THIS session just finished). Called from the natural
+ *  completion paths so the map stays bounded.
+ *  Safe to call from any cleanup site — it only removes when sessionId
+ *  matches, so concurrent overlapping runs don't accidentally evict the
+ *  newer entry. */
+function clearUserInFlight(userId: string | null | undefined, sessionId: string): void {
+  if (!userId) return;
+  const entry = userInFlight.get(userId);
+  if (entry && entry.sessionId === sessionId) {
+    userInFlight.delete(userId);
+  }
+}
+/** Periodic guard: any user-inFlight entry older than 10 minutes is almost
+ *  certainly a leak (the natural cleanup path was missed). Evict it. */
+setInterval(() => {
+  const now = Date.now();
+  let evicted = 0;
+  for (const [uid, entry] of userInFlight) {
+    if (now - entry.startedAt > 10 * 60 * 1000) {
+      userInFlight.delete(uid);
+      evicted += 1;
+    }
+  }
+  if (evicted > 0) {
+    console.log(`[userInFlight] cleanup: evicted=${evicted} stale entries (>10min old)`);
+  }
+}, 5 * 60 * 1000).unref();
 /** Dedup map keyed by sessionId::content — prevents duplicate messages from queue flush + direct emit race */
 const chatDedupMap = new Map<string, number>();
 /** Per-socket rate limiter: tracks agent:chat timestamps to enforce max 3 messages per 10 seconds */
@@ -1489,8 +1522,33 @@ Text: "${query}"`;
         console.log(`[agent:chat] Aborting previous run for session ${sessionId}`);
         prevAbort.abort();
       }
+      // ── Per-user in-flight lock: at most ONE active request per userId across
+      //    ALL their sessions/tabs. If the user sends a new request while their
+      //    previous one is still running (likely fat-finger double-send or
+      //    tab-switching impatience), abort the old one and take over with the
+      //    new request. Prevents:
+      //      - parallel quota deduction (double-billing)
+      //      - parallel Python tool spawns (wastes semaphore slots)
+      //      - history corruption (two assistant messages racing into DB)
+      //    Guests (no userId) bypass this guard.
+      if (!isGuest && userId) {
+        const prevUserRun = userInFlight.get(userId);
+        if (prevUserRun && prevUserRun.sessionId !== sessionId) {
+          const ageMs = Date.now() - prevUserRun.startedAt;
+          console.log(
+            `[agent:chat] user=${userId} sent new request to session=${sessionId} ` +
+            `while previous run in session=${prevUserRun.sessionId} (age=${ageMs}ms) still active — aborting previous`,
+          );
+          prevUserRun.abortController.abort();
+          // Don't forget to clean up the session-level tracker too
+          chatAbortControllers.delete(prevUserRun.sessionId);
+        }
+      }
       const abortController = new AbortController();
       chatAbortControllers.set(sessionId, abortController);
+      if (!isGuest && userId) {
+        userInFlight.set(userId, { sessionId, abortController, startedAt: Date.now() });
+      }
       const isAborted = () => abortController.signal.aborted;
 
       console.log('[agent:chat]', {
@@ -1535,12 +1593,30 @@ Text: "${query}"`;
       const MAX_HISTORY_FOR_SYNTHESIS = 8;
       const ASSISTANT_CONTENT_CAP = 300;
 
-      const sessionHistory = await prisma.chatMessage.findMany({
+      // Pull 2x the budget so we can drop cancelled / failed assistant turns
+      // and still have enough valid context left. Cancelled rows hold a partial
+      // narration like "Let me check BTC..." that the routing LLM would
+      // otherwise mistake for a complete answer and skip tool calls on the
+      // follow-up turn — producing hallucinated prices / funding rates from
+      // training data instead of fresh tool output.
+      const rawSessionHistory = await prisma.chatMessage.findMany({
         where: { userId, sessionId },
         orderBy: { createdAt: 'asc' },
-        take: MAX_HISTORY_FOR_SYNTHESIS,
+        take: MAX_HISTORY_FOR_SYNTHESIS * 2,
         select: { role: true, content: true, metadata: true },
       });
+      const sessionHistory = rawSessionHistory
+        .filter((m) => {
+          if (m.role !== 'assistant') return true;
+          if (!m.metadata) return true;
+          try {
+            const meta = JSON.parse(m.metadata) as { status?: string };
+            return meta.status !== 'cancelled' && meta.status !== 'failed';
+          } catch {
+            return true;
+          }
+        })
+        .slice(-MAX_HISTORY_FOR_SYNTHESIS);
 
       const formatHistory = (messages: { role: string; content: string; metadata: string | null }[], limit: number): string => {
         return messages
@@ -1569,46 +1645,83 @@ Text: "${query}"`;
       // ── Auto-mode quota for v2 path ──────────────────────────────────
       // v2 doesn't run evaluateRouting, so the v1 Auto cascade further
       // down (line ~1970) is unreachable when v2 takes over. Charge the
-      // Fast bucket here before the v2 gate. Two cases defer back to v1:
-      //   (a) the query explicitly asks for Roundtable-style depth
+      // Fast bucket here before the v2 gate. Three cases defer / skip:
+      //   (a) the query is plain chitchat / platform Q&A — skip quota
+      //       entirely (one cheap LLM call, no Python, no tools).
+      //   (b) the query explicitly asks for Roundtable-style depth
       //       (comparison / "deep dive" / debate) — v1 cascade picks
       //       Roundtable and runs the multi-agent path v2 doesn't have.
-      //   (b) Fast bucket is empty — v1 cascade will try Roundtable next
+      //   (c) Fast bucket is empty — v1 cascade will try Roundtable next
       //       and, if also empty, degrade to lite mode + quota_degraded.
       let v2AutoEligible = true;
+      // Track whether THIS turn actually charged 1 Fast slot so the post-hoc
+      // chitchat refund knows whether to undo it (only refund what we charged).
+      let v2ChargedFast = false;
       if (
         !isGuest &&
         data.mode === 'auto' &&
         process.env.SUPERAGENT_FUNCTION_CALLING === '1'
       ) {
-        const desiredTier = decideAutoMode(
-          { isSimpleChat: false, queryType: 'general' },
-          userContent,
-        );
-        if (desiredTier === 'roundtable') {
-          v2AutoEligible = false;
+        // ── Heuristic chitchat detector ──
+        // Charge nothing for greetings / "what can you do" / single-word
+        // pings / pure smalltalk. These are cheap (1 LLM call, no Python,
+        // no tools) and charging them feels wrong to users.
+        const isLikelyChitchat = (text: string, images: number): boolean => {
+          if (images > 0) return false;                       // image → real work
+          const t = (text || '').trim();
+          if (!t) return true;                                 // empty → no charge
+          if (t.length > 25) return false;                     // long → likely real Q
+          // Pure greetings (zh + en)
+          if (/^(你好|您好|hi|hello|hey|嗨|哈喽|早|早安|晚安|谢谢|thanks|thank\s*you|好的|ok|okay|yes|no|是|对|嗯|哦|bye|拜拜|再见|goodbye)[。.!！?？\s~]*$/i.test(t)) {
+            return true;
+          }
+          // Platform / capability questions ("你能干啥" / "what can you do")
+          if (/^(你(是谁|能(干|做|帮我做)什么|能干啥)|你叫什么|介绍.{0,5}下|loka(\s*是)?什么|how (do|to) i use|what (can|do) you|who are you|help)[。.?？\s]*$/i.test(t)) {
+            return true;
+          }
+          // Pure emoji / very short noise
+          if (t.length <= 4 && !/[a-zA-Z0-9]/.test(t) && !/[一-鿿]/.test(t)) {
+            return true;
+          }
+          return false;
+        };
+        if (isLikelyChitchat(userContent, images.length)) {
+          // Skip quota entirely. v2 will run, produce the LLM reply, no
+          // Python tools spawn, no fast bucket touched.
           console.log(
-            `[agent:chat:v2] Auto→roundtable trigger detected, deferring to v1 cascade sessionId=${sessionId}`,
+            `[agent:chat:v2] Auto→free (chitchat detected, no quota charge) user=${userId} content="${userContent.slice(0, 30)}"`,
           );
         } else {
-          try {
-            const primary = await consumeQuota(userId, 'fast');
-            if (primary.allowed) {
-              console.log(
-                `[agent:chat:v2] Auto→fast user=${userId} remaining=${primary.remaining}`,
-              );
-            } else {
+          const desiredTier = decideAutoMode(
+            { isSimpleChat: false, queryType: 'general' },
+            userContent,
+          );
+          if (desiredTier === 'roundtable') {
+            v2AutoEligible = false;
+            console.log(
+              `[agent:chat:v2] Auto→roundtable trigger detected, deferring to v1 cascade sessionId=${sessionId}`,
+            );
+          } else {
+            try {
+              const primary = await consumeQuota(userId, 'fast');
+              if (primary.allowed) {
+                v2ChargedFast = true;
+                console.log(
+                  `[agent:chat:v2] Auto→fast user=${userId} remaining=${primary.remaining}`,
+                );
+              } else {
+                v2AutoEligible = false;
+                console.log(
+                  `[agent:chat:v2] Auto→fast exhausted user=${userId}, deferring to v1 cascade`,
+                );
+              }
+            } catch (err) {
               v2AutoEligible = false;
-              console.log(
-                `[agent:chat:v2] Auto→fast exhausted user=${userId}, deferring to v1 cascade`,
+              console.error(
+                '[agent:chat:v2] Auto quota check failed, deferring to v1:',
+                (err as Error).message,
               );
             }
-          } catch (err) {
-            v2AutoEligible = false;
-            console.error(
-              '[agent:chat:v2] Auto quota check failed, deferring to v1:',
-              (err as Error).message,
-            );
           }
         }
       }
@@ -1646,8 +1759,52 @@ Text: "${query}"`;
           activeChatSessions.delete(sessionId);
           chatSessionStartTimes.delete(sessionId);
           chatAbortControllers.delete(sessionId);
+          clearUserInFlight(userId, sessionId);
+
+          // ── Post-hoc chitchat refund ──
+          // If we charged Fast quota up-front but the turn turned out to be
+          // pure chitchat (model called 0 tools AND wrote a short reply),
+          // refund the slot. This covers all the chitchat the entry-side
+          // regex couldn't catch ("讲个笑话" / "今天天气" / 澄清问题 / etc.):
+          // "the user wasn't asking for a real research task, so don't bill
+          // them for one". Skipped if narration is long (potential
+          // hallucination — the hallucination guard handles that).
+          // narration length threshold: 800 chars covers chitchat (10-50)
+          // + educational explanations ("RSI 是什么", "解释一下 P/E") with
+          // 300-800 chars that don't actually spawn Python. Hallucination
+          // case (model wrote 1000+ chars with fake numbers and 0 tools)
+          // is caught separately by the hallucination guard which forces
+          // a retry — by the time it succeeds, tools WILL be called and
+          // refund won't trigger.
+          if (
+            v2ChargedFast &&
+            !isGuest &&
+            data.mode === 'auto' &&
+            v2Result.status === 'completed' &&
+            v2Result.toolCallsCount === 0 &&
+            typeof v2Result.routingNarrationLen === 'number' &&
+            v2Result.routingNarrationLen < 800
+          ) {
+            try {
+              const refund = await refundQuota(userId, 'fast');
+              if ('newRemaining' in refund) {
+                console.log(
+                  `[agent:chat:v2] refunded Fast quota (chitchat post-hoc: 0 tools, narration ${v2Result.routingNarrationLen} chars) user=${userId} newRemaining=${refund.newRemaining}`,
+                );
+                // Tell the frontend Quota counter to refetch so the user sees
+                // the slot come back immediately.
+                try { socket.emit('plan-changed'); } catch { /* noop */ }
+                try { emitToUser(userId, 'agent:chat:quota_refunded', { sessionId, mode: 'fast', newRemaining: refund.newRemaining, reason: 'chitchat' }); } catch { /* noop */ }
+              } else {
+                console.warn(`[agent:chat:v2] refund failed: ${refund.error}`);
+              }
+            } catch (refundErr) {
+              console.warn(`[agent:chat:v2] refund exception: ${(refundErr as Error).message}`);
+            }
+          }
+
           console.log(
-            `[agent:chat:v2] status=${v2Result.status} elapsed_s=${asSeconds(Date.now() - startedAt)} sessionId=${sessionId}`,
+            `[agent:chat:v2] status=${v2Result.status} tools=${v2Result.toolCallsCount ?? '?'} narrationLen=${v2Result.routingNarrationLen ?? '?'} elapsed_s=${asSeconds(Date.now() - startedAt)} sessionId=${sessionId}`,
           );
           return;
         } catch (v2Err) {
