@@ -729,15 +729,35 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
     // Wipe the bad narration on the client side BEFORE retrying so the user
     // doesn't briefly see the fabricated answer.
     emitToUser('agent:chat:narration_reset', { sessionId });
-    // Build a stricter retry. Append a hard user-side message that overrides
-    // history-driven inertia and tells the model "TOOLS, NOW".
     const isZhUser = /[一-鿿]/.test(userContent || '');
-    const stricterMessages = [
+
+    // Strategy: two retry tiers. DeepSeek-V3 has a particularly stubborn
+    // failure mode where it sees a prior complete answer in history and
+    // reuses those numbers verbatim instead of re-calling tools — even when
+    // a stricter system reminder is appended. Tier 2 strips assistant
+    // history so the model has no shortcut to lean on.
+    const runRetry = async (
+      tieredMessages: Array<Record<string, unknown>>,
+      tier: 1 | 2,
+    ) => {
+      return aiService.chatStreamWithTools({
+        messages: tieredMessages,
+        tools,
+        maxTokens: 1024,
+        modelOverride: firstPassModelOverride,
+        onTextChunk: (delta) => {
+          if (abortController.signal.aborted) return;
+          // Only stream tier-1 narration; tier-2 narration is throwaway "我马上重新查询".
+          if (tier === 1) emitToUser('agent:chat:narration', { sessionId, delta });
+        },
+        abortSignal: abortController.signal,
+      });
+    };
+
+    // ─── Tier 1: append stricter system reminder, keep history ───
+    const tier1Messages = [
       ...messages,
-      {
-        role: 'assistant',
-        content: firstPass.narration,
-      },
+      { role: 'assistant', content: firstPass.narration },
       {
         role: 'user',
         content: isZhUser
@@ -745,34 +765,70 @@ export async function runSuperAgentV2(args: RunSuperAgentV2Args): Promise<RunSup
           : `[SYSTEM FORCED] Your previous response violated rules — you wrote specific market data (prices / percent changes / RSI / funding rates / etc.) WITHOUT calling any tools. Those numbers are hallucinated from training data and will severely mislead the user.\n\nRedo as follows: (1) Do NOT write any specific numbers from memory; (2) Immediately call \`web3_token_analysis\` (for crypto) or \`stock_analysis\` (for stocks) + \`web_research\` to get real current data; (3) Wait for tool results before writing the final report.\n\nUser's original question: "${userContent}". Output only "Let me re-query right now" as narration, then immediately emit tool_calls.`,
       },
     ];
+
+    let retrySucceeded = false;
     try {
-      const retry = await aiService.chatStreamWithTools({
-        messages: stricterMessages,
-        tools,
-        maxTokens: 1024,
-        modelOverride: firstPassModelOverride,
-        onTextChunk: (delta) => {
-          if (abortController.signal.aborted) return;
-          emitToUser('agent:chat:narration', { sessionId, delta });
-        },
-        abortSignal: abortController.signal,
-      });
-      if (retry.toolCalls.length > 0) {
+      const tier1Retry = await runRetry(tier1Messages, 1);
+      if (tier1Retry.toolCalls.length > 0) {
         console.log(
-          `[superAgentV2] hallucination retry succeeded: tools=[${retry.toolCalls.map((t) => t.name).join(', ')}]`,
+          `[superAgentV2] hallucination retry tier-1 succeeded: tools=[${tier1Retry.toolCalls.map((t) => t.name).join(', ')}]`,
         );
-        firstPass = retry;
+        firstPass = tier1Retry;
+        retrySucceeded = true;
       } else {
         console.warn(
-          `[superAgentV2] hallucination retry STILL produced no tools (narration_len=${retry.narration.length}). Falling back to original output.`,
+          `[superAgentV2] hallucination retry tier-1 STILL produced no tools (narration_len=${tier1Retry.narration.length}). Escalating to tier-2 (wipe history).`,
         );
-        // Keep the original output — at least the user gets something. The
-        // hallucination guard already logged the warning for ops to inspect.
       }
     } catch (err) {
       console.error(
-        `[superAgentV2] hallucination retry failed: ${(err as Error).message}. Keeping original output.`,
+        `[superAgentV2] hallucination retry tier-1 failed: ${(err as Error).message}. Trying tier-2.`,
       );
+    }
+
+    // ─── Tier 2: wipe assistant history entirely, force a clean re-route ───
+    //
+    // Why this works when tier-1 doesn't: DeepSeek-V3's in-context shortcut
+    // strength scales with how much prior assistant content it sees. Strip
+    // all assistant turns and the model has no "I already answered this"
+    // memory to lean on — it must call tools to answer fresh.
+    if (!retrySucceeded) {
+      emitToUser('agent:chat:narration_reset', { sessionId });
+      const wipedHistoryMessages: Array<Record<string, unknown>> = [];
+      for (const m of messages) {
+        // Keep system prompt and user messages, drop all assistants.
+        if (m.role === 'system' || m.role === 'user') wipedHistoryMessages.push(m);
+      }
+      // Re-append the current user question explicitly (in case it was the
+      // last user message and got dropped via filter; usually it's already
+      // in `messages` as the last entry but we make it bulletproof).
+      const hasCurrentUser = wipedHistoryMessages.some(
+        (m) => m.role === 'user' && String(m.content || '').includes(userContent.slice(0, 30)),
+      );
+      if (!hasCurrentUser) {
+        wipedHistoryMessages.push({ role: 'user', content: userContent });
+      }
+      console.warn(
+        `[superAgentV2] hallucination retry tier-2: wiping ${messages.filter((m) => m.role === 'assistant').length} assistant turn(s) from history before retry.`,
+      );
+      try {
+        const tier2Retry = await runRetry(wipedHistoryMessages, 2);
+        if (tier2Retry.toolCalls.length > 0) {
+          console.log(
+            `[superAgentV2] hallucination retry tier-2 succeeded: tools=[${tier2Retry.toolCalls.map((t) => t.name).join(', ')}]`,
+          );
+          firstPass = tier2Retry;
+          retrySucceeded = true;
+        } else {
+          console.warn(
+            `[superAgentV2] hallucination retry tier-2 ALSO failed (narration_len=${tier2Retry.narration.length}). Falling back to original output.`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[superAgentV2] hallucination retry tier-2 failed: ${(err as Error).message}. Falling back to original output.`,
+        );
+      }
     }
   }
 
