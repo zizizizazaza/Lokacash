@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.db
+*.db-journal
+.env
+
+# SuperAgent v2 per-run trace logs (one folder per session, JSONL inside).
+# Useful for local debugging, but volatile and can grow without bound.
+runs/
+agent-v2-10step.md
+Rehabilitation.md

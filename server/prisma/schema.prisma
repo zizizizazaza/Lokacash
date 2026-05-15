@@ -1,0 +1,696 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String                    @id @default(cuid())
+  email                String?                   @unique
+  name                 String?
+  avatar               String?
+  walletAddress        String?                   @unique
+  authProvider         String?
+  authProviderId       String?
+  role                 String                    @default("user")
+  bio                  String?
+  twitter              String?
+  linkedin             String?
+  personalWebsite      String?
+  isPublic             Boolean                   @default(true)
+  kycStatus            String                    @default("none")
+  creditScore          Int                       @default(100)
+  riskAccepted         Boolean                   @default(false)
+  invitedByCode        String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+  chatMessages         ChatMessage[]
+  conversationLinks    ConversationParticipant[]
+  creditEvents         CreditScoreEvent[]
+  creditHistory        CreditScoreHistory[]
+  directMessages       DirectMessage[]
+  enterprises          EnterpriseVerification[]
+  friendshipsReceived  Friendship[]              @relation("FriendshipAddressee")
+  friendshipsRequested Friendship[]              @relation("FriendshipRequester")
+  governanceProposals  GovernanceProposal[]
+  governanceVotes      GovernanceVote[]
+  groupMembers         GroupMember[]
+  groupMessages        GroupMessage[]
+  investments          Investment[]
+  invitationCodes      InvitationCode[]
+  notifications        Notification[]
+  pollsCreated         Poll[]                    @relation("PollCreator")
+  pollVotes            PollVote[]
+  portfolio            PortfolioHolding[]
+  applications         ProposedApplication[]
+  redemptionQueue      RedemptionQueue[]
+  tradeOrders          TradeOrder[]
+  transactions         Transaction[]
+  subscription         Subscription?
+  memories             UserMemory[]
+  profile              UserProfile?
+
+  @@index([email])
+  @@index([walletAddress])
+}
+
+// ─── Subscription & Quota ─────────────────────────────────────────────
+// Tracks the user's subscription tier + rolling-window quota usage for
+// Fast and Roundtable modes (Auto is always free and not tracked here).
+// Reset window: Free = 7 days, Pro/Max = 30 days, rolling from activatedAt.
+model Subscription {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  plan               String   @default("free")           // 'free' | 'pro' | 'max'
+  billingCycle       String?                             // 'monthly' | 'yearly' | null for free
+
+  // Rolling quota window
+  fastUsed           Int      @default(0)
+  fastLimit          Int      @default(10)               // free default
+  roundtableUsed     Int      @default(0)
+  roundtableLimit    Int      @default(2)                // free default
+  resetAt            DateTime                            // next reset timestamp
+  activatedAt        DateTime @default(now())            // anchor for rolling resets
+
+  // Stripe integration
+  stripeCustomerId   String?
+  stripeSubId        String?
+  stripeStatus       String?                             // 'active' | 'canceled' | 'past_due' | ...
+  currentPeriodEnd   DateTime?                           // Stripe billing period end (for UI)
+  cancelAtPeriodEnd  Boolean  @default(false)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user               User     @relation(fields: [userId], references: [id])
+
+  @@index([stripeCustomerId])
+  @@index([stripeSubId])
+  @@index([resetAt])
+}
+
+// ─── Guest mode ───────────────────────────────────────────────────────
+// Tracks per-guest Auto-mode usage on a rolling window. guestId is a
+// client-generated UUID stored in localStorage. Guests have no userId
+// (they never hit the User table). Chat history for guests is NOT
+// persisted — it lives in the browser's localStorage.
+model GuestQuota {
+  id         String   @id @default(cuid())
+  guestId    String   @unique                // client-generated UUID
+  autoUsed   Int      @default(0)
+  resetAt    DateTime                         // next rolling-window reset
+  lastIp     String?                          // for post-hoc abuse analysis
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([resetAt])
+}
+
+// Second layer of rate limiting: caps per-IP Auto usage to prevent one
+// person from hopping guestIds (clearing localStorage) to farm quota.
+model GuestIpQuota {
+  ip         String   @id
+  autoUsed   Int      @default(0)
+  resetAt    DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@index([resetAt])
+}
+
+model InvitationCode {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  createdById String
+  usedById    String?
+  usedAt      DateTime?
+  maxUses     Int       @default(1)
+  useCount    Int       @default(0)
+  isActive    Boolean   @default(true)
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  createdBy   User      @relation(fields: [createdById], references: [id])
+
+  @@index([code])
+  @@index([createdById])
+}
+
+model Project {
+  id             String              @id @default(cuid())
+  title          String
+  subtitle       String?
+  category       String
+  issuer         String
+  issuerLogo     String?
+  coverImage     String?
+  description    String?
+  useOfFunds     String?
+  faceValue      Float               @default(100)
+  askPrice       Float               @default(100)
+  apy            Float
+  durationDays   Int
+  creditScore    Int                 @default(700)
+  status         String              @default("Fundraising")
+  targetAmount   Float
+  raisedAmount   Float               @default(0)
+  backersCount   Int                 @default(0)
+  remainingCap   Float               @default(0)
+  coverageRatio  Float               @default(0)
+  verifiedSource String?
+  endDate        DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  collaterals    Collateral[]
+  groupChat      GroupChat?
+  investments    Investment[]
+  liquidations   LiquidationEvent[]
+  monthlyRevenue MonthlyRevenue[]
+  repayments     RepaymentSchedule[]
+  tradeOrders    TradeOrder[]
+
+  @@index([status])
+  @@index([category])
+}
+
+model MonthlyRevenue {
+  id        String  @id @default(cuid())
+  projectId String
+  month     String
+  amount    Float
+  project   Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+}
+
+model Investment {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String
+  amount    Float
+  shares    Float
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project   Project  @relation(fields: [projectId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([projectId])
+}
+
+model TradeOrder {
+  id             String    @id @default(cuid())
+  projectId      String
+  sellerId       String
+  buyerId        String?
+  listPrice      Float
+  originalPrice  Float
+  shares         Float
+  totalValue     Float
+  expectedReturn Float
+  expectedYield  Float
+  status         String    @default("Listed")
+  listedAt       DateTime  @default(now())
+  soldAt         DateTime?
+  project        Project   @relation(fields: [projectId], references: [id])
+  seller         User      @relation(fields: [sellerId], references: [id])
+
+  @@index([projectId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+model TreasurySnapshot {
+  id                String   @id @default(cuid())
+  tvl               Float
+  collateralRatio   Float
+  treasuryRevenue   Float
+  tBillsPercent     Float
+  liquidityPercent  Float
+  operationsPercent Float
+  lastPoR           DateTime
+  createdAt         DateTime @default(now())
+}
+
+model Transaction {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  amount    Float
+  asset     String
+  status    String   @default("PENDING")
+  txHash    String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([type])
+}
+
+model PortfolioHolding {
+  id         String   @id @default(cuid())
+  userId     String
+  asset      String
+  amount     Float
+  avgCost    Float    @default(0)
+  currentApy Float    @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, asset])
+  @@index([userId])
+}
+
+model GroupChat {
+  id           String         @id @default(cuid())
+  projectId    String?        @unique
+  name         String
+  bio          String?
+  avatar       String?
+  fundedAmount Float          @default(0)
+  apy          Float          @default(0)
+  createdAt    DateTime       @default(now())
+  project      Project?       @relation(fields: [projectId], references: [id])
+  members      GroupMember[]
+  messages     GroupMessage[]
+  polls        Poll[]
+}
+
+model GroupMember {
+  id         String    @id @default(cuid())
+  groupId    String
+  userId     String
+  role       String    @default("member")
+  joinedAt   DateTime  @default(now())
+  lastReadAt DateTime  @default(now())
+  group      GroupChat @relation(fields: [groupId], references: [id])
+  user       User      @relation(fields: [userId], references: [id])
+
+  @@unique([groupId, userId])
+  @@index([groupId])
+  @@index([userId])
+}
+
+model GroupMessage {
+  id             String    @id @default(cuid())
+  groupId        String
+  userId         String
+  content        String
+  attachmentUrl  String?
+  attachmentType String?
+  role           String    @default("investor")
+  createdAt      DateTime  @default(now())
+  group          GroupChat @relation(fields: [groupId], references: [id])
+  user           User      @relation(fields: [userId], references: [id])
+
+  @@index([groupId])
+}
+
+model Poll {
+  id        String       @id @default(cuid())
+  groupId   String
+  userId    String
+  question  String
+  duration  String       @default("1 day")
+  expiresAt DateTime
+  createdAt DateTime     @default(now())
+  group     GroupChat    @relation(fields: [groupId], references: [id])
+  creator   User         @relation("PollCreator", fields: [userId], references: [id])
+  options   PollOption[]
+  votes     PollVote[]
+
+  @@index([groupId])
+}
+
+model PollOption {
+  id     String     @id @default(cuid())
+  pollId String
+  text   String
+  order  Int        @default(0)
+  poll   Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes  PollVote[]
+
+  @@index([pollId])
+}
+
+model PollVote {
+  id        String     @id @default(cuid())
+  pollId    String
+  optionId  String
+  userId    String
+  createdAt DateTime   @default(now())
+  option    PollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  poll      Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id])
+
+  @@unique([pollId, userId])
+  @@index([pollId])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  sessionId String?
+  role      String
+  content   String
+  agentId   String?
+  metadata  String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([userId, sessionId])
+  @@index([agentId])
+  // Phase 2.2 — full-text search over message content. The actual GIN
+  // index uses Postgres `pg_trgm` operators which Prisma can't express
+  // natively; the migration SQL adds it manually.
+}
+
+// Phase 2.1.5 — Implicit behavioral profile per user.
+// Aggregates META-level signals (direction bias / domain / risk appetite)
+// from query patterns over time. Deliberately does NOT track per-asset
+// interest — that level of granularity pollutes specific queries (e.g.
+// asking about BTC shouldn't pull in past SOL/ETH context). Surfaces only
+// when confidence threshold is met (≥3 same-type signals).
+model UserProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  longCount       Int      @default(0)
+  shortCount      Int      @default(0)
+  cryptoQueries   Int      @default(0)
+  equityQueries   Int      @default(0)
+  highRiskQueries Int      @default(0)
+  lowRiskQueries  Int      @default(0)
+  totalTurns      Int      @default(0)
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Phase 2.1 — Persistent cross-session memory per user.
+// The agent calls the `remember` tool to save preferences / holdings /
+// strategy notes here; the next user message is enriched with relevant
+// memories before going to the synthesis LLM. Strict per-user isolation
+// is guaranteed by the FK + the index ordering (queries always start with
+// userId, so user A can never see user B's notes).
+model UserMemory {
+  id         String   @id @default(cuid())
+  userId     String
+  content    String   @db.Text
+  /// Comma-separated tags (e.g. "preference,risk,btc"). Stored as a single
+  /// string instead of String[] so MySQL-compatible Postgres deployments
+  /// don't trip on array types — tags are matched with substring search.
+  tags       String   @default("")
+  /// 0-100. Higher importance memories surface first in recall.
+  importance Int      @default(50)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, importance(sort: Desc), createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ─── Shared chat links ────────────────────────────────────────────────
+// Public read-only share tokens for chat sessions. A user clicks the
+// Share button on a conversation; we mint a short token and persist
+// (token → userId + sessionId). Anyone with the URL can view; the
+// owner can revoke at any time.
+model SharedChat {
+  id        String   @id              // short nanoid token used in the URL
+  userId    String
+  sessionId String
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
+model EnterpriseVerification {
+  id                    String                @id @default(cuid())
+  userId                String
+  companyName           String
+  country               String
+  registrationNo        String?
+  description           String?
+  website               String?
+  foundedYear           Int?
+  categories            String?
+  companyLogo           String?
+  licenseDoc            String?
+  uboName               String?
+  uboIdDoc              String?
+  step                  Int                   @default(1)
+  status                String                @default("pending")
+  creditAwarded         Int                   @default(0)
+  sbtMinted             Boolean               @default(false)
+  stripeApiKeyEncrypted String?
+  stripeKeyStatus       String?
+  stripeMrr             Float?
+  stripeLast30dRev      Float?
+  stripeMomGrowth       Float?
+  stripeLastSyncAt      DateTime?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  user                  User                  @relation(fields: [userId], references: [id])
+  applications          ProposedApplication[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model ProposedApplication {
+  id              String                 @id @default(cuid())
+  enterpriseId    String
+  userId          String
+  projectName     String
+  description     String?
+  category        String
+  monthlyRevenue  Float
+  requestedAmount Float
+  proposedApy     Float
+  durationDays    Int
+  collateralType  String?
+  collateralValue Float                  @default(0)
+  revenueSource   String?
+  revenueVerified Boolean                @default(false)
+  status          String                 @default("draft")
+  reviewNotes     String?
+  aiScore         Float?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  enterprise      EnterpriseVerification @relation(fields: [enterpriseId], references: [id])
+  user            User                   @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+}
+
+model CreditScoreHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  score     Int
+  tier      String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model CreditScoreEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  eventType String
+  delta     Int
+  reason    String
+  refId     String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([eventType])
+}
+
+model RepaymentSchedule {
+  id           String    @id @default(cuid())
+  projectId    String
+  periodNumber Int
+  dueDate      DateTime
+  principalDue Float
+  interestDue  Float
+  totalDue     Float
+  paidAmount   Float     @default(0)
+  status       String    @default("upcoming")
+  paidAt       DateTime?
+  createdAt    DateTime  @default(now())
+  project      Project   @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, periodNumber])
+  @@index([projectId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+model Collateral {
+  id                String             @id @default(cuid())
+  projectId         String
+  type              String
+  description       String
+  value             Float
+  status            String             @default("pledged")
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  project           Project            @relation(fields: [projectId], references: [id])
+  liquidationEvents LiquidationEvent[]
+
+  @@index([projectId])
+}
+
+model LiquidationEvent {
+  id              String      @id @default(cuid())
+  projectId       String
+  collateralId    String?
+  triggerReason   String
+  recoveredAmount Float       @default(0)
+  status          String      @default("initiated")
+  waterfallTier   String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  collateral      Collateral? @relation(fields: [collateralId], references: [id])
+  project         Project     @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model GovernanceProposal {
+  id           String           @id @default(cuid())
+  creatorId    String
+  title        String
+  description  String
+  category     String
+  status       String           @default("active")
+  forVotes     Float            @default(0)
+  againstVotes Float            @default(0)
+  quorum       Float            @default(0)
+  startsAt     DateTime         @default(now())
+  endsAt       DateTime
+  executedAt   DateTime?
+  createdAt    DateTime         @default(now())
+  creator      User             @relation(fields: [creatorId], references: [id])
+  votes        GovernanceVote[]
+
+  @@index([status])
+  @@index([creatorId])
+}
+
+model GovernanceVote {
+  id         String             @id @default(cuid())
+  proposalId String
+  userId     String
+  vote       String
+  weight     Float
+  createdAt  DateTime           @default(now())
+  proposal   GovernanceProposal @relation(fields: [proposalId], references: [id])
+  user       User               @relation(fields: [userId], references: [id])
+
+  @@unique([proposalId, userId])
+  @@index([proposalId])
+}
+
+model RedemptionQueue {
+  id           String    @id @default(cuid())
+  userId       String
+  amount       Float
+  fee          Float
+  netAmount    Float
+  status       String    @default("queued")
+  queuedAt     DateTime  @default(now())
+  processAfter DateTime
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+  @@index([processAfter])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  refType   String?
+  refId     String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
+
+model IdempotencyKey {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  userId    String
+  response  String
+  createdAt DateTime @default(now())
+
+  @@index([key])
+  @@index([createdAt])
+}
+
+model Friendship {
+  id          String   @id @default(cuid())
+  requesterId String
+  addresseeId String
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  addressee   User     @relation("FriendshipAddressee", fields: [addresseeId], references: [id])
+  requester   User     @relation("FriendshipRequester", fields: [requesterId], references: [id])
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId])
+}
+
+model Conversation {
+  id           String                    @id @default(cuid())
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+  participants ConversationParticipant[]
+  messages     DirectMessage[]
+}
+
+model ConversationParticipant {
+  id             String       @id @default(cuid())
+  conversationId String
+  userId         String
+  lastReadAt     DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id])
+
+  @@unique([conversationId, userId])
+}
+
+model DirectMessage {
+  id             String       @id @default(cuid())
+  conversationId String
+  senderId       String
+  content        String
+  attachmentUrl  String?
+  attachmentType String?
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         User         @relation(fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+}

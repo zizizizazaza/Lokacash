@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.lokacash.app",
+    "sha256_cert_fingerprints": [
+      "60:D5:4B:72:E9:DE:03:E9:3A:1F:C2:E0:3C:24:A0:6B:BE:E9:89:D5:45:26:24:08:15:00:03:00:1A:E2:DF:FA"
+    ]
+  }
+}]

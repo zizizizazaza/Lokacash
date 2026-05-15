@@ -1,20 +1,44 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# LOKA AIUSD Dashboard
 
-# Run and deploy your AI Studio app
+Treasury-backed stablecoin + RWA cash flow marketplace.
 
-This contains everything you need to run your app locally.
+## Project Structure
 
-View your app in AI Studio: https://ai.studio/apps/drive/1Fjh3E015w8TshxbT8GdeJj8Tg9tCY2jK
+```
+├── src/                  Frontend source (React 19 + TypeScript + Vite)
+│   ├── components/       UI components
+│   ├── services/         API client
+│   ├── App.tsx           Root component
+│   ├── index.tsx         Entry point
+│   ├── constants.tsx     Icons, colors
+│   └── types.ts          Shared types
+├── server/               Backend (Express 5 + Prisma + Socket.IO)
+│   ├── src/              Server source
+│   │   ├── routes/       API endpoints
+│   │   ├── services/     Business logic (AI, etc.)
+│   │   ├── middleware/   Auth, error handling
+│   │   └── socket/       WebSocket setup
+│   └── prisma/           Schema + seed
+├── docs/                 Product documentation
+│   ├── requirement.md    PRD v3.0 (authoritative)
+│   └── Loka_Credit_System.md
+├── index.html            Vite HTML entry
+├── vite.config.ts        Vite config (proxy → :3002)
+└── package.json          Frontend dependencies
+```
 
-## Run Locally
+## Quick Start
 
-**Prerequisites:**  Node.js
+```bash
+# Frontend
+npm install
+npm run dev              # Vite on :3000
 
+# Backend
+cd server
+npm install
+npm run db:push          # Create DB tables
+npm run db:seed          # Seed demo data
+npm run dev              # Express on :3002
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`

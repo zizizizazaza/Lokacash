@@ -1,5 +1,5 @@
 {
-  "name": "LOKA AIUSD Dashboard",
-  "description": "A high-performance dashboard for LOKA's treasury-backed stablecoin (AIUSD), featuring RWA collateral tracking, x402 payment protocol integration, and real-time Proof of Reserve (PoR) verification via Setu.",
+  "name": "Loka Cash",
+  "description": "AI-backed Treasury Stablecoin",
   "requestFramePermissions": []
 }

@@ -3,16 +3,39 @@
 
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LOKA | AIUSD Treasury Stablecoin</title>
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Loka Cash | AI-backed Treasury Stablecoin</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=DotGothic16&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,600&family=Geist:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&family=Major+Mono+Display&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,600&family=Outfit:wght@400;600;800;900&family=Playfair+Display:ital,wght@0,400;0,600;0,700;0,800;1,400;1,600&family=Space+Grotesk:wght@500;700&family=VT323&display=swap"
     rel="stylesheet">
   <style>
+    @font-face { font-family: 'Open Runde'; src: url('/fonts/open-runde/OpenRunde-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+    @font-face { font-family: 'Open Runde'; src: url('/fonts/open-runde/OpenRunde-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+    @font-face { font-family: 'Open Runde'; src: url('/fonts/open-runde/OpenRunde-Semibold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+    @font-face { font-family: 'Open Runde'; src: url('/fonts/open-runde/OpenRunde-Bold.woff2') format('woff2'); font-weight: 700; font-display: swap; }
+    .font-runde { font-family: 'Open Runde', 'Inter', sans-serif; }
+
+    /* Native markdown renderer (docs/report/research output) */
+    .markdown-content { font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    .markdown-content p, .markdown-content li { font-size: 16px !important; line-height: 1.65 !important; }
+    .markdown-content p { margin-bottom: 0.5rem !important; }
+    .markdown-content ul, .markdown-content ol { margin-top: 0.5rem !important; margin-bottom: 0.5rem !important; }
+    .markdown-content li { margin-bottom: 0.25rem !important; }
+    .markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4 {
+      font-family: 'Open Runde', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+      letter-spacing: -0.015em !important;
+    }
+    .markdown-content h1 { font-size: 24px !important; line-height: 1.25 !important; font-weight: 700 !important; margin-top: 1.5rem !important; margin-bottom: 0.5rem !important; }
+    .markdown-content h2 { font-size: 20px !important; line-height: 1.3 !important; font-weight: 700 !important; margin-top: 1.25rem !important; margin-bottom: 0.5rem !important; }
+    .markdown-content h3 { font-size: 17px !important; line-height: 1.35 !important; font-weight: 600 !important; margin-top: 1rem !important; margin-bottom: 0.375rem !important; }
+    .markdown-content blockquote, .markdown-content blockquote p { font-size: 15px !important; line-height: 1.6 !important; }
+    .markdown-content table { font-size: 14.5px !important; }
+
     body {
-      font-family: 'Inter', sans-serif;
-      background-color: #ffffff;
+      font-family: 'Open Runde', 'Geist', 'Inter', sans-serif;
+      background-color: #FFFFFF;
       color: #000000;
       -webkit-font-smoothing: antialiased;
     }
@@ -21,8 +44,16 @@
       font-family: 'Instrument Serif', serif;
     }
 
+    .font-outfit {
+      font-family: 'Outfit', sans-serif;
+    }
+
+    .font-space {
+      font-family: 'Space Grotesk', sans-serif;
+    }
+
     .glass {
-      background: #ffffff;
+      background: rgba(255, 255, 255, 0.8);
       border: 1px solid rgba(0, 0, 0, 0.08);
       box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05);
     }
@@ -57,23 +88,279 @@
       }
     }
 
-    /* Light mode scrollbar */
+    @keyframes slideUp {
+      from {
+        opacity: 0;
+        transform: translateY(30px) scale(0.97);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    /* Bottom-sheet slide-in for mobile modals */
+    @keyframes sheetUp {
+      from {
+        opacity: 0;
+        transform: translateY(100%);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes drawerSlideIn {
+      from {
+        transform: translateX(-100%);
+        opacity: 0.8;
+      }
+
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+
+    .line-clamp-2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    @keyframes shimmer {
+      0% {
+        background-position: 200% center;
+      }
+
+      100% {
+        background-position: -200% center;
+      }
+    }
+
+    @keyframes blobDance {
+      0% {
+        transform: translate(0, 0) scale(1);
+      }
+
+      33% {
+        transform: translate(30px, -50px) scale(1.1);
+      }
+
+      66% {
+        transform: translate(-20px, 20px) scale(0.9);
+      }
+
+      100% {
+        transform: translate(0, 0) scale(1);
+      }
+    }
+
+    @keyframes gridMove {
+      0% {
+        background-position: 0 0;
+      }
+
+      100% {
+        background-position: 40px 40px;
+      }
+    }
+
+    @keyframes hoverFloat {
+      0% {
+        transform: translateY(0px);
+      }
+
+      50% {
+        transform: translateY(-20px);
+      }
+
+      100% {
+        transform: translateY(0px);
+      }
+    }
+
+    @keyframes float1 {
+
+      0%,
+      100% {
+        transform: translate(0, 0);
+      }
+
+      33% {
+        transform: translate(15px, -30px);
+      }
+
+      66% {
+        transform: translate(-10px, 15px);
+      }
+    }
+
+    @keyframes float2 {
+
+      0%,
+      100% {
+        transform: translate(0, 0);
+      }
+
+      50% {
+        transform: translate(-20px, -25px);
+      }
+    }
+
+    @keyframes borderBeam {
+      0% {
+        offset-distance: 0%;
+      }
+
+      100% {
+        offset-distance: 100%;
+      }
+    }
+
+    @keyframes inputPulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 rgba(74, 222, 128, 0);
+      }
+
+      50% {
+        box-shadow: 0 0 20px 2px rgba(74, 222, 128, 0.15);
+      }
+    }
+
+    .premium-input-ring:focus-within {
+      animation: inputPulse 2s infinite ease-in-out;
+      border-color: rgba(74, 222, 128, 0.5);
+      transform: scale(1.005);
+      background: #ffffff;
+    }
+
+    @keyframes cursorBlink {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0;
+      }
+    }
+
+    @keyframes idleGlow {
+
+      0%,
+      100% {
+        box-shadow: 0 8px 40px -12px rgba(0, 0, 0, 0.06);
+        border-color: rgba(229, 231, 235, 0.8);
+      }
+
+      50% {
+        box-shadow: 0 8px 40px -8px rgba(74, 222, 128, 0.08), 0 0 0 1px rgba(74, 222, 128, 0.08);
+        border-color: rgba(74, 222, 128, 0.25);
+      }
+    }
+
+    .idle-input-glow {
+      animation: idleGlow 3s ease-in-out infinite;
+    }
+
+    /* Safe area for Capacitor / mobile notch & home indicator */
+    .safe-bottom {
+      padding-bottom: max(env(safe-area-inset-bottom, 0px), 16px);
+    }
+
+    .safe-top {
+      /* env(safe-area-inset-top) works on iOS but returns 0 on most Android WebViews.
+         We use max() so Android still gets a comfortable 12px minimum top padding. */
+      padding-top: max(env(safe-area-inset-top, 0px), 12px);
+    }
+
+    /* Hide scrollbar globally (keep scroll) */
     ::-webkit-scrollbar {
+      display: none;
+      width: 0 !important;
+      height: 0 !important;
+      background: transparent;
+    }
+
+    * {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    /* Force overlay scrolling so scrollbar doesn't take layout space on Android WebView */
+    .overflow-y-auto {
+      overflow-y: overlay;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* Utility to re-show scrollbar if needed */
+    .scrollbar-show::-webkit-scrollbar {
+      display: block;
       width: 8px;
     }
 
-    ::-webkit-scrollbar-track {
+    .scrollbar-show::-webkit-scrollbar-track {
       background: #f1f1f1;
     }
 
-    ::-webkit-scrollbar-thumb {
+    .scrollbar-show::-webkit-scrollbar-thumb {
       background: #ccc;
       border-radius: 4px;
     }
 
-    ::-webkit-scrollbar-thumb:hover {
+    .scrollbar-show::-webkit-scrollbar-thumb:hover {
       background: #999;
     }
+
+    /* Upgrade button shimmer */
+    @keyframes upgrade-shimmer-outline {
+      0% { border-color: #e5e7eb; }
+      50% { border-color: #d1d5db; }
+      100% { border-color: #e5e7eb; }
+    }
+    .upgrade-shimmer-outline {
+      animation: upgrade-shimmer-outline 3s ease-in-out infinite;
+    }
+    .upgrade-shimmer-outline > * {
+      background: linear-gradient(135deg, #f59e0b, #ef4444, #f59e0b);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: upgrade-text-shift 3s ease-in-out infinite;
+    }
+    .upgrade-shimmer-outline svg {
+      -webkit-text-fill-color: initial;
+      background: none;
+      color: #e67e22;
+    }
+    @keyframes upgrade-text-shift {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+
+    /* ═══ Max plan badge — subtle cream, static ═══ */
+    .max-badge {
+      color: #b45309;
+      background: linear-gradient(135deg, #fffbeb 0%, #ffffff 55%, #fff7ed 100%);
+      border-color: #f5d58a;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .max-badge:hover {
+      border-color: #e0a44a;
+      box-shadow: 0 1px 8px rgba(245, 158, 11, 0.18);
+    }
+    .max-badge-icon { color: #e67e22; }
+    .max-badge-shimmer { display: none; }
   </style>
   <script type="importmap">
 {
@@ -90,7 +377,7 @@
 
 <body>
   <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
+  <script type="module" src="/src/index.tsx"></script>
 </body>
 
 </html>

@@ -1,0 +1,41 @@
+{
+  "name": "lokacash",
+  "version": "1.1.0",
+  "description": "Investment intelligence for AI agents — multi-agent consensus, deep research, crypto market data, stock analysis.",
+  "category": "investment",
+  "model": "standard",
+  "keywords": [
+    "investment",
+    "crypto",
+    "cryptocurrency",
+    "stocks",
+    "equity",
+    "bitcoin",
+    "ethereum",
+    "trading",
+    "sentiment",
+    "consensus",
+    "research",
+    "derivatives",
+    "funding",
+    "open interest",
+    "fundamentals",
+    "technical analysis",
+    "events",
+    "trending"
+  ],
+  "entrypoint": "SKILL.md",
+  "baseUrl": "https://nftkashai.online/lokacash/api/skill/v1",
+  "endpoints": [
+    { "method": "POST", "path": "/research/consensus", "description": "Multi-agent roundtable on any investment question (crypto, stocks, macro)" },
+    { "method": "POST", "path": "/research/deep", "description": "Deep web + social research on any topic" },
+    { "method": "POST", "path": "/crypto/deep-research", "description": "Crypto-focused research with resolved token market + sentiment data" },
+    { "method": "GET", "path": "/crypto/sentiment/:symbol", "description": "Per-coin sentiment + catalyst news" },
+    { "method": "GET", "path": "/crypto/market/:symbol", "description": "Spot price + 24h stats + 7D history" },
+    { "method": "GET", "path": "/crypto/derivatives/:symbol", "description": "Perpetual funding + OI + orderbook" },
+    { "method": "GET", "path": "/crypto/events", "description": "Upcoming crypto catalyst events" },
+    { "method": "GET", "path": "/crypto/trending", "description": "Top-searched coins right now" },
+    { "method": "GET", "path": "/stock/analysis/:ticker", "description": "Full stock analysis: fundamentals, technicals, valuation" }
+  ],
+  "license": "MIT"
+}

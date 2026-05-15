@@ -1,0 +1,1495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Surf API Test Rig — lokacash</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  pre.json { font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace; font-size: 12px; }
+  .json-key { color: #0284c7; }
+  .json-str { color: #15803d; }
+  .json-num { color: #7c2d12; }
+  .json-bool { color: #9333ea; }
+  .json-null { color: #6b7280; }
+  .cat-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+  .cat-overlap { background: #fef3c7; color: #92400e; }
+  .cat-new     { background: #dcfce7; color: #166534; }
+  .cat-heavy   { background: #dbeafe; color: #1e40af; }
+  .cat-chat    { background: #fce7f3; color: #9d174d; }
+  .endpoint-btn[data-active="true"] { background: #0f172a; color: white; }
+  .endpoint-btn[data-active="true"] .text-gray-500 { color: #cbd5e1; }
+  .endpoint-btn[data-active="true"] .cat-badge { background: rgba(255,255,255,0.2); color: white; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<header class="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4">
+  <h1 class="text-lg font-bold text-gray-900">Surf API Test Rig</h1>
+  <span class="text-xs text-gray-400">→ asksurf.ai · 83 Data 端点 + 1 Chat · 全部按官方文档校对</span>
+  <div class="flex-1"></div>
+  <div id="health-pill" class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-600">health: loading…</div>
+  <button id="btn-credits" class="text-xs px-2 py-1 rounded-full bg-violet-50 text-violet-700 hover:bg-violet-100">
+    查询余额
+  </button>
+  <div class="text-xs text-gray-500">
+    本次累计 credits: <span id="credits-used" class="font-bold text-gray-900">0</span>
+  </div>
+</header>
+
+<main class="flex" style="height: calc(100vh - 57px)">
+  <!-- Sidebar: endpoint list -->
+  <aside class="w-[340px] bg-white border-r border-gray-200 overflow-y-auto">
+    <div class="p-3">
+      <input id="filter" type="text" placeholder="搜索端点(label / desc / path)..."
+        class="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-400" />
+    </div>
+    <div id="endpoint-list" class="pb-8"></div>
+  </aside>
+
+  <!-- Main panel -->
+  <section class="flex-1 overflow-y-auto p-6">
+    <div class="max-w-4xl mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-[12px] text-emerald-900 leading-relaxed">
+      <b>所有端点已按 docs/surf.md(对照官方 docs.asksurf.ai)逐条核对。</b>
+      Base URL = <code class="bg-emerald-100 px-1 rounded">api.asksurf.ai/gateway/v1</code>(代理自动补)。Chat API 用 <code class="bg-emerald-100 px-1 rounded">api.asksurf.ai/v1/chat/completions</code>(预置端点带 overrideBase)。
+      左侧 catalog 共 <b>83 Data + 1 Chat + 1 余额查询 = 85 个</b>,每个都填好默认参数,直接 Send。
+    </div>
+
+    <!-- Free-form custom endpoint — always visible at top -->
+    <div class="max-w-4xl mb-6 bg-white rounded-xl border-2 border-dashed border-gray-300 p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <h3 class="text-sm font-bold text-gray-900">🎯 Custom Endpoint(自由发请求)</h3>
+        <span class="text-[11px] text-gray-500">官方文档:<a href="https://docs.asksurf.ai" target="_blank" class="text-blue-600 underline">docs.asksurf.ai</a></span>
+      </div>
+      <div class="grid grid-cols-[80px_1fr_80px] gap-2 mb-2">
+        <select id="custom-method" class="px-2 py-1.5 text-xs border border-gray-200 rounded">
+          <option>GET</option>
+          <option>POST</option>
+        </select>
+        <input id="custom-path" type="text"
+          placeholder="/social/user/posts  (不用带 /gateway/v1 前缀,proxy 会补)"
+          class="px-3 py-1.5 text-xs font-mono border border-gray-200 rounded focus:outline-none focus:border-gray-400" />
+        <button id="custom-send" class="px-3 py-1.5 text-xs font-semibold rounded bg-gray-900 hover:bg-gray-800 text-white">
+          Send ▶
+        </button>
+      </div>
+      <input id="custom-qs" type="text"
+        placeholder="query: handle=vitalikbuterin&limit=10    (用 & 连接 k=v,无需 URL encode)"
+        class="w-full px-3 py-1.5 text-xs font-mono border border-gray-200 rounded focus:outline-none focus:border-gray-400" />
+      <textarea id="custom-body" rows="3"
+        placeholder='POST body JSON (仅 POST):  {"sql": "SELECT ..."}'
+        class="w-full mt-2 px-3 py-1.5 text-xs font-mono border border-gray-200 rounded hidden"></textarea>
+    </div>
+
+    <div id="empty-state" class="text-center text-gray-400 text-sm mt-20">
+      ← 从左侧选一个端点,或者用上面的 Custom Endpoint 自己敲
+    </div>
+
+    <div id="endpoint-panel" class="hidden max-w-4xl">
+      <div class="mb-4">
+        <div class="flex items-center gap-3 mb-1">
+          <h2 id="ep-label" class="text-xl font-bold text-gray-900"></h2>
+          <span id="ep-category" class="cat-badge"></span>
+          <span id="ep-credits" class="text-xs text-gray-500"></span>
+        </div>
+        <p id="ep-desc" class="text-sm text-gray-600"></p>
+        <code id="ep-path" class="text-xs text-gray-400 mt-1 block"></code>
+      </div>
+
+      <!-- Params form -->
+      <div class="bg-white rounded-xl border border-gray-200 p-4 mb-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-gray-700">参数</h3>
+          <div class="flex gap-2">
+            <button id="btn-reset" class="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 text-gray-700">
+              Reset
+            </button>
+            <button id="btn-send" class="text-xs px-4 py-1.5 rounded bg-gray-900 hover:bg-gray-800 text-white font-semibold">
+              Send ▶
+            </button>
+          </div>
+        </div>
+        <div id="param-form" class="space-y-2"></div>
+        <div id="body-editor-wrap" class="hidden mt-3">
+          <label class="text-xs font-medium text-gray-500">POST body (JSON)</label>
+          <textarea id="body-editor" rows="6"
+            class="w-full px-3 py-2 text-xs font-mono border border-gray-200 rounded"></textarea>
+        </div>
+      </div>
+
+      <!-- Response -->
+      <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-gray-700">响应</h3>
+          <div id="resp-meta" class="text-xs text-gray-500 flex gap-3"></div>
+        </div>
+        <div id="resp-status" class="mb-2"></div>
+        <pre id="resp-body" class="json bg-gray-50 border border-gray-200 rounded p-3 overflow-auto max-h-[500px] text-xs">Waiting for request…</pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ─── Endpoint catalog ─── */
+/* Each entry = one testable endpoint.
+   - group:        sidebar header (emoji + 中文)
+   - priority:     'overlap' | 'new' | 'heavy' | 'chat' — drives badge color
+   - label:        short id matching the docs path tail
+   - desc:         Chinese 1-line description
+   - method:       'GET' | 'POST'
+   - path:         proxy path; appended to /api/surf — proxy prefixes
+                   https://api.asksurf.ai/gateway/v1 (or overrideBase if set)
+   - params:       list of {name, default?, required?, note?}
+   - body:         POST body template (edited in body-editor)
+   - overrideBase: optional, e.g. 'https://api.asksurf.ai' for Chat API
+                   (path then becomes the full path under that base) */
+const ENDPOINTS = [
+  /* ────────────────────────────────────────────────────────────────
+   * 🔧 Sanity Check
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '🔧 Sanity Check', priority: 'overlap', label: 'me/credit-balance',
+    desc: '查询当前 API key 剩余 credits 余额。最便宜的一次请求,可用来确认 key 有效。',
+    method: 'GET', path: '/me/credit-balance',
+    params: [],
+    credits: 'Free / very light',
+  },
+  {
+    group: '🔧 Sanity Check', priority: 'overlap', label: 'exchange/price',
+    desc: 'BTC/USDT 现货行情,用来验证 base URL + key 工作正常。',
+    method: 'GET', path: '/exchange/price',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'exchange', default: 'binance' },
+      { name: 'type', default: 'spot' },
+    ],
+    credits: 'Light',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 🔥 Chat Completions API (OpenAI 兼容,不在 /gateway 下)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '🔥 Chat API(OpenAI 兼容)', priority: 'chat', label: 'chat/completions',
+    desc: '自然语言加密问答。支持 surf-1.5 / surf-1.5-instant / surf-1.5-thinking。Body 控制 messages / ability / citation。',
+    method: 'POST', path: '/v1/chat/completions',
+    overrideBase: 'https://api.asksurf.ai',
+    params: [],
+    body: {
+      model: 'surf-1.5',
+      messages: [
+        { role: 'system', content: 'You are Surf, a crypto analysis assistant.' },
+        { role: 'user', content: 'Summarize today BTC market conditions in 3 bullets.' },
+      ],
+      stream: false,
+      reasoning_effort: 'medium',
+      ability: ['evm_onchain', 'market_analysis'],
+      citation: ['source', 'chart'],
+    },
+    credits: 'Variable (按 token 计)',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 💱 Exchange — 交易所数据(7)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/markets',
+    desc: '获取交易所支持的所有交易对(spot/swap/future/option)。',
+    method: 'GET', path: '/exchange/markets',
+    params: [
+      { name: 'exchange', default: 'binance' },
+      { name: 'type', default: 'spot', note: 'spot / swap / future / option' },
+      { name: 'base', default: 'ETH' },
+      { name: 'quote', default: 'USDT' },
+      { name: 'limit', default: '20', note: '1-5000' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/price',
+    desc: '单个交易对的最新行情(买一卖一/涨跌幅/成交量)。',
+    method: 'GET', path: '/exchange/price',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'type', default: 'spot' },
+      { name: 'exchange', default: 'binance' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/depth',
+    desc: '订单簿买卖盘深度(实时)。',
+    method: 'GET', path: '/exchange/depth',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'type', default: 'spot' },
+      { name: 'limit', default: '20', note: '1-100' },
+      { name: 'exchange', default: 'binance' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/klines',
+    desc: 'K 线/OHLCV(技术分析用)。',
+    method: 'GET', path: '/exchange/klines',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'type', default: 'spot' },
+      { name: 'interval', default: '1h', note: '1m/5m/15m/1h/4h/1d/1w/1M' },
+      { name: 'limit', default: '24', note: '1-1000' },
+      { name: 'exchange', default: 'binance' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/perp',
+    desc: '永续合约综合快照(funding / oi / mark / index)。',
+    method: 'GET', path: '/exchange/perp',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'fields', default: 'funding,oi' },
+      { name: 'exchange', default: 'binance' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/funding-history',
+    desc: '永续合约历史资金费率。',
+    method: 'GET', path: '/exchange/funding-history',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'limit', default: '50', note: '1-500' },
+      { name: 'exchange', default: 'binance' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💱 Exchange · 交易所(7)', priority: 'heavy', label: 'exchange/long-short-ratio',
+    desc: '历史多空账户比率(情绪信号)。',
+    method: 'GET', path: '/exchange/long-short-ratio',
+    params: [
+      { name: 'pair', default: 'BTC/USDT', required: true },
+      { name: 'interval', default: '1h', note: '1h / 4h / 1d' },
+      { name: 'limit', default: '24', note: '1-500' },
+      { name: 'exchange', default: 'binance' },
+    ],
+    credits: 'Standard',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 📈 Market — 市场数据(11)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/price',
+    desc: '代币历史价格(单 symbol,日线粒度)。',
+    method: 'GET', path: '/market/price',
+    params: [
+      { name: 'symbol', default: 'BTC', required: true, note: '不支持多 symbol' },
+      { name: 'time_range', default: '30d', note: '1d/7d/14d/30d/90d/180d/365d/max' },
+      { name: 'currency', default: 'usd' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/ranking',
+    desc: '代币排行(按市值/成交量/涨跌幅,可分类筛选)。',
+    method: 'GET', path: '/market/ranking',
+    params: [
+      { name: 'sort_by', default: 'market_cap', note: 'market_cap / change_24h / volume_24h' },
+      { name: 'order', default: 'desc' },
+      { name: 'category', default: '', note: 'MEME/AI/L1/L2/DEFI/GAMING/STABLECOIN/RWA/DEPIN/SOL_ECO/BASE_ECO/LST 等' },
+      { name: 'limit', default: '20', note: '1-100' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/futures',
+    desc: '期货市场总览(按币聚合 OI / funding / 多空比)。',
+    method: 'GET', path: '/market/futures',
+    params: [
+      { name: 'sort_by', default: 'volume_24h', note: 'open_interest / funding_rate / volume_24h / long_short_ratio' },
+      { name: 'order', default: 'desc' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/options',
+    desc: '期权市场数据(OI / 成交量 / 最大痛点 / Put-Call 比)。',
+    method: 'GET', path: '/market/options',
+    params: [
+      { name: 'symbol', default: 'BTC', required: true, note: 'BTC/ETH/SOL/XRP/BNB/DOGE/ADA/AVAX' },
+      { name: 'sort_by', default: 'volume_24h' },
+      { name: 'order', default: 'desc' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/etf',
+    desc: 'BTC/ETH 现货 ETF 资金流入流出(机构信号)。',
+    method: 'GET', path: '/market/etf',
+    params: [
+      { name: 'symbol', default: 'BTC', required: true, note: 'BTC / ETH' },
+      { name: 'sort_by', default: 'timestamp' },
+      { name: 'order', default: 'desc' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/price-indicator',
+    desc: '技术指标(RSI/MACD/EMA/SMA/BB/Stoch/ADX/ATR/CCI/OBV/VWAP/DMI/Ichimoku/SuperTrend)。',
+    method: 'GET', path: '/market/price-indicator',
+    params: [
+      { name: 'indicator', default: 'rsi', required: true, note: 'rsi/macd/ema/sma/bbands/stoch/adx/atr/cci/obv/vwap/dmi/ichimoku/supertrend' },
+      { name: 'symbol', default: 'BTC', required: true },
+      { name: 'interval', default: '1d', note: '1m/5m/15m/30m/1h/2h/4h/12h/1d/1w' },
+      { name: 'exchange', default: 'binance' },
+      { name: 'options', default: '', note: '逗号分隔 key:value,如 period:14 / fast_period:12,slow_period:26,signal_period:9' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/onchain-indicator',
+    desc: 'BTC/ETH 链上指标(NUPL/SOPR/MVRV/Puell/NVT/exchange-flows)。',
+    method: 'GET', path: '/market/onchain-indicator',
+    params: [
+      { name: 'symbol', default: 'BTC', required: true, note: 'BTC / ETH' },
+      { name: 'metric', default: 'nupl', required: true, note: 'nupl/sopr/mvrv/puell-multiple/nvm/nvt/nvt-golden-cross/exchange-flows/inflow|outflow|netflow|reserve' },
+      { name: 'granularity', default: 'day' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/fear-greed',
+    desc: '加密恐慌贪婪指数历史值(0-100)。',
+    method: 'GET', path: '/market/fear-greed',
+    params: [],
+    credits: 'Light',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/liquidation/chart',
+    desc: '清算金额多空时间序列(用于热图/叠 K 线)。',
+    method: 'GET', path: '/market/liquidation/chart',
+    params: [
+      { name: 'symbol', default: 'BTC', required: true },
+      { name: 'interval', default: '1h', note: '1m/5m/15m/30m/1h/4h/12h/1d/1w' },
+      { name: 'exchange', default: 'Binance', note: '首字母大写!Binance/OKX/Bybit/Bitget/Hyperliquid/Gate/HTX...' },
+      { name: 'limit', default: '500', note: '1-4500' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/liquidation/exchange-list',
+    desc: '按交易所汇总的清算金额分布(多/空分开)。',
+    method: 'GET', path: '/market/liquidation/exchange-list',
+    params: [
+      { name: 'symbol', default: 'BTC' },
+      { name: 'time_range', default: '24h', note: '1h/4h/12h/24h' },
+      { name: 'sort_by', default: 'liquidation_usd' },
+      { name: 'order', default: 'desc' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📈 Market · 市场(11)', priority: 'new', label: 'market/liquidation/order',
+    desc: '近期大额爆仓单列表。',
+    method: 'GET', path: '/market/liquidation/order',
+    params: [
+      { name: 'exchange', default: 'Binance', note: '首字母大写' },
+      { name: 'symbol', default: 'BTC' },
+      { name: 'min_amount', default: '10000', note: 'USD 最小阈值' },
+      { name: 'side', default: '', note: 'long / short / 留空全要' },
+      { name: 'sort_by', default: 'timestamp' },
+      { name: 'order', default: 'desc' },
+    ],
+    credits: 'Standard',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 🪙 Token — 代币数据(4)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '🪙 Token · 代币(4)', priority: 'new', label: 'token/holders',
+    desc: '代币持有者地址分布(鲸鱼监控)。返回 address/balance/entity_name/entity_type/percentage。',
+    method: 'GET', path: '/token/holders',
+    params: [
+      { name: 'address', default: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', required: true, note: 'USDC on ETH' },
+      { name: 'chain', default: 'ethereum', required: true },
+      { name: 'limit', default: '20', note: '1-100' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '🪙 Token · 代币(4)', priority: 'new', label: 'token/transfers',
+    desc: '代币历史转账事件。',
+    method: 'GET', path: '/token/transfers',
+    params: [
+      { name: 'address', default: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', required: true },
+      { name: 'chain', default: 'ethereum', required: true, note: 'ethereum / base / solana / tron' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '🪙 Token · 代币(4)', priority: 'heavy', label: 'token/dex-trades',
+    desc: '代币 DEX 成交历史(谁在吸筹/砸盘)。',
+    method: 'GET', path: '/token/dex-trades',
+    params: [
+      { name: 'address', default: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', required: true, note: '仅 0x' },
+      { name: 'chain', default: 'ethereum', note: 'ethereum / base' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🪙 Token · 代币(4)', priority: 'new', label: 'token/tokenomics',
+    desc: '代币经济学 + 解锁时间表。',
+    method: 'GET', path: '/token/tokenomics',
+    params: [
+      { name: 'symbol', default: 'ARB', note: 'symbol 与 id 二选一' },
+      { name: 'id', default: '', note: 'Surf 项目 UUID(优先)' },
+    ],
+    credits: 'Light',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 📊 Project — 项目数据(3)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '📊 Project · 项目(3)', priority: 'new', label: 'project/detail',
+    desc: '项目聚合详情(可选 fields:overview / token_info / tokenomics / funding / team / contracts / social / tge_status)。',
+    method: 'GET', path: '/project/detail',
+    params: [
+      { name: 'q', default: 'ethereum', note: 'q 与 id 二选一' },
+      { name: 'id', default: '', note: 'Surf 项目 UUID(优先)' },
+      { name: 'fields', default: 'overview,token_info', note: '逗号分隔的子资源' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📊 Project · 项目(3)', priority: 'new', label: 'project/defi/metrics',
+    desc: 'DeFi 协议时间序列(volume/fee/revenue/tvl/users)。',
+    method: 'GET', path: '/project/defi/metrics',
+    params: [
+      { name: 'metric', default: 'tvl', required: true, note: 'volume/fee/fees/revenue/tvl/users' },
+      { name: 'q', default: 'uniswap', note: 'q 与 id 二选一' },
+      { name: 'chain', default: '' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📊 Project · 项目(3)', priority: 'new', label: 'project/defi/ranking',
+    desc: 'DeFi 协议排行(按指标排序)。',
+    method: 'GET', path: '/project/defi/ranking',
+    params: [
+      { name: 'metric', default: 'tvl', required: true, note: 'tvl/revenue/fees/volume/users' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 📱 Social — 社交数据(11)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '📱 Social · 社交(11)', priority: 'overlap', label: 'social/detail',
+    desc: '项目聚合社交分析:情绪 / 粉丝地理 / smart_followers。fields 可裁剪。',
+    method: 'GET', path: '/social/detail',
+    params: [
+      { name: 'q', default: 'uniswap', note: 'q 与 x_id 二选一' },
+      { name: 'x_id', default: '', note: 'X 数字 ID(优先)' },
+      { name: 'fields', default: 'sentiment,follower_geo,smart_followers' },
+      { name: 'time_range', default: '7d', note: '24h/48h/7d/30d/3m/6m/1y' },
+      { name: 'geo_limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/mindshare',
+    desc: '项目社交声量份额(mindshare)随时间变化。',
+    method: 'GET', path: '/social/mindshare',
+    params: [
+      { name: 'q', default: 'uniswap', required: true },
+      { name: 'interval', default: '1d', required: true, note: '5m / 1h / 1d / 7d' },
+      { name: 'from', default: '', note: 'YYYY-MM-DD 或 unix 秒' },
+      { name: 'to', default: '' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/ranking',
+    desc: '跨项目声量排行(可按分类/情绪过滤)。',
+    method: 'GET', path: '/social/ranking',
+    params: [
+      { name: 'tag', default: '', note: 'l1/l2/dex/derivatives/cex/gamefi/nft/oracle/prediction/rwa/yield/data/devtool/compliance/meme' },
+      { name: 'time_range', default: '7d', note: '24h/48h/7d/30d' },
+      { name: 'sentiment', default: '', note: 'positive / negative' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/smart-followers/history',
+    desc: 'smart 粉丝数随时间变化(项目级)。',
+    method: 'GET', path: '/social/smart-followers/history',
+    params: [
+      { name: 'q', default: 'uniswap', note: 'q 与 x_id 二选一,需是有 X 账号的项目' },
+      { name: 'x_id', default: '' },
+      { name: 'limit', default: '36', note: '通常 ~36 日点' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'overlap', label: 'social/tweets',
+    desc: '按 tweet ID 列表批量取推文(最多 100)。',
+    method: 'GET', path: '/social/tweets',
+    params: [
+      { name: 'ids', default: '', required: true, note: '逗号分隔的推文数字 ID' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'overlap', label: 'social/user',
+    desc: 'X 账号资料(对标我们的 Bird 账号画像)。',
+    method: 'GET', path: '/social/user',
+    params: [
+      { name: 'handle', default: 'vitalikbuterin', required: true, note: '不含 @' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'overlap', label: 'social/user/posts',
+    desc: '账号历史推文(cursor 翻页)。最接近 Bird.fetch 的等价物。',
+    method: 'GET', path: '/social/user/posts',
+    params: [
+      { name: 'handle', default: 'vitalikbuterin', required: true },
+      { name: 'limit', default: '20' },
+      { name: 'filter', default: 'all', note: 'all / original' },
+      { name: 'cursor', default: '' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/user/following',
+    desc: '账号关注列表(cursor 翻页)。',
+    method: 'GET', path: '/social/user/following',
+    params: [
+      { name: 'handle', default: 'vitalikbuterin', required: true },
+      { name: 'limit', default: '20' },
+      { name: 'cursor', default: '' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/user/followers',
+    desc: '账号粉丝列表(cursor 翻页)。',
+    method: 'GET', path: '/social/user/followers',
+    params: [
+      { name: 'handle', default: 'vitalikbuterin', required: true },
+      { name: 'limit', default: '20' },
+      { name: 'cursor', default: '' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/user/replies',
+    desc: '账号参与的回复帖。',
+    method: 'GET', path: '/social/user/replies',
+    params: [
+      { name: 'handle', default: 'vitalikbuterin', required: true },
+      { name: 'limit', default: '20' },
+      { name: 'cursor', default: '' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📱 Social · 社交(11)', priority: 'new', label: 'social/tweet/replies',
+    desc: '某条推文下的回复列表。',
+    method: 'GET', path: '/social/tweet/replies',
+    params: [
+      { name: 'tweet_id', default: '', required: true },
+      { name: 'limit', default: '20' },
+      { name: 'cursor', default: '' },
+    ],
+    credits: 'Light',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 📰 News — 新闻数据(2)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '📰 News · 新闻(2)', priority: 'new', label: 'news/feed',
+    desc: '加密行业新闻流(分页)。可按 source / project 过滤。',
+    method: 'GET', path: '/news/feed',
+    params: [
+      { name: 'source', default: '', note: 'coindesk/cointelegraph/theblock/decrypt/dlnews/blockbeats/...' },
+      { name: 'project', default: '', note: '逗号分隔项目名' },
+      { name: 'sort_by', default: 'recency', note: 'recency / trending' },
+      { name: 'limit', default: '20', note: '1-50' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '📰 News · 新闻(2)', priority: 'new', label: 'news/detail',
+    desc: '单篇新闻完整内容(需 ID,来自 feed/search)。',
+    method: 'GET', path: '/news/detail',
+    params: [
+      { name: 'id', default: '', required: true },
+    ],
+    credits: 'Light',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 💼 Wallet — 钱包数据(6)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '💼 Wallet · 钱包(6)', priority: 'new', label: 'wallet/detail',
+    desc: '钱包综合资料(链分布 / 余额 / 代币 / NFT / 标签 / 授权)。注意:detail 不支持 ENS。',
+    method: 'GET', path: '/wallet/detail',
+    params: [
+      { name: 'address', default: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', required: true, note: 'vitalik.eth 解析后' },
+      { name: 'chain', default: '', note: '不填 = 所有 EVM 链' },
+      { name: 'fields', default: 'balance,tokens,labels,nft', note: '可加 approvals' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💼 Wallet · 钱包(6)', priority: 'new', label: 'wallet/labels/batch',
+    desc: '批量查多个钱包的标签(最多 100 个,CEX/MM/whale/合约)。',
+    method: 'GET', path: '/wallet/labels/batch',
+    params: [
+      { name: 'addresses', default: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', required: true, note: '逗号分隔,最多 100' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '💼 Wallet · 钱包(6)', priority: 'new', label: 'wallet/transfers',
+    desc: '钱包代币转入转出(可按 flow / token 过滤)。',
+    method: 'GET', path: '/wallet/transfers',
+    params: [
+      { name: 'address', default: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', required: true, note: '不支持 ENS' },
+      { name: 'chain', default: 'ethereum', note: 'ethereum / base / solana' },
+      { name: 'flow', default: '', note: 'in / out / 留空全要' },
+      { name: 'token', default: '' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💼 Wallet · 钱包(6)', priority: 'new', label: 'wallet/history',
+    desc: '钱包完整交易历史(不限于代币转账)。',
+    method: 'GET', path: '/wallet/history',
+    params: [
+      { name: 'address', default: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', required: true, note: '仅 0x' },
+      { name: 'chain', default: 'ethereum' },
+      { name: 'limit', default: '20' },
+      { name: 'sort_by', default: 'timestamp' },
+      { name: 'order', default: 'desc' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💼 Wallet · 钱包(6)', priority: 'new', label: 'wallet/protocols',
+    desc: 'DeFi 持仓(supply / borrow / LP / reward)。Risk Analyst 关键数据源。',
+    method: 'GET', path: '/wallet/protocols',
+    params: [
+      { name: 'address', default: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', required: true, note: '仅 0x' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '💼 Wallet · 钱包(6)', priority: 'new', label: 'wallet/net-worth',
+    desc: '钱包资产总净值时间曲线。**支持 ENS!**',
+    method: 'GET', path: '/wallet/net-worth',
+    params: [
+      { name: 'address', default: 'vitalik.eth', required: true, note: '0x / base58 / ENS 都行' },
+    ],
+    credits: 'Standard',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * ⛓️ Onchain — 链上数据(7)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'new', label: 'onchain/tx',
+    desc: '按 tx hash 取交易详情(EVM 字段)。',
+    method: 'GET', path: '/onchain/tx',
+    params: [
+      { name: 'hash', default: '0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060', required: true },
+      { name: 'chain', default: 'ethereum', required: true },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'new', label: 'onchain/gas-price',
+    desc: '当前 gas 价格(wei + gwei)。',
+    method: 'GET', path: '/onchain/gas-price',
+    params: [
+      { name: 'chain', default: 'ethereum', required: true },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'heavy', label: 'onchain/query',
+    desc: '结构化 JSON 查 Surf 数据仓库(无需手写 SQL)。',
+    method: 'POST', path: '/onchain/query',
+    params: [],
+    body: {
+      source: 'agent.ethereum_dex_trades',
+      fields: ['block_date', 'project', 'amount_usd'],
+      filters: [{ field: 'block_date', op: '>=', value: '2024-03-01' }],
+      sort: [{ field: 'amount_usd', order: 'desc' }],
+      limit: 20,
+    },
+    credits: 'Heavy',
+  },
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'heavy', label: 'onchain/sql',
+    desc: '直接 SQL 查 58 张链上分析表(只读)。最长 120s / 16GB / 1M 行。',
+    method: 'POST', path: '/onchain/sql',
+    params: [],
+    body: {
+      sql: "SELECT project, sum(amount_usd) AS volume FROM agent.ethereum_dex_trades WHERE block_date = today() - 1 GROUP BY project ORDER BY volume DESC LIMIT 10",
+      max_rows: 1000,
+    },
+    credits: 'Heavy',
+  },
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'new', label: 'onchain/schema',
+    desc: '列出数据仓库全部可访问表 + 列(写 SQL 时先来这里查)。',
+    method: 'GET', path: '/onchain/schema',
+    params: [],
+    credits: 'Light',
+  },
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'heavy', label: 'onchain/bridge/ranking',
+    desc: '跨链桥协议排行(交易额/笔数,Across/Stargate 等)。',
+    method: 'GET', path: '/onchain/bridge/ranking',
+    params: [
+      { name: 'time_range', default: '30d', note: '7d/30d/90d/180d/1y/all' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '⛓️ Onchain · 链上(7)', priority: 'heavy', label: 'onchain/yield/ranking',
+    desc: 'DeFi 收益池排行(APY 模式自动过滤 TVL < $100k)。',
+    method: 'GET', path: '/onchain/yield/ranking',
+    params: [
+      { name: 'project', default: '', note: 'lido/aave/uniswap 等' },
+      { name: 'sort_by', default: 'apy', note: 'apy / tvl_usd' },
+      { name: 'order', default: 'desc' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 🌐 Web — 网页抓取(1)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '🌐 Web · 网页(1)', priority: 'new', label: 'web/fetch',
+    desc: '抓取任意公开 URL,返回干净 Markdown。可 CSS 选择器精控。',
+    method: 'GET', path: '/web/fetch',
+    params: [
+      { name: 'url', default: 'https://ethereum.org', required: true },
+      { name: 'target_selector', default: '', note: 'CSS 选择器:只提取这部分' },
+      { name: 'remove_selector', default: '', note: '要删除的选择器,如 nav,footer,.ads' },
+      { name: 'timeout', default: '30000', note: '1000-60000 ms' },
+    ],
+    credits: 'Standard',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 🔎 Search — 搜索(11)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/project',
+    desc: '按关键词搜项目。',
+    method: 'GET', path: '/search/project',
+    params: [
+      { name: 'q', default: 'bitcoin', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'overlap', label: 'search/social/posts',
+    desc: 'X 推文搜索(支持 from:handle 语法)。对标 Bird.search。',
+    method: 'GET', path: '/search/social/posts',
+    params: [
+      { name: 'q', default: 'ethereum', required: true, note: '可用 from:cz_binance' },
+      { name: 'limit', default: '20' },
+      { name: 'cursor', default: '' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/social/people',
+    desc: 'X 账号搜索(模糊 / @handle 精确)。',
+    method: 'GET', path: '/search/social/people',
+    params: [
+      { name: 'q', default: '@VitalikButerin', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/news',
+    desc: '新闻关键词搜索。',
+    method: 'GET', path: '/search/news',
+    params: [
+      { name: 'q', default: 'bitcoin ETF', required: true },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/wallet',
+    desc: '钱包搜索(支持实体名 / ENS / 地址片段)。',
+    method: 'GET', path: '/search/wallet',
+    params: [
+      { name: 'q', default: 'vitalik.eth', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'overlap', label: 'search/web',
+    desc: '互联网通用搜索(可以跟 web/fetch 搭配)。对标 Exa.search。',
+    method: 'GET', path: '/search/web',
+    params: [
+      { name: 'q', default: 'bitcoin price prediction 2026', required: true },
+      { name: 'limit', default: '20' },
+      { name: 'site', default: '', note: '逗号分隔域名,如 coindesk.com,cointelegraph.com' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/fund',
+    desc: '搜加密 VC 基金。',
+    method: 'GET', path: '/search/fund',
+    params: [
+      { name: 'q', default: 'a16z', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/polymarket',
+    desc: 'Polymarket 事件 / 市场搜索(关键字 / 标签 / 分类 / 状态)。',
+    method: 'GET', path: '/search/polymarket',
+    params: [
+      { name: 'q', default: 'bitcoin' },
+      { name: 'tags', default: '', note: 'Crypto / Politics / Sports / Science / Pop Culture' },
+      { name: 'category', default: '', note: 'crypto/culture/economics/financials/politics/stem/sports/unknown' },
+      { name: 'status', default: 'active' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/kalshi',
+    desc: 'Kalshi 事件 / 市场搜索。',
+    method: 'GET', path: '/search/kalshi',
+    params: [
+      { name: 'q', default: 'bitcoin' },
+      { name: 'category', default: '' },
+      { name: 'status', default: 'active' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Standard',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/events',
+    desc: '项目事件搜索(launch / upgrade / partnership / news / airdrop / listing / twitter)。',
+    method: 'GET', path: '/search/events',
+    params: [
+      { name: 'q', default: 'ethereum', note: 'q 与 id 二选一' },
+      { name: 'id', default: '' },
+      { name: 'type', default: '', note: 'launch/upgrade/partnership/news/airdrop/listing/twitter' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '🔎 Search · 搜索(11)', priority: 'new', label: 'search/airdrop',
+    desc: '空投搜索(进行中 / 可领 / 已完成)。',
+    method: 'GET', path: '/search/airdrop',
+    params: [
+      { name: 'q', default: '', note: '不填 = 全部' },
+      { name: 'phase', default: 'active,claimable', note: 'active / claimable / completed' },
+      { name: 'reward_type', default: '', note: 'airdrop/points/whitelist/nft/role/ambassador' },
+      { name: 'task_type', default: '', note: 'social/testnet/mainnet/...等' },
+      { name: 'has_open', default: '' },
+      { name: 'sort_by', default: 'last_status_update' },
+      { name: 'order', default: 'desc' },
+      { name: 'limit', default: '20' },
+      { name: 'include_tasks', default: '' },
+    ],
+    credits: 'Light',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 💰 Fund — 基金数据(3)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '💰 Fund · VC(3)', priority: 'new', label: 'fund/detail',
+    desc: 'VC 基金完整画像(团队 / 链接 / 研报 / X / 管辖地)。',
+    method: 'GET', path: '/fund/detail',
+    params: [
+      { name: 'q', default: 'a16z', note: 'q 与 id 二选一' },
+      { name: 'id', default: '', note: 'Surf 基金 UUID(优先)' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '💰 Fund · VC(3)', priority: 'new', label: 'fund/portfolio',
+    desc: '基金投资组合(可按 lead / 时间窗口 / 排序过滤)。',
+    method: 'GET', path: '/fund/portfolio',
+    params: [
+      { name: 'q', default: 'a16z' },
+      { name: 'id', default: '' },
+      { name: 'is_lead', default: '', note: 'true / false / 留空全要' },
+      { name: 'sort_by', default: 'invested_at', note: 'invested_at / recent_raise / total_raise' },
+      { name: 'order', default: 'desc' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+  {
+    group: '💰 Fund · VC(3)', priority: 'new', label: 'fund/ranking',
+    desc: '基金排行(tier 越小越好 / portfolio_count)。',
+    method: 'GET', path: '/fund/ranking',
+    params: [
+      { name: 'metric', default: 'tier', required: true, note: 'tier / portfolio_count' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Light',
+  },
+
+  /* ────────────────────────────────────────────────────────────────
+   * 🎲 Prediction Market — 预测市场(17)
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'prediction/category-metrics',
+    desc: '跨平台(Polymarket + Kalshi)按分类聚合的成交量 / OI 时间序列。',
+    method: 'GET', path: '/prediction-market/category-metrics',
+    params: [
+      { name: 'source', default: '', note: 'Kalshi / Polymarket(首字母大写)' },
+      { name: 'category', default: '', note: 'crypto/culture/economics/financials/politics/stem/sports' },
+      { name: 'time_range', default: '30d' },
+      { name: 'limit', default: '200' },
+    ],
+    credits: 'Heavy',
+  },
+  /* — Polymarket(10)— */
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/markets',
+    desc: 'Polymarket 单市场详情(按 slug)。发现用 /search/polymarket。',
+    method: 'GET', path: '/prediction-market/polymarket/markets',
+    params: [
+      { name: 'market_slug', default: 'will-bitcoin-hit-100k-2025', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/events',
+    desc: 'Polymarket 单事件详情(按 slug,含其下所有市场)。',
+    method: 'GET', path: '/prediction-market/polymarket/events',
+    params: [
+      { name: 'event_slug', default: 'bitcoin-100k-2025', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/trades',
+    desc: 'Polymarket 成交历史(按 condition_id / 钱包 / outcome 过滤)。',
+    method: 'GET', path: '/prediction-market/polymarket/trades',
+    params: [
+      { name: 'condition_id', default: '' },
+      { name: 'address', default: '' },
+      { name: 'outcome_label', default: '', note: 'Yes / No' },
+      { name: 'min_amount', default: '' },
+      { name: 'sort_by', default: 'timestamp' },
+      { name: 'limit', default: '50', note: '1-500' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/positions',
+    desc: 'Polymarket proxy 钱包当前持仓(平均价 / 盈亏 / 可赎回)。',
+    method: 'GET', path: '/prediction-market/polymarket/positions',
+    params: [
+      { name: 'address', default: '', required: true, note: 'Polymarket proxy 钱包,不是主钱包' },
+      { name: 'limit', default: '50' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/prices',
+    desc: 'Polymarket 价格(隐含概率)时间序列,按 side_a/side_b 分。',
+    method: 'GET', path: '/prediction-market/polymarket/prices',
+    params: [
+      { name: 'condition_id', default: '', required: true },
+      { name: 'time_range', default: '30d', note: '7d/30d/90d/180d/1y' },
+      { name: 'interval', default: '1d', note: '1h / 1d / latest' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/volumes',
+    desc: 'Polymarket 单市场成交量时间序列。',
+    method: 'GET', path: '/prediction-market/polymarket/volumes',
+    params: [
+      { name: 'condition_id', default: '', required: true },
+      { name: 'time_range', default: '30d' },
+      { name: 'interval', default: '1d' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/open-interest',
+    desc: 'Polymarket 未平仓量(OI)历史。',
+    method: 'GET', path: '/prediction-market/polymarket/open-interest',
+    params: [
+      { name: 'condition_id', default: '', required: true },
+      { name: 'time_range', default: '30d' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/ranking',
+    desc: 'Polymarket 市场排行(按成交量 / OI,可按状态 / 分类 / 结束窗口过滤)。',
+    method: 'GET', path: '/prediction-market/polymarket/ranking',
+    params: [
+      { name: 'sort_by', default: 'notional_volume_usd', note: 'notional_volume_usd / open_interest' },
+      { name: 'order', default: 'desc' },
+      { name: 'status', default: 'active' },
+      { name: 'category', default: '' },
+      { name: 'end_before', default: '', note: '24h/3d/7d/14d/30d' },
+      { name: 'limit', default: '20', note: '1-50' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'polymarket/activity',
+    desc: 'Polymarket proxy 钱包历史活动流(买卖 / 兑付)。',
+    method: 'GET', path: '/prediction-market/polymarket/activity',
+    params: [
+      { name: 'address', default: '', required: true },
+      { name: 'limit', default: '50' },
+    ],
+    credits: 'Heavy',
+  },
+  /* — Kalshi(7)— */
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/markets',
+    desc: 'Kalshi 单市场详情(按 ticker)。',
+    method: 'GET', path: '/prediction-market/kalshi/markets',
+    params: [
+      { name: 'market_ticker', default: 'KXBTCD-26MAR31-B99999', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/events',
+    desc: 'Kalshi 单事件详情(按 ticker,含其下所有市场)。',
+    method: 'GET', path: '/prediction-market/kalshi/events',
+    params: [
+      { name: 'event_ticker', default: 'KXBTCD-26MAR31', required: true },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/trades',
+    desc: 'Kalshi 单市场成交历史。',
+    method: 'GET', path: '/prediction-market/kalshi/trades',
+    params: [
+      { name: 'ticker', default: 'KXBTCD-26MAR31-B99999', required: true },
+      { name: 'taker_side', default: '', note: 'yes / no' },
+      { name: 'min_amount', default: '' },
+      { name: 'sort_by', default: 'timestamp' },
+      { name: 'limit', default: '50' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/prices',
+    desc: 'Kalshi 价格 OHLC 时间序列(side_a / side_b)。',
+    method: 'GET', path: '/prediction-market/kalshi/prices',
+    params: [
+      { name: 'ticker', default: 'KXBTCD-26MAR31-B99999', required: true },
+      { name: 'time_range', default: '30d' },
+      { name: 'interval', default: '1d', note: '1h / 1d / latest' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/volumes',
+    desc: 'Kalshi 成交量历史。',
+    method: 'GET', path: '/prediction-market/kalshi/volumes',
+    params: [
+      { name: 'ticker', default: 'KXBTCD-26MAR31-B99999', required: true },
+      { name: 'time_range', default: '30d' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/open-interest',
+    desc: 'Kalshi 未平仓量(OI)历史。',
+    method: 'GET', path: '/prediction-market/kalshi/open-interest',
+    params: [
+      { name: 'ticker', default: 'KXBTCD-26MAR31-B99999', required: true },
+      { name: 'time_range', default: '30d' },
+    ],
+    credits: 'Heavy',
+  },
+  {
+    group: '🎲 Prediction · 预测市场(17)', priority: 'heavy', label: 'kalshi/ranking',
+    desc: 'Kalshi 市场排行(成交量 / OI)。',
+    method: 'GET', path: '/prediction-market/kalshi/ranking',
+    params: [
+      { name: 'sort_by', default: 'notional_volume_usd', note: 'notional_volume_usd / open_interest' },
+      { name: 'order', default: 'desc' },
+      { name: 'status', default: 'active' },
+      { name: 'category', default: '' },
+      { name: 'limit', default: '20' },
+    ],
+    credits: 'Heavy',
+  },
+];
+
+/* ─── Render sidebar ─── */
+const listEl = document.getElementById('endpoint-list');
+const filterEl = document.getElementById('filter');
+let activeIdx = -1;
+
+function renderList(filter = '') {
+  const f = filter.toLowerCase();
+  const groups = new Map();
+  ENDPOINTS.forEach((ep, idx) => {
+    const haystack = (ep.label + ' ' + ep.desc + ' ' + ep.path).toLowerCase();
+    if (f && !haystack.includes(f)) return;
+    if (!groups.has(ep.group)) groups.set(ep.group, []);
+    groups.get(ep.group).push({ ep, idx });
+  });
+
+  listEl.innerHTML = '';
+  for (const [groupName, items] of groups) {
+    const h = document.createElement('div');
+    h.className = 'px-4 pt-4 pb-1 text-[10.5px] font-bold uppercase text-gray-500 tracking-widest';
+    h.textContent = groupName;
+    listEl.appendChild(h);
+    for (const { ep, idx } of items) {
+      const btn = document.createElement('button');
+      btn.className = 'endpoint-btn w-full text-left px-4 py-2 hover:bg-gray-100 transition flex items-start gap-2';
+      btn.dataset.active = idx === activeIdx ? 'true' : 'false';
+      const badgeCls =
+        ep.priority === 'overlap' ? 'cat-overlap' :
+        ep.priority === 'heavy'   ? 'cat-heavy'   :
+        ep.priority === 'chat'    ? 'cat-chat'    :
+        'cat-new';
+      const badgeText =
+        ep.priority === 'overlap' ? 'OVERLAP' :
+        ep.priority === 'heavy'   ? 'HEAVY'   :
+        ep.priority === 'chat'    ? 'CHAT'    :
+        'NEW';
+      btn.innerHTML = `
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold truncate">${ep.label}</span>
+            <span class="cat-badge ${badgeCls}">${badgeText}</span>
+          </div>
+          <div class="text-[11px] text-gray-500 line-clamp-1 mt-0.5">${ep.desc}</div>
+        </div>`;
+      btn.onclick = () => selectEndpoint(idx);
+      listEl.appendChild(btn);
+    }
+  }
+}
+filterEl.addEventListener('input', (e) => renderList(e.target.value));
+
+/* ─── Panel renderer ─── */
+const panel = document.getElementById('endpoint-panel');
+const emptyState = document.getElementById('empty-state');
+const paramForm = document.getElementById('param-form');
+const bodyWrap = document.getElementById('body-editor-wrap');
+const bodyEditor = document.getElementById('body-editor');
+let currentEp = null;
+
+function selectEndpoint(idx) {
+  activeIdx = idx;
+  currentEp = ENDPOINTS[idx];
+  panel.classList.remove('hidden');
+  emptyState.classList.add('hidden');
+
+  document.getElementById('ep-label').textContent = currentEp.label;
+  document.getElementById('ep-desc').textContent = currentEp.desc;
+  const fullBase = currentEp.overrideBase
+    ? currentEp.overrideBase
+    : 'https://api.asksurf.ai/gateway/v1';
+  document.getElementById('ep-path').textContent = `${currentEp.method} ${fullBase}${currentEp.path}`;
+  document.getElementById('ep-credits').textContent = currentEp.credits || '';
+
+  const catEl = document.getElementById('ep-category');
+  catEl.textContent = (currentEp.priority || 'new').toUpperCase();
+  catEl.className = 'cat-badge ' +
+    (currentEp.priority === 'overlap' ? 'cat-overlap'
+    : currentEp.priority === 'heavy'  ? 'cat-heavy'
+    : currentEp.priority === 'chat'   ? 'cat-chat'
+    : 'cat-new');
+
+  renderParamForm();
+  renderList(filterEl.value);
+  // clear old response
+  document.getElementById('resp-body').textContent = 'Waiting for request…';
+  document.getElementById('resp-status').innerHTML = '';
+  document.getElementById('resp-meta').innerHTML = '';
+}
+
+function renderParamForm() {
+  paramForm.innerHTML = '';
+  for (const p of currentEp.params) {
+    const row = document.createElement('div');
+    row.className = 'grid grid-cols-[120px_1fr] gap-3 items-center';
+    row.innerHTML = `
+      <label class="text-xs font-medium text-gray-600">
+        ${p.name}${p.required ? ' <span class="text-red-500">*</span>' : ''}
+      </label>
+      <div>
+        <input data-param="${p.name}" type="text" value="${(p.default ?? '').toString().replace(/"/g, '&quot;')}"
+          class="w-full px-3 py-1.5 text-xs border border-gray-200 rounded focus:outline-none focus:border-gray-400" />
+        ${p.note ? `<div class="text-[10.5px] text-gray-400 mt-0.5">${p.note}</div>` : ''}
+      </div>`;
+    paramForm.appendChild(row);
+  }
+
+  if (currentEp.method === 'POST' && currentEp.body) {
+    bodyWrap.classList.remove('hidden');
+    bodyEditor.value = JSON.stringify(currentEp.body, null, 2);
+  } else if (currentEp.method === 'POST') {
+    bodyWrap.classList.remove('hidden');
+    bodyEditor.value = '{}';
+  } else {
+    bodyWrap.classList.add('hidden');
+    bodyEditor.value = '';
+  }
+}
+
+document.getElementById('btn-reset').onclick = () => renderParamForm();
+document.getElementById('btn-send').onclick = send;
+
+/* ─── Custom endpoint (free-form) ─── */
+document.getElementById('custom-method').addEventListener('change', (e) => {
+  document.getElementById('custom-body').classList.toggle('hidden', e.target.value !== 'POST');
+});
+document.getElementById('custom-send').onclick = async () => {
+  const method = document.getElementById('custom-method').value;
+  let path = document.getElementById('custom-path').value.trim();
+  const qs = document.getElementById('custom-qs').value.trim();
+  const bodyText = document.getElementById('custom-body').value.trim();
+  if (!path) { alert('填个 path,比如 /social/user/posts'); return; }
+  if (!path.startsWith('/')) path = '/' + path;
+  // Strip any /gateway/v1 prefix if user pasted the full docs path
+  path = path.replace(/^\/gateway\/v1/, '');
+
+  // Synthesize a pseudo-endpoint so `send()` works as-is
+  currentEp = {
+    label: 'Custom: ' + method + ' ' + path,
+    desc: 'Free-form request',
+    method, path,
+    params: [],
+    credits: '?',
+    priority: 'new',
+  };
+  panel.classList.remove('hidden');
+  emptyState.classList.add('hidden');
+  document.getElementById('ep-label').textContent = currentEp.label;
+  document.getElementById('ep-desc').textContent = currentEp.desc;
+  document.getElementById('ep-path').textContent = method + ' ' + path;
+  document.getElementById('ep-credits').textContent = '?';
+  const cat = document.getElementById('ep-category');
+  cat.textContent = 'CUSTOM';
+  cat.className = 'cat-badge cat-new';
+  // Populate param form from qs
+  paramForm.innerHTML = '';
+  if (qs) {
+    for (const pair of qs.split('&')) {
+      const [k, v = ''] = pair.split('=');
+      if (!k) continue;
+      const row = document.createElement('div');
+      row.className = 'grid grid-cols-[120px_1fr] gap-3 items-center';
+      row.innerHTML = `<label class="text-xs font-medium text-gray-600">${k}</label>
+        <input data-param="${k}" type="text" value="${decodeURIComponent(v)}"
+          class="w-full px-3 py-1.5 text-xs border border-gray-200 rounded" />`;
+      paramForm.appendChild(row);
+    }
+  }
+  if (method === 'POST') {
+    bodyWrap.classList.remove('hidden');
+    bodyEditor.value = bodyText || '{}';
+  } else {
+    bodyWrap.classList.add('hidden');
+  }
+  send();
+};
+
+async function send() {
+  if (!currentEp) return;
+  const btn = document.getElementById('btn-send');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+
+  const params = {};
+  paramForm.querySelectorAll('input[data-param]').forEach((el) => {
+    const v = el.value.trim();
+    if (v) params[el.dataset.param] = v;
+  });
+
+  const qs = new URLSearchParams(params).toString();
+  // When the preset specifies overrideBase, tell the proxy via a header so
+  // it forwards to that base instead of the default one from env.
+  const url = '/api/surf' + currentEp.path + (qs ? '?' + qs : '');
+  const extraHeaders = currentEp.overrideBase ? { 'X-Surf-Base-Override': currentEp.overrideBase } : {};
+
+  let body;
+  if (currentEp.method === 'POST') {
+    try {
+      body = JSON.parse(bodyEditor.value || '{}');
+    } catch {
+      alert('Body JSON 格式错误');
+      btn.disabled = false;
+      btn.textContent = originalText;
+      return;
+    }
+  }
+
+  const respStatus = document.getElementById('resp-status');
+  const respMeta = document.getElementById('resp-meta');
+  const respBody = document.getElementById('resp-body');
+  respStatus.innerHTML = '<span class="text-xs text-gray-500">…</span>';
+  respBody.textContent = '';
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(url, {
+      method: currentEp.method,
+      headers: { 'Content-Type': 'application/json', ...extraHeaders },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const elapsedMs = Math.round(performance.now() - t0);
+    const surfStatus = resp.headers.get('X-Surf-Status') || resp.status;
+    const proxyLatency = resp.headers.get('X-Proxy-Latency-Ms') || '?';
+    const statusColor =
+      resp.ok ? 'text-emerald-700 bg-emerald-50' :
+      resp.status === 401 || resp.status === 403 ? 'text-amber-700 bg-amber-50' :
+      'text-red-700 bg-red-50';
+    const targetUrl = resp.headers.get('X-Surf-URL') || '(unknown)';
+    respStatus.innerHTML = `
+      <span class="inline-block text-[11px] font-bold px-2 py-1 rounded ${statusColor}">
+        ${resp.status} ${resp.statusText}
+      </span>
+      <span class="text-[11px] text-gray-500 ml-2">Surf status: ${surfStatus}</span>
+      <div class="text-[10.5px] text-gray-400 font-mono mt-1 break-all">→ ${targetUrl.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`;
+
+    const contentType = resp.headers.get('content-type') || '';
+    let data;
+    if (contentType.includes('json')) {
+      data = await resp.json();
+    } else {
+      data = await resp.text();
+    }
+
+    const credits = data?.meta?.credits_used;
+    const cached = data?.meta?.cached;
+    respMeta.innerHTML = [
+      `<span>Roundtrip <b>${elapsedMs}ms</b></span>`,
+      `<span>Proxy→Surf <b>${proxyLatency}ms</b></span>`,
+      credits != null ? `<span>Credits <b class="text-red-600">${credits}</b></span>` : '',
+      cached != null ? `<span>Cached <b>${cached ? '✓' : '✗'}</b></span>` : '',
+    ].filter(Boolean).join('');
+
+    respBody.innerHTML = renderJson(data);
+
+    if (typeof credits === 'number' && !cached) {
+      const ce = document.getElementById('credits-used');
+      ce.textContent = String((parseInt(ce.textContent, 10) || 0) + credits);
+    }
+  } catch (err) {
+    respStatus.innerHTML = `<span class="inline-block text-[11px] font-bold px-2 py-1 rounded text-red-700 bg-red-50">NETWORK ERROR</span>`;
+    respBody.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+/* ─── JSON pretty-printer with syntax highlight ─── */
+function renderJson(obj) {
+  const json = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  return json
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/("(?:\\.|[^"\\])*")\s*:/g, '<span class="json-key">$1</span>:')
+    .replace(/:\s*("(?:\\.|[^"\\])*")/g, ': <span class="json-str">$1</span>')
+    .replace(/:\s*(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/gi, ': <span class="json-num">$1</span>')
+    .replace(/:\s*(true|false)/g, ': <span class="json-bool">$1</span>')
+    .replace(/:\s*(null)/g, ': <span class="json-null">$1</span>');
+}
+
+/* ─── Health check on load ─── */
+fetch('/api/health').then(r => r.json()).then(h => {
+  const el = document.getElementById('health-pill');
+  if (h.hasKey) {
+    el.textContent = `key: ${h.keyPreview}`;
+    el.className = 'text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700';
+  } else {
+    el.textContent = 'key MISSING — 请检查 .env';
+    el.className = 'text-xs px-2 py-1 rounded-full bg-red-50 text-red-700';
+  }
+}).catch(() => {
+  document.getElementById('health-pill').textContent = 'proxy 不可达';
+});
+
+/* ─── Quick credit-balance shortcut ─── */
+document.getElementById('btn-credits').onclick = async () => {
+  const el = document.getElementById('btn-credits');
+  const original = el.textContent;
+  el.textContent = '查询中…';
+  el.disabled = true;
+  try {
+    const r = await fetch('/api/surf/me/credit-balance');
+    const data = await r.json();
+    const balance = data?.data?.balance ?? data?.balance ?? data?.data?.credits ?? null;
+    if (balance != null) {
+      el.textContent = `余额: ${balance} cr`;
+      el.className = 'text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700';
+    } else {
+      el.textContent = `查询失败(${r.status})`;
+      el.className = 'text-xs px-2 py-1 rounded-full bg-red-50 text-red-700';
+      console.warn('credit-balance response:', data);
+    }
+  } catch (err) {
+    el.textContent = '网络错误';
+    el.className = 'text-xs px-2 py-1 rounded-full bg-red-50 text-red-700';
+    console.error(err);
+  } finally {
+    setTimeout(() => {
+      el.disabled = false;
+      el.textContent = original;
+      el.className = 'text-xs px-2 py-1 rounded-full bg-violet-50 text-violet-700 hover:bg-violet-100';
+    }, 5000);
+  }
+};
+
+renderList();
+</script>
+</body>
+</html>
