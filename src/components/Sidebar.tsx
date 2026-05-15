@@ -137,6 +137,22 @@ export const Sidebar: React.FC<{
   const renameInputRef = useRef<HTMLInputElement>(null);
   const [moreMenuId, setMoreMenuId] = useState<string | null>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchPanelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (searchPanelRef.current?.contains(target)) return;
+      if (target.closest('[data-search-toggle]')) return;
+      if (searchQuery.trim()) return;
+      setSearchOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [searchOpen, searchQuery]);
 
   useEffect(() => {
     const handleStart = (e: any) => {
@@ -310,9 +326,12 @@ export const Sidebar: React.FC<{
         {/* Drawer Header */}
         <div className="flex items-center justify-between px-5 pt-5 pb-3" style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 20px)' }}>
           <span className="text-[15px] font-bold tracking-tight text-gray-900 select-none">Loka</span>
-          <button onClick={onCloseMobileDrawer} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:bg-gray-100 transition-all">
-            <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button data-search-toggle onClick={() => setSearchOpen(v => !v)} className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${searchOpen ? 'bg-gray-100 text-gray-700' : 'text-gray-400 hover:bg-gray-100'}`} title="Search"><I.Search /></button>
+            <button onClick={onCloseMobileDrawer} className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:bg-gray-100 transition-all">
+              <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+            </button>
+          </div>
         </div>
 
         {/* New chat */}
@@ -338,7 +357,11 @@ export const Sidebar: React.FC<{
         <div className="px-3 flex-1 overflow-y-auto min-h-0">
           {(isLoggedIn || !privyReady) && (
             <>
-              {isLoggedIn && <ChatSearchPanel onCloseMobileDrawer={onCloseMobileDrawer} />}
+              {isLoggedIn && searchOpen && (
+                <div ref={searchPanelRef}>
+                  <ChatSearchPanel onCloseMobileDrawer={onCloseMobileDrawer} autoFocus onQueryChange={setSearchQuery} />
+                </div>
+              )}
               <p className="px-2 pb-2 text-[11px] font-medium text-gray-400 select-none">Recents</p>
               {!privyReady || (isLoadingConversations && conversations.length === 0) ? (
                 <RecentsSkeleton />
@@ -425,7 +448,7 @@ export const Sidebar: React.FC<{
         <button onClick={() => { sessionStorage.removeItem('loka_superagent_sid'); sessionStorage.removeItem('loka_sa_analysis_pending'); go(Page.SUPER_AGENT); }} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-1`}>
           <I.Plus /><span className="rail-tip">New chat</span>
         </button>
-        <button className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-3`}>
+        <button data-search-toggle onClick={() => { setSearchOpen(true); onToggle(); }} className={`rail-btn w-9 h-9 rounded-lg flex items-center justify-center ${textSecondary} ${hoverBg} transition-all mb-3`}>
           <I.Search /><span className="rail-tip">Search</span>
         </button>
         <div className="flex flex-col gap-0.5 flex-1 w-full px-2">
@@ -458,7 +481,7 @@ export const Sidebar: React.FC<{
         <div className="flex items-center justify-between pl-5 pr-2 pt-5 pb-3">
           <span className={`text-[15px] font-bold tracking-tight ${textPrimary} cursor-default select-none`}>Loka</span>
           <div className="flex items-center gap-0.5">
-            <button className={`w-7 h-7 rounded-md flex items-center justify-center ${textMuted} ${hoverBg} transition-all`} title="Search"><I.Search /></button>
+            <button data-search-toggle onClick={() => setSearchOpen(v => !v)} className={`w-7 h-7 rounded-md flex items-center justify-center transition-all ${searchOpen ? activeBg : `${textMuted} ${hoverBg}`}`} title="Search"><I.Search /></button>
             <button onClick={onToggle} className={`w-7 h-7 rounded-md flex items-center justify-center ${textMuted} ${hoverBg} transition-all`} title="Collapse sidebar"><I.Panel /></button>
           </div>
         </div>
@@ -486,7 +509,11 @@ export const Sidebar: React.FC<{
         <div className="px-3 flex-1 overflow-y-auto min-h-0">
           {(isLoggedIn || !privyReady) && (
             <>
-              {isLoggedIn && <ChatSearchPanel isDark={isDark} onCloseMobileDrawer={onCloseMobileDrawer} />}
+              {isLoggedIn && searchOpen && (
+                <div ref={searchPanelRef}>
+                  <ChatSearchPanel isDark={isDark} onCloseMobileDrawer={onCloseMobileDrawer} autoFocus onQueryChange={setSearchQuery} />
+                </div>
+              )}
               <p className={`px-2 pb-2 text-[11px] font-medium ${textMuted} select-none`}>Recents</p>
               {!privyReady || (isLoadingConversations && conversations.length === 0) ? (
                 <RecentsSkeleton isDark={isDark} />

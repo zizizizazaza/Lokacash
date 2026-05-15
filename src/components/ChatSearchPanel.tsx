@@ -22,9 +22,11 @@ interface SearchHit {
   };
 }
 
-export const ChatSearchPanel: React.FC<{ isDark?: boolean; onCloseMobileDrawer?: () => void }> = ({
+export const ChatSearchPanel: React.FC<{ isDark?: boolean; onCloseMobileDrawer?: () => void; autoFocus?: boolean; onQueryChange?: (q: string) => void }> = ({
   isDark,
   onCloseMobileDrawer,
+  autoFocus,
+  onQueryChange,
 }) => {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
@@ -33,6 +35,14 @@ export const ChatSearchPanel: React.FC<{ isDark?: boolean; onCloseMobileDrawer?:
   const [showResults, setShowResults] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (autoFocus) inputRef.current?.focus();
+  }, [autoFocus]);
+
+  useEffect(() => {
+    onQueryChange?.(query);
+  }, [query, onQueryChange]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
