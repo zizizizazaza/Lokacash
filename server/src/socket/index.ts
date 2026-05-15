@@ -4276,34 +4276,12 @@ Reserve granular data for follow-up — don't over-deliver on first pass.
         console.log('[agent:chat:html] Skipped (SUPERAGENT_DISABLE_HTML_REPORT is set)');
       }
       const parallelHtmlStartedAt = Date.now();
-      let parallelHtmlPromise: Promise<string> | null = null;
-      // Enable parallel HTML for ALL eligible queries including roundtable.
-      // For roundtable, the parallel HTML uses contextString (raw research data)
-      // and gets overlapped with consensus + deep-research second pass. If the
-      // result quality is unacceptable, the sequential fallback using
-      // finalDbContent still runs after synthesis completes.
-      if (htmlReportEnabled && contextString.length > 200) {
-        const mode = isDeepResearch ? 'roundtable' : 'standard';
-        // ── Roundtable mode: skip parallel HTML ──
-        // Parallel HTML would launch BEFORE consensus runs, so its input
-        // (contextString) never contains the agent debate journey. The
-        // resulting HTML silently drops the Expert Debate Panel — section 7
-        // of the prompt is "MANDATORY when expert debate data is in the
-        // input", and that data only exists after consensus completes.
-        // For roundtable we wait for finalDbContent (which has the debate
-        // already woven in) and run HTML sequentially. Costs ~30s wall but
-        // doubles the HTML report's information density.
-        if (mode === 'roundtable') {
-          console.log('[agent:chat:html] Roundtable mode → skipping PARALLEL HTML, sequential pass will use finalDbContent (with debate journey)');
-        } else {
-          console.log(`[agent:chat:html] Starting REAL-PARALLEL HTML generation (queryType=${queryType}, mode=${mode}), contextString length=${contextString.length}`);
-          emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
-          parallelHtmlPromise = runHtmlGeneration(contextString).catch(err => {
-            console.error('[agent:chat:html] ❌ Parallel HTML generation failed:', err.message);
-            return '';
-          });
-        }
-      }
+      const parallelHtmlPromise: Promise<string> | null = null;
+      // HTML report is now a deterministic markdown→HTML transform of the Doc
+      // (see services/reportHtml.service.ts). It runs in milliseconds after
+      // synthesis, so there's no longer a reason to start a parallel pass on
+      // the raw `contextString` — doing so would also feed the wrong input
+      // (research data, not the final Doc) into the transform.
 
       const buildLocalSynthesisFallback = (cause: string): string => {
         const isZh = /[\u4e00-\u9fff]/.test(userContent || '');
@@ -5099,22 +5077,10 @@ ${synFullContent || contextString}${langFooter}`;
               : `Raw Research Data:\n${contextString}${expertDebateContext}`;
             const deepResearchFinalPrompt = buildDeepResearchPrompt(deepResearchInput);
 
-            // ── Roundtable: kick off HTML generation NOW (in parallel with
-            // deep research second pass). Earlier we deliberately skipped
-            // `parallelHtmlPromise` for roundtable because contextString
-            // alone misses the debate journey. But we now have the full
-            // expertDebateContext baked into deepResearchInput, so HTML can
-            // run with the same rich material AND overlap the ~90s deep
-            // research streaming. Net wall-time saving: ~60-80s vs the pure
-            // sequential HTML fallback. Awaited at the existing emit site.
-            if (htmlReportEnabled && isDeepResearch && !parallelHtmlPromise) {
-              console.log('[agent:chat:html] Roundtable: starting HTML in parallel with deep research, input length=', deepResearchInput.length);
-              emitToUser(userId, 'agent:chat:html_generating', { sessionId, msgIdx: -1 });
-              parallelHtmlPromise = runHtmlGeneration(deepResearchInput).catch(err => {
-                console.error('[agent:chat:html] ❌ Roundtable parallel HTML failed:', err.message);
-                return '';
-              });
-            }
+            // HTML report no longer runs in parallel — the markdown→HTML
+            // transform is a millisecond-scale post-synthesis step, and using
+            // pre-synthesis inputs here would feed raw research / drafts
+            // (not the Doc) into the transform and break content parity.
 
             console.log('[agent:chat] Starting Deep Research second pass, prompt length:', deepResearchFinalPrompt.length);
             const deepSecondPassStartedAt = Date.now();

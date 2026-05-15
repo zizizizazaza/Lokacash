@@ -23,6 +23,7 @@ import { LokaAIService } from './ai.service.js';
 
 const aiService = new LokaAIService();
 
+
 // ============================================================================
 // CSS blocks (extracted from prior per-prompt <style>; kept verbatim)
 // ============================================================================
@@ -545,6 +546,119 @@ F. Tags + Questions to watch (always last — must be the final block before </d
 }
 
 // ============================================================================
+// Adaptive "Doc → Visual Web" prompt
+// ============================================================================
+//
+// The earlier prompts (`buildGuruCouncilHtmlPrompt`, `buildWebReportPrompt`,
+// `buildCryptoHtmlPrompt`) hard-coded section lists, mandatory cards, and
+// fixed grids. Every Web report ended up with the same template feel and the
+// model had to flatten rich Doc content into rigid slots.
+//
+// This single adaptive prompt treats the already-finished Doc as the source
+// of truth and asks the model to DISTILL it into a denser visual layout:
+// KPI cards for the numbers the Doc mentions, expert cards for the debate it
+// contains, comparison tables for the dimensions it actually compares — and
+// nothing more. No "MANDATORY: include section X" rules.
+
+function buildAdaptiveWebReportPrompt(userContent: string, doc: string, queryType: string): string {
+  const isZh = /[\u4e00-\u9fff]/.test(userContent || doc);
+  const isGuru = queryType === 'guru-council';
+  const langLock = isZh
+    ? `\n=== LANGUAGE LOCK ===\nThe Doc is in Chinese (or the user asked in Chinese). The entire HTML must be 100% 简体中文 — titles, labels, paragraphs, table cells, pill text. Tickers (BTC, NVDA), exchange names (OKX), and standard abbreviations (PE, FDV, OI) stay in their original form.\n`
+    : `\n=== LANGUAGE LOCK ===\nThe Doc is in English. The entire HTML must be 100% English. Do not emit Chinese characters.\n`;
+
+  return `You are a senior research analyst AND a visual report designer. You are given a finished long-form research report ("Doc") in markdown. Your job is to render a SHORT, VISUAL Web version that distills the Doc — NOT a verbatim rewrite.
+${langLock}
+=== USER QUESTION ===
+${userContent}
+
+=== DOC (source of truth — every claim, number, and conclusion must come from here) ===
+${doc}
+
+=== GOAL ===
+Produce a CONDENSED, VISUALLY DENSE HTML report. Compared to the Doc, the Web version should be:
+- ~30-50% shorter in raw word count
+- Information-dense in KPI cards, comparison tables, and small charts instead of paragraphs
+- Skimmable: a senior PM should grasp the verdict + key drivers in <30 seconds
+
+=== HARD RULES ===
+1. NO FABRICATION. Every number, name, quote, and conclusion must come from the Doc. If a number isn't in the Doc, do not invent it. If a section has no data in the Doc, skip it — do NOT pad with generic content.
+2. NO FIXED TEMPLATE. Choose 3-6 sections based on what the Doc actually contains. Never include a section just because the spec mentions it.
+3. The Doc's overall verdict (bullish/bearish/neutral, buy/hold/sell, etc.) MUST be surfaced prominently in the header.
+4. Section titles must be SPECIFIC ("Q4 margin compression risk", "Funding rate vs spot divergence"), not generic ("Analysis", "Conclusion", "Overview").
+5. Output a single <div class="report-wrap">...</div>. NO <style> tags (host injects CSS). NO <script> tags. NO markdown fences. NO preamble or trailing text.
+6. Do NOT include a "Follow-up Questions" / "Related Questions" / "持续跟踪" section — the frontend renders that separately.
+
+=== AVAILABLE BUILDING BLOCKS (use only what fits) ===
+
+Header (always include):
+  <div class="report-header">
+    <div class="report-label">${isGuru ? (isZh ? '圆桌报告' : 'ROUNDTABLE REPORT') : (isZh ? '研究报告' : 'RESEARCH REPORT')}</div>
+    <div class="report-title">… concise title derived from Doc …</div>
+    <span class="report-verdict"><span class="verdict-dot" style="background:#10b981|#f43f5e|#f59e0b"></span> Bullish | Bearish | Neutral · Confidence: High|Med|Low</span>
+  </div>
+
+KPI grid (use when Doc has 3-8 hard numbers — price targets, PE, FDV, growth, drawdowns):
+  <div class="kpi-grid">
+    <div class="kpi-card"><div class="kpi-label">…</div><div class="kpi-value kpi-up|kpi-dn">…</div><div class="kpi-sub">…</div></div>
+    …
+  </div>
+
+Thesis callout (one-paragraph distillation of the Doc's central argument):
+  <div class="thesis-box">…</div>
+
+Catalyst list (numbered items, when Doc enumerates 2-5 drivers/catalysts):
+  <div class="catalyst-list"><div class="catalyst-item"><div class="catalyst-num">1</div><div>…</div></div>…</div>
+
+Bar chart row (use for any side-by-side comparable values — segment revenue, exposure %, holdings split):
+  <div class="bar-mini"><span class="bar-mini-label">Name</span><div class="bar-mini-track"><div class="bar-mini-fill" style="width:N%;background:#378ADD"></div></div><span class="bar-mini-val">N%</span></div>
+
+Scenario grid (use when Doc presents Bull / Base / Bear or similar 3-4 outcomes):
+  <div class="scenario-grid">
+    <div class="scenario-card sc-bull"><div class="sc-label">Bull</div><div class="sc-price">…</div><div class="sc-prob">…</div><div class="sc-tag">…</div></div>
+    …
+  </div>
+
+Risk table (use when Doc lists 3+ risks with likelihood/impact):
+  <table class="risk-table"><tr><th>Risk</th><th>Prob</th><th>Impact</th></tr>
+    <tr><td>…</td><td><span class="pill pill-low|pill-mid|pill-high">…</span></td><td>…</td></tr>
+  </table>
+
+${isGuru ? `Guru cards (use when Doc contains a multi-expert debate):
+  <div class="guru-grid">
+    <div class="guru-card">
+      <div class="guru-head">
+        <div class="guru-avatar"><img src="/avatars/GURU_KEY.jpg" alt="Name"></div>
+        <div><div class="guru-name">Name</div><div class="guru-framework">One-line framework</div></div>
+      </div>
+      <span class="guru-signal signal-bullish|signal-bearish|signal-neutral">Bullish|Bearish|Neutral</span>
+      <div class="guru-analysis">2-3 sentence distillation — NOT the Doc's full paragraph</div>
+      <div class="guru-footer"><div class="conf-bar"><div class="conf-fill" style="width:N%"></div></div></div>
+    </div>
+    …
+  </div>
+  GURU_KEY ∈ {warren_buffett, ben_graham, peter_lynch, charlie_munger, aswath_damodaran, cathie_wood, michael_burry, stanley_druckenmiller, nassim_taleb, bill_ackman, phil_fisher, mohnish_pabrai, rakesh_jhunjhunwala}; if the expert isn't in the list, use initials inside <div class="guru-avatar">XX</div>.
+
+Comparison matrix (use when Doc compares experts/scenarios across 2+ dimensions):
+  <table class="cmp-table"><tr><th>Expert</th><th>Signal</th><th>Key argument</th></tr>…</table>
+
+Debate row (use for 1-3 sharp disagreements pulled from the Doc):
+  <div class="debate-item"><div class="debate-label">Issue:</div><div class="debate-text">…</div></div>
+
+Consensus panel (always include if Doc has a verdict):
+  <div class="consensus-panel"><div class="consensus-verdict">Verdict</div><div class="consensus-detail">…</div></div>
+` : ''}
+
+Standard HTML inside .report-wrap (<p>, <ul>, <strong>, <table>, etc.) is already styled. Use sparingly — only when no card/grid block fits.
+
+=== CRITICAL OUTPUT FORMAT ===
+- Output ONLY the HTML starting with \`<div class="report-wrap">\` and ending with \`</div>\`.
+- No code fences, no commentary, no <style> or <script>.
+- Plain HTML — no markdown (\`**bold**\`, \`*italic*\`, \`-- dashes\`). Use <strong>, <em>, <ul><li>.
+`;
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -555,83 +669,60 @@ export interface RunHtmlGenerationParams {
 }
 
 /**
- * Call the LLM to generate the report HTML, then wrap it with the
- * server-side CSS so the output is still a fully self-contained document.
+ * Generate the Web HTML report by asking the model to DISTILL the finished
+ * Doc into a denser, more visual layout. The Doc is the source of truth —
+ * the model cannot invent numbers or pad sections the Doc doesn't support.
+ * CSS is injected server-side; the model only emits structural HTML using
+ * known class names.
  */
 export async function runHtmlGeneration(params: RunHtmlGenerationParams): Promise<string> {
   const { userContent, contextString, queryType } = params;
+  const doc = (contextString || '').trim();
+  if (!doc) return '';
+
   const isGuru = queryType === 'guru-council';
-  const isCrypto = queryType === 'crypto-analysis';
-
-  const htmlPrompt = isGuru
-    ? buildGuruCouncilHtmlPrompt(userContent, contextString)
-    : isCrypto
-      ? buildCryptoHtmlPrompt(userContent, contextString)
-      : buildWebReportPrompt(userContent, contextString);
   const cssBlock = isGuru ? GURU_COUNCIL_CSS : WEB_REPORT_CSS;
+  const htmlPrompt = buildAdaptiveWebReportPrompt(userContent, doc, queryType);
 
-  // 16384 token output budget. The earlier 8192 cap was the main reason the
-  // HTML report looked "thin" next to the markdown Docs view: every Bloomberg-
-  // style template section (KPI / scenario / risks / experts / monitoring /
-  // strategy) ate into a small shared budget, so the LLM compressed expert
-  // debate down to 2 cards, monitoring down to 3 metrics, etc. Doubling the
-  // ceiling lets the structured panels carry roughly the same content density
-  // as the markdown report. DeepSeek-v3 / Claude both support 16K+ outputs.
   const htmlStream = await aiService.chatStream(
     [{ role: 'user', content: htmlPrompt }],
     'superagent',
     undefined,
-    16384,
+    12288,
   );
 
-  // Parse OpenAI-style SSE stream → plain text
-  const htmlReader = htmlStream.getReader();
-  const htmlDecoder = new TextDecoder();
+  const reader = htmlStream.getReader();
+  const decoder = new TextDecoder();
   let htmlContent = '';
-  let htmlBuf = '';
-  let chunkCount = 0;
+  let buf = '';
+  const parseSseLine = (line: string) => {
+    const t = line.trim();
+    if (!t.startsWith('data: ')) return;
+    const d = t.slice(6).trim();
+    if (d === '[DONE]') return;
+    try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
+  };
   while (true) {
-    const { done, value } = await htmlReader.read();
+    const { done, value } = await reader.read();
     if (done) {
-      if (htmlBuf.trim()) {
-        for (const line of htmlBuf.split('\n')) {
-          const t = line.trim();
-          if (t.startsWith('data: ')) {
-            const d = t.slice(6).trim();
-            if (d === '[DONE]') continue;
-            try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
-          }
-        }
-      }
+      if (buf.trim()) buf.split('\n').forEach(parseSseLine);
       break;
     }
-    chunkCount++;
-    htmlBuf += htmlDecoder.decode(value, { stream: true });
-    const htmlLines = htmlBuf.split('\n');
-    htmlBuf = htmlLines.pop() || '';
-    for (const line of htmlLines) {
-      const t = line.trim();
-      if (t.startsWith('data: ')) {
-        const d = t.slice(6).trim();
-        if (d === '[DONE]') continue;
-        try { htmlContent += JSON.parse(d).choices?.[0]?.delta?.content || ''; } catch {}
-      }
-    }
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() || '';
+    lines.forEach(parseSseLine);
   }
-  console.log(`[agent:chat:html] Stream finished. chunks=${chunkCount}, htmlLength=${htmlContent.length}`);
 
-  // Sanitize: strip markdown fences, strip any leaked <style> (we inject our own below),
-  // then slice to the first <div>.
   let s = htmlContent.trim();
   s = s.replace(/^```html\s*/i, '').replace(/^```\s*/, '');
   s = s.replace(/\n?```\s*$/, '');
   s = s.replace(/<style[^>]*>[\s\S]*?<\/style>\s*/gi, '');
+  s = s.replace(/<script[^>]*>[\s\S]*?<\/script>\s*/gi, '');
   s = s.trim();
   const divIdx = s.indexOf('<div');
   if (divIdx > 0) s = s.slice(divIdx);
+  if (s.length < 100) return '';
 
-  // Prepend the server-side CSS block so the output is still a fully
-  // self-contained HTML snippet (the frontend code that renders it is
-  // unchanged — it still receives <style>...</style><div class="report-wrap">...).
   return `<style>${cssBlock}</style>${s}`;
 }
